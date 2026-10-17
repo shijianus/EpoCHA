@@ -63,6 +63,9 @@ func (s PoolSpec) validate() error {
 
 // PoolQuestion 是一条题池记录。PayloadJSON 是可以下发的公开题面；
 // Verifier 是服务端私有判分数据，**永不下发、永不写日志**（红线 5）。
+// Asset 是图片二进制（阶段 3B）：它是**题面的另一种表现形式**，不是秘密——
+// 图里可见的字符本来就要给答题者看，所以不把它当作密码学保密对象；
+// 但它仍然不含答案的可机读形式（没有文字层），且绝不进日志。
 type PoolQuestion struct {
 	ID          string
 	GeneratorID string
@@ -71,6 +74,8 @@ type PoolQuestion struct {
 	Status      string
 	PayloadJSON string
 	Verifier    []byte
+	Asset       []byte
+	AssetMime   string
 	CreatedAt   time.Time
 	ExpiresAt   time.Time
 	ChallengeID string
@@ -78,35 +83,104 @@ type PoolQuestion struct {
 	TerminalAt  time.Time
 }
 
-// InsertQuestion 写入一条 ready 题。上限判定与插入在同一条语句里完成（与 challenge 存量上限同一手法）：
-// 池的行数上限是资源边界，不能靠"先查再插"的近似。
-func (d *DB) InsertQuestion(ctx context.Context, q *PoolQuestion, maxRows int) error {
+// PoolLimits 是题目写入的两条资源边界，**判定与插入在同一条 SQL 内完成**（与 Caps 同一手法）：
+//   - MaxRows：池的行数上限。行数控制"claim 扫描成本"和条目数。
+//   - MaxImageBytes：全局图片字节预算。字节数控制磁盘与内存占用。
+//
+// 两个量正交：一道图片题占的字节可以是算术题的上百倍，只看行数就等于没看。
+// MaxImageBytes=0 的含义是"不允许写入任何图片资产"（不是"不限"）——
+// 把 0 解释成无限会让一个漏填的字段变成无上限的磁盘增长器。
+type PoolLimits struct {
+	MaxRows       int
+	MaxImageBytes int64
+}
+
+// InsertQuestion 写入一条 ready 题。上限判定与插入在同一条语句里完成：池的行数与图片字节
+// 上限都是资源边界，不能靠"先查再插"的近似（那既不是原子的，也不是可信的）。
+func (d *DB) InsertQuestion(ctx context.Context, q *PoolQuestion, limits PoolLimits) error {
 	if q == nil || q.ID == "" || q.PayloadJSON == "" || len(q.Verifier) == 0 || q.ExpiresAt.IsZero() {
 		return fmt.Errorf("%w: 题目字段不完整", ErrBadConfig)
 	}
 	if err := q.Spec().validate(); err != nil {
 		return err
 	}
-	if maxRows <= 0 {
-		return fmt.Errorf("%w: 题池上限必须为正", ErrBadConfig)
+	if limits.MaxRows < 1 || limits.MaxImageBytes < 0 {
+		return fmt.Errorf("%w: 题池上限不合法（rows=%d image_bytes=%d）", ErrBadConfig, limits.MaxRows, limits.MaxImageBytes)
 	}
 	if len(q.PayloadJSON) > MaxPayloadBytes || len(q.Verifier) > MaxVerifierBytes {
 		return fmt.Errorf("%w: 题目过大（payload=%d verifier=%d 字节，上限 %d/%d）",
 			ErrBadConfig, len(q.PayloadJSON), len(q.Verifier), MaxPayloadBytes, MaxVerifierBytes)
 	}
+	// 资产与 MIME 必须成对出现：只有一半的记录无法安全下发（有 MIME 没图 ⇒ 空 data:；
+	// 有图没 MIME ⇒ 浏览器侧只能猜类型）。库里的 CHECK 各自限了取值，配对这条只能在 Go 侧判。
+	if len(q.Asset) > 0 {
+		if q.AssetMime != MimeTypePNG {
+			return fmt.Errorf("%w: 图片资产的 MIME 不合法 %q", ErrBadConfig, q.AssetMime)
+		}
+		if len(q.Asset) > MaxAssetBytes {
+			return fmt.Errorf("%w: 图片资产 %d 字节，上限 %d", ErrBadConfig, len(q.Asset), MaxAssetBytes)
+		}
+	} else if q.AssetMime != "" {
+		return fmt.Errorf("%w: 无图片资产却带 MIME %q", ErrBadConfig, q.AssetMime)
+	}
 	res, err := d.h.ExecContext(ctx, `
-INSERT INTO pool(id, generator_id, version, difficulty, status, payload_json, verifier_blob, created_at, expires_at)
-SELECT ?,?,?,?,?,?,?,?,?
-WHERE (SELECT count(*) FROM pool) < ?`,
+INSERT INTO pool(id, generator_id, version, difficulty, status, payload_json, verifier_blob,
+                 created_at, expires_at, asset_blob, asset_mime)
+SELECT ?,?,?,?,?,?,?,?,?,?,?
+WHERE (SELECT count(*) FROM pool) < ?
+  AND (? IS NULL OR (SELECT coalesce(sum(length(asset_blob)),0) FROM pool) + length(?) <= ?)`,
 		q.ID, q.GeneratorID, q.Version, q.Difficulty, PoolReady, q.PayloadJSON, q.Verifier,
-		formatTime(q.CreatedAt.UTC()), formatTime(q.ExpiresAt.UTC()), maxRows)
+		formatTime(q.CreatedAt.UTC()), formatTime(q.ExpiresAt.UTC()), q.Asset, q.AssetMime,
+		limits.MaxRows, q.Asset, q.Asset, limits.MaxImageBytes)
 	if err != nil {
 		return fmt.Errorf("store: 写入题目: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n != 1 {
-		return ErrPoolFull
+		return d.classifyInsertRejection(ctx, q, limits)
 	}
 	return nil
+}
+
+// classifyInsertRejection 把"没插进去"折叠成两个可诊断的错误之一。
+//
+// 它**不参与判定**——判定已经在那条 INSERT 的 WHERE 里原子完成了；这里只是给调用方一个
+// 有意义的错误类别（退避与 LastErr 分类要用）。因为在两次查询之间别人可能又写了行，
+// 归类允许偏差，但不允许把"资源到顶"报成"内部错误"。
+func (d *DB) classifyInsertRejection(ctx context.Context, q *PoolQuestion, limits PoolLimits) error {
+	var (
+		rows  int
+		bytes int64
+	)
+	err := d.h.QueryRowContext(ctx,
+		`SELECT (SELECT count(*) FROM pool), (SELECT coalesce(sum(length(asset_blob)),0) FROM pool)`).
+		Scan(&rows, &bytes)
+	if err != nil {
+		return ErrPoolFull
+	}
+	if rows >= limits.MaxRows {
+		return ErrPoolFull
+	}
+	if len(q.Asset) > 0 && bytes+int64(len(q.Asset)) > limits.MaxImageBytes {
+		return ErrImageBudget
+	}
+	// 两个条件都不成立说明是并发窗口内的挤位：按更接近的语义报"行数到顶"（可重试）。
+	return ErrPoolFull
+}
+
+// ErrImageBudget 是"全局图片字节预算已用尽"。它是**可重试**的资源状态：
+// 过期题目被清理后预算会释放，worker 按轮询再来，绝不因此生成半成品或降级成无图题。
+var ErrImageBudget = errors.New("store: 图片字节预算已达上限")
+
+// ImageAssetBytes 返回池内图片资产的总字节数。
+// 用聚合函数而不是把 BLOB 读进 Go：一条 64KB 的图 × 上千行会在 1GB 机器上直接吃掉几十 MB 堆，
+// 而这个数字只用来做容量判定（SQLite 在引擎内部算 length()，只有整数跨进程边界）。
+func (d *DB) ImageAssetBytes(ctx context.Context) (int64, error) {
+	var n int64
+	if err := d.h.QueryRowContext(ctx,
+		`SELECT coalesce(sum(length(asset_blob)),0) FROM pool`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: 统计图片字节: %w", err)
+	}
+	return n, nil
 }
 
 // Spec 返回这道题所属的分桶键。
@@ -165,15 +239,18 @@ WHERE status=? AND generator_id=? AND version=? AND difficulty=? AND expires_at>
 }
 
 // PoolRowCounts 是管理面的只读水位统计（ready/assigned/terminal 与总数）。
+// 两个字节字段是**聚合值**：统计查询绝不把 asset_blob 读进 Go 内存。
 type PoolRowCounts struct {
-	GeneratorID string
-	Version     string
-	Difficulty  int
-	Ready       int
-	Assigned    int
-	Terminal    int
-	Total       int
-	OldestReady string // 最早过期的 ready 题（判断池是否在退化，非敏感）
+	GeneratorID     string
+	Version         string
+	Difficulty      int
+	Ready           int
+	Assigned        int
+	Terminal        int
+	Total           int
+	ReadyAssetBytes int64
+	TotalAssetBytes int64
+	OldestReady     string // 最早过期的 ready 题（判断池是否在退化，非敏感）
 }
 
 // PoolStats 返回按分桶聚合的水位。行数有上限（分桶组合本身就是有界的）。
@@ -184,11 +261,13 @@ SELECT generator_id, version, difficulty,
        sum(CASE WHEN status=? THEN 1 ELSE 0 END),
        sum(CASE WHEN status=? THEN 1 ELSE 0 END),
        count(*),
-       min(CASE WHEN status=? THEN expires_at END)
+       min(CASE WHEN status=? THEN expires_at END),
+       coalesce(sum(CASE WHEN status=? THEN length(asset_blob) ELSE 0 END), 0),
+       coalesce(sum(length(asset_blob)), 0)
 FROM pool
 GROUP BY generator_id, version, difficulty
 ORDER BY generator_id, version, difficulty`,
-		PoolReady, PoolAssigned, PoolTerminal, PoolReady)
+		PoolReady, PoolAssigned, PoolTerminal, PoolReady, PoolReady)
 	if err != nil {
 		return nil, fmt.Errorf("store: 池统计: %w", err)
 	}
@@ -201,7 +280,8 @@ ORDER BY generator_id, version, difficulty`,
 			total    int64
 			r, a, tm int64
 		)
-		if err := rows.Scan(&s.GeneratorID, &s.Version, &s.Difficulty, &r, &a, &tm, &total, &oldest); err != nil {
+		if err := rows.Scan(&s.GeneratorID, &s.Version, &s.Difficulty, &r, &a, &tm, &total, &oldest,
+			&s.ReadyAssetBytes, &s.TotalAssetBytes); err != nil {
 			return nil, fmt.Errorf("store: 扫描池统计: %w", err)
 		}
 		s.Ready, s.Assigned, s.Terminal, s.Total = int(r), int(a), int(tm), int(total)
@@ -297,14 +377,17 @@ func readQuestionTx(ctx context.Context, tx *sql.Tx, id string) (*PoolQuestion, 
 		expires     string
 		assigned    sql.NullString
 		challengeID sql.NullString
+		mime        string
 		err         error
 	)
+	// 这里是**唯一**把图片资产读进 Go 的地方：领取路径必须把图下发给答题者，
+	// 而它一次只读一行（按 id 精确读），不是批量扫描。
 	err = tx.QueryRowContext(ctx, `
 SELECT generator_id, version, difficulty, status, payload_json, verifier_blob,
-       created_at, expires_at, challenge_id, assigned_at
+       created_at, expires_at, challenge_id, assigned_at, asset_blob, asset_mime
 FROM pool WHERE id=?`, id).
 		Scan(&q.GeneratorID, &q.Version, &q.Difficulty, &q.Status, &q.PayloadJSON, &q.Verifier,
-			&created, &expires, &challengeID, &assigned)
+			&created, &expires, &challengeID, &assigned, &q.Asset, &mime)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -314,6 +397,7 @@ FROM pool WHERE id=?`, id).
 	if q.ChallengeID = ""; challengeID.Valid {
 		q.ChallengeID = challengeID.String
 	}
+	q.AssetMime = mime
 	if q.CreatedAt, err = parseTime(created); err != nil {
 		return nil, err
 	}
@@ -328,8 +412,31 @@ FROM pool WHERE id=?`, id).
 	return q, nil
 }
 
+// QuestionVerifierForChallenge 只读判分需要的那一个字段（verifier），按绑定关系精确定位一行。
+//
+// 为什么不复用 QuestionForChallenge：判分路径**不需要**题面文本、更不需要图片二进制。
+// 把 64KB 的资产读进 Go 再丢掉，等于让每次兑换都付一次图像解码/拷贝的代价，
+// 而更重要的是结构上的保证——判分读不到资产，就不可能"因为图片缺失而判不出答案"，
+// 也就不可能出现"资产被清理后同一答案被判假"这类静默事故（有测试钉住）。
+func (d *DB) QuestionVerifierForChallenge(ctx context.Context, challengeID string) ([]byte, error) {
+	var v []byte
+	err := d.h.QueryRowContext(ctx,
+		`SELECT verifier_blob FROM pool WHERE challenge_id=?`, challengeID).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: 读判分数据: %w", err)
+	}
+	if len(v) == 0 {
+		// 空 verifier 不等于"答案是空串"：它意味着绑定行被写坏，必须 fail closed。
+		return nil, fmt.Errorf("%w: 绑定题目的 verifier 为空", ErrNotFound)
+	}
+	return v, nil
+}
+
 // QuestionForChallenge 返回绑定到这张 challenge 的题（没有绑定则 ErrNotFound）。
-// redeem 阶段读它拿私有 verifier；这一步只读，不进写事务。
+// 读的是**状态与题面**，不含图片资产：资产只在领取那一刻下发一次，之后任何路径都不需要它。
 func (d *DB) QuestionForChallenge(ctx context.Context, challengeID string) (*PoolQuestion, error) {
 	var (
 		q        = &PoolQuestion{}

@@ -26,8 +26,11 @@ var migration0002 string
 //go:embed migrations/0003_stage3a.sql
 var migration0003 string
 
+//go:embed migrations/0004_stage3b.sql
+var migration0004 string
+
 // schemaVersion 是最后一条迁移对应的版本号，写入 meta 表。
-const schemaVersion = 3
+const schemaVersion = 4
 
 // retiredPrefix 是阶段 1 secret_mac 列被中和时加在摘要输入上的域分隔串（见 0002 注释）。
 const retiredPrefix = "epocha/v1|retired|"
@@ -49,6 +52,12 @@ const (
 	MaxDifficulty    = 5
 	MaxPayloadBytes  = 4096
 	MaxVerifierBytes = 512
+
+	// MaxAssetBytes 是单题图片资产的字节上限。**必须与 0004 迁移里 CHECK 的字面量一致**，
+	// 两侧各有测试（Go 侧拒绝、库侧拒绝），改一处就必须同时改另一处。
+	MaxAssetBytes = 65536
+	// MimeTypePNG 是阶段 3B 唯一允许的媒体类型：库里那一列的 CHECK 只放过 '' 与它。
+	MimeTypePNG = "image/png"
 )
 
 // purgeBatchRows 限制单轮清理的行数：清理跑在单写连接上，一次全表删除会在 1 vCPU 上
@@ -213,6 +222,7 @@ var migrations = []migration{
 	{version: 1, sql: migration0001},
 	{version: 2, sql: migration0002, data: migrateStage2Data},
 	{version: 3, sql: migration0003},
+	{version: 4, sql: migration0004},
 }
 
 // SchemaVersion 返回当前库版本。

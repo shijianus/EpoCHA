@@ -764,21 +764,44 @@ func (s *Server) handleGenerators(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
+		// 自我标记必须是**默认拒绝**的：新登记的题型若没有明确的生产结论，
+		// 就只能落在 experimental:true + production_ready:false 上（DESIGN §8.5）。
+		exp, ready := generatorLifecycle(id)
 		out = append(out, map[string]any{
 			"id": id, "version": g.Version(), "media": g.Media(),
-			// 生产用途标记：3A 只有工程基线题型，必须让运维看得见这一点
-			"production_ready": id != generator.ArithID,
+			"experimental":     exp,
+			"production_ready": ready,
 			"note":             noteForGenerator(id),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"generators": out, "max_difficulty": generator.MaxDifficulties})
 }
 
-func noteForGenerator(id string) string {
-	if id == generator.ArithID {
-		return "工程基线题型：题面可被脚本直接求值，不抗自动解题，仅用于验证题池与提交生命周期"
+// generatorLifecycle 返回 (experimental, production_ready)。
+//
+// 两个题型现在都是 false/true 的**反面**：都不生产可用。写在这里的意义是
+// "未经评测不得改成 true"——评测通过也只证明"测过"，不等同于生产安全认证（ADR-002）。
+func generatorLifecycle(id string) (experimental, productionReady bool) {
+	switch id {
+	case generator.ArithID, generator.TextImageID:
+		return true, false
+	default:
+		// 没登记结论的题型：按最保守的一档报，绝不让"忘了写"变成"看起来可用"
+		return true, false
 	}
-	return ""
+}
+
+func noteForGenerator(id string) string {
+	switch id {
+	case generator.ArithID:
+		return "工程基线题型：题面可被脚本直接求值，不抗自动解题，仅用于验证题池与提交生命周期"
+	case generator.TextImageID:
+		return "实验性视觉题型：图片中可见字符本来就要给答题者看，不具备密码学保密性；" +
+			"抗 OCR/抗多模态能力**未经**评测（本环境无离线 OCR，人工可读性未做），" +
+			"仅用于验证图片资产的生成-存储-下发-判分链路"
+	default:
+		return ""
+	}
 }
 
 // handlePoolStatus 是**只读**水位观测。返回的全是计数与公开元数据：
@@ -795,9 +818,23 @@ func (s *Server) handlePoolStatus(w http.ResponseWriter, r *http.Request) {
 			"generator_id": b.GeneratorID, "version": b.Version, "difficulty": b.Difficulty,
 			"ready": b.Ready, "assigned": b.Assigned, "terminal": b.Terminal, "total": b.Total,
 			"oldest_ready_expires": b.OldestReady,
+			// 字节是**聚合值**：统计绝不把 asset_blob 读进 Go 内存（DESIGN §13 的图片纪律）。
+			"ready_asset_bytes": b.ReadyAssetBytes, "total_asset_bytes": b.TotalAssetBytes,
 		})
 	}
 	body := map[string]any{"buckets": buckets}
+	// 全局图片预算的两个量：已用字节与配置上限。运维判断"池还能不能补图"看的是这两个，
+	// 不是条数——一条图片题的字节可以是算术题的上百倍。
+	used, err := s.db.ImageAssetBytes(r.Context())
+	if err != nil {
+		s.internal(w, "图片字节统计", err)
+		return
+	}
+	body["image"] = map[string]any{
+		"asset_bytes":            used,
+		"budget_bytes":           s.imageBudget,
+		"per_question_max_bytes": store.MaxAssetBytes,
+	}
 	if s.pool != nil {
 		st := s.pool.Stats()
 		body["worker"] = map[string]any{

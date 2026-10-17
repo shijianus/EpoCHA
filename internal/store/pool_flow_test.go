@@ -20,6 +20,12 @@ func questionSite(t *testing.T, d *DB, name string) *Site {
 	return site
 }
 
+// poolLimits 是测试用的写入边界：行数由调用方给，图片字节预算给一个足够宽的值。
+// 专门测预算的用例自己构造 PoolLimits（见 asset_test.go）。
+func poolLimits(rows int) PoolLimits {
+	return PoolLimits{MaxRows: rows, MaxImageBytes: 64 << 20}
+}
+
 // seedQuestions 直接写 n 条 ready 题（绕过 worker：本文件测的是事务与状态机，不是补题节奏）。
 func seedQuestions(t *testing.T, d *DB, spec PoolSpec, n int, ttl time.Duration) []string {
 	t.Helper()
@@ -36,7 +42,7 @@ func seedQuestions(t *testing.T, d *DB, spec PoolSpec, n int, ttl time.Duration)
 			Verifier:  []byte("verifier-bytes-" + id),
 			CreatedAt: now, ExpiresAt: now.Add(ttl),
 		}
-		if err := d.InsertQuestion(t.Context(), q, 10000); err != nil {
+		if err := d.InsertQuestion(t.Context(), q, poolLimits(10000)); err != nil {
 			t.Fatalf("InsertQuestion: %v", err)
 		}
 		ids = append(ids, id)
@@ -526,35 +532,35 @@ func TestInsertQuestionBounds(t *testing.T) {
 			Verifier:    []byte("v"), CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 		}
 	}
-	if err := d.InsertQuestion(t.Context(), base(), 10); err != nil {
+	if err := d.InsertQuestion(t.Context(), base(), poolLimits(10)); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.InsertQuestion(t.Context(), base(), 1); !errors.Is(err, ErrPoolFull) {
+	if err := d.InsertQuestion(t.Context(), base(), poolLimits(1)); !errors.Is(err, ErrPoolFull) {
 		t.Fatalf("行数上限应生效，got %v", err)
 	}
 	tooBig := base()
 	tooBig.PayloadJSON = pad(tooBig.PayloadJSON, MaxPayloadBytes+1)
-	if err := d.InsertQuestion(t.Context(), tooBig, 100); !errors.Is(err, ErrBadConfig) {
+	if err := d.InsertQuestion(t.Context(), tooBig, poolLimits(100)); !errors.Is(err, ErrBadConfig) {
 		t.Fatalf("超大题面应拒绝，got %v", err)
 	}
 	tooBigVerifier := base()
 	tooBigVerifier.ID = "q-" + randSuffix()
 	tooBigVerifier.Verifier = []byte(pad("v", MaxVerifierBytes+1))
-	if err := d.InsertQuestion(t.Context(), tooBigVerifier, 100); !errors.Is(err, ErrBadConfig) {
+	if err := d.InsertQuestion(t.Context(), tooBigVerifier, poolLimits(100)); !errors.Is(err, ErrBadConfig) {
 		t.Fatalf("超大 verifier 应拒绝，got %v", err)
 	}
 	// 分桶键必须完整：缺 version 无法判分
 	noVer := base()
 	noVer.ID = "q-" + randSuffix()
 	noVer.Version = ""
-	if err := d.InsertQuestion(t.Context(), noVer, 100); !errors.Is(err, ErrBadConfig) {
+	if err := d.InsertQuestion(t.Context(), noVer, poolLimits(100)); !errors.Is(err, ErrBadConfig) {
 		t.Fatalf("缺 version 应拒绝，got %v", err)
 	}
 	// 未知模式与越界难度
 	badDiff := base()
 	badDiff.ID = "q-" + randSuffix()
 	badDiff.Difficulty = 99
-	if err := d.InsertQuestion(t.Context(), badDiff, 100); !errors.Is(err, ErrBadConfig) {
+	if err := d.InsertQuestion(t.Context(), badDiff, poolLimits(100)); !errors.Is(err, ErrBadConfig) {
 		t.Fatalf("难度越界应拒绝，got %v", err)
 	}
 	// QuestionBuckets 只报告在用站点的显式配置

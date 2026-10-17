@@ -108,41 +108,57 @@ func serve(ctx context.Context, cfg *config.Config, ln, adminLn net.Listener, st
 		return err
 	}
 
-	// 题型注册表。3A 只有一个基线生成器；登记失败（比如派生密钥太短）必须拒绝启动，
+	// 题型注册表。登记失败（比如派生密钥太短）必须拒绝启动，
 	// 因为"站点配了 pow_question 却没有可用生成器"会在运行时变成一片 503。
 	gens := generator.NewRegistry()
 	qKey := token.DerivePurpose(cfg.MasterKey, questionKeyPurpose)
 	if len(qKey) < 32 {
 		return errors.New("初始化生成器: 题目 verifier 派生密钥长度不足")
 	}
-	arith, err := generator.NewArithmeticBaseline(qKey)
+	known, err := knownGenerators(qKey)
 	if err != nil {
 		return fmt.Errorf("初始化生成器: %w", err)
 	}
-	if err := gens.Register(arith); err != nil {
-		return fmt.Errorf("登记生成器: %w", err)
+	for _, g := range known {
+		if !generatorEnabled(cfg.Generators, g.ID()) {
+			log.Info("生成器已按白名单禁用", "generator", g.ID())
+			continue
+		}
+		if err := gens.Register(g); err != nil {
+			return fmt.Errorf("登记生成器: %w", err)
+		}
+	}
+	// 白名单里的名字必须真的能登记：写错一个字符就拒绝启动。
+	// 静默忽略会让运维以为"已经关掉了某个题型"，而实际还开着——这比不关更危险。
+	for _, name := range cfg.Generators {
+		if !isKnownGeneratorID(known, name) {
+			return fmt.Errorf("初始化生成器: EPOCHA_GENERATORS 含未知题型名 %q（可登记：%v）",
+				name, generatorIDs(known))
+		}
+	}
+	if len(gens.IDs()) == 0 {
+		return errors.New("初始化生成器: 白名单里没有任何可用题型，拒绝启动")
 	}
 
 	// 题池 worker：只有存在 pow_question 站点时才会真正生成题目（QuestionBuckets 为空即空转等待）。
 	// 因此默认启用不是"多一个后台负载"，而是让开关只在需要时才有代价。
 	var pw *pool.Worker
 	if cfg.PoolEnabled {
-		pw, err = pool.New(db, gens, pool.Config{
-			LowWatermark: cfg.PoolLow, HighWatermark: cfg.PoolHigh, MaxRows: cfg.PoolMaxRows,
-			Workers: cfg.PoolWorkers, QuestionTTL: cfg.PoolQuestionTTL, PollInterval: cfg.PoolPoll,
-			BatchPerTick: pool.DefaultConfig().BatchPerTick,
-			YieldEvery:   pool.DefaultConfig().YieldEvery,
-			YieldPause:   pool.DefaultConfig().YieldPause,
-			BackoffStart: pool.DefaultConfig().BackoffStart,
-			BackoffMax:   pool.DefaultConfig().BackoffMax,
-		}, log, nil)
+		pc := pool.DefaultConfig()
+		pc.LowWatermark, pc.HighWatermark, pc.MaxRows = cfg.PoolLow, cfg.PoolHigh, cfg.PoolMaxRows
+		pc.Workers, pc.QuestionTTL, pc.PollInterval = cfg.PoolWorkers, cfg.PoolQuestionTTL, cfg.PoolPoll
+		pc.ImageLowWatermark, pc.ImageHighWatermark = cfg.PoolImageLow, cfg.PoolImageHigh
+		pc.ImageMaxTotalBytes, pc.ImageYieldPause = cfg.PoolImageMaxBytes, cfg.PoolImageYield
+		pw, err = pool.New(db, gens, pc, log, nil)
 		if err != nil {
 			return fmt.Errorf("初始化题池: %w", err)
 		}
 		pw.Start(ctx)
 		defer func() { pw.StopCancel(); pw.Wait() }()
 		log.Info("题池已启用", "low", cfg.PoolLow, "high", cfg.PoolHigh,
-			"max_rows", cfg.PoolMaxRows, "workers", cfg.PoolWorkers, "question_ttl", cfg.PoolQuestionTTL.String())
+			"max_rows", cfg.PoolMaxRows, "workers", cfg.PoolWorkers, "question_ttl", cfg.PoolQuestionTTL.String(),
+			"image_low", cfg.PoolImageLow, "image_high", cfg.PoolImageHigh,
+			"image_bytes", cfg.PoolImageMaxBytes, "image_yield", cfg.PoolImageYield.String())
 	}
 
 	signer, err := token.NewSigner(cfg.MasterKey, cfg.PrevMaster)
@@ -321,4 +337,53 @@ func errKindOf(err error) string {
 		return "nil"
 	}
 	return "unspecified"
+}
+
+// knownGenerators 列出**本程序支持**的生成器（不受白名单影响）。
+//
+// 视觉生成器的构造可能因为内嵌字体缺字形而失败——那必须让服务拒绝启动，
+// 而不是带着一个"题面永远答不对"的题型上线（DESIGN §17 阶段 3B）。
+func knownGenerators(qKey []byte) ([]generator.Generator, error) {
+	arith, err := generator.NewArithmeticBaseline(qKey)
+	if err != nil {
+		return nil, fmt.Errorf("算术基线题型: %w", err)
+	}
+	out := []generator.Generator{arith}
+	img, err := generator.NewTextImage(qKey)
+	if err != nil {
+		// 字体不可用是构建/环境问题，不是可以用"那就别开这个题型"绕过的运行时状态
+		return nil, fmt.Errorf("视觉题型: %w", err)
+	}
+	out = append(out, img)
+	return out, nil
+}
+
+// generatorEnabled：空白名单 = 全部启用。
+func generatorEnabled(allow []string, id string) bool {
+	if len(allow) == 0 {
+		return true
+	}
+	for _, a := range allow {
+		if a == id {
+			return true
+		}
+	}
+	return false
+}
+
+func isKnownGeneratorID(known []generator.Generator, id string) bool {
+	for _, g := range known {
+		if g.ID() == id {
+			return true
+		}
+	}
+	return false
+}
+
+func generatorIDs(known []generator.Generator) []string {
+	out := make([]string, 0, len(known))
+	for _, g := range known {
+		out = append(out, g.ID())
+	}
+	return out
 }

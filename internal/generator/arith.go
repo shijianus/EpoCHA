@@ -10,10 +10,7 @@ package generator
 
 import (
 	"context"
-	"crypto/hmac"
 	crand "crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,12 +29,10 @@ const (
 	// 且乘积在求值前就做溢出检查。有界是为了让判分可判定、题面长度可控。
 	maxAnswerValue = 1_000_000_000
 
-	maxTaskLen      = 64
-	maxOperand      = 99
-	maxDivisorCand  = 9
-	minDivisorCand  = 2
-	verifierNonceSz = 16
-	verifierTagSz   = sha256.Size
+	maxTaskLen     = 64
+	maxOperand     = 99
+	maxDivisorCand = 9
+	minDivisorCand = 2
 
 	// genRetries 是"重抽直到满足边界"的**有界**次数。无界重试在小答案空间里
 	// 会变成隐蔽忙循环，并让单次生成耗时不可预期。
@@ -50,10 +45,6 @@ const (
 // ErrGenerateExhausted 是"重试次数用完仍不满足边界"。它是可重试的生成失败：
 // 池 worker 按退避处理，绝不把半成品写进库。
 var ErrGenerateExhausted = errors.New("generator: 生成重试耗尽")
-
-// arithMACDomain 是 verifier 的域分隔前缀。它与站点 secret 摘要、token 派生串都不同，
-// 因此这三类 HMAC 不可互换（DESIGN §6）。
-const arithMACDomain = "epocha/v1|qver|"
 
 // ArithPublic 是唯一的公开题面类型：**字段即白名单**。
 // 答案、内部随机数、操作数生成顺序都不在这个结构体里——不是靠 json:"-" 抑制，是根本没有。
@@ -129,43 +120,20 @@ func (g ArithmeticBaseline) Generate(ctx context.Context, p Params, entropy io.R
 		answer := strconv.FormatInt(acc, 10)
 		return Question{
 			Payload:  ArithPublic{Task: task, AnswerType: "integer", MaxAnswerLen: maxAnswerDigits + 2},
-			Verifier: PrivateVerifier(g.verifier(nonce, answer)),
+			Verifier: PrivateVerifier(answerVerifier(g.macKey, nonce, answer)),
 		}, nil
 	}
 	return Question{}, ErrGenerateExhausted
 }
 
-// verifier 是"答案的可判定私有表示"：nonce || HMAC(K_q, domain||nonce||0x00||答案)。
-// 带 per-题 nonce 有两个理由：(1) 答案明文不落库（红线 5）；
-// (2) 两道答案相同的题不会有相同的 verifier，只读到库的人无法免费聚类出"这些题同答案"。
-func (g ArithmeticBaseline) verifier(nonce []byte, canonicalAnswer string) []byte {
-	tag := g.tag(nonce, canonicalAnswer)
-	out := make([]byte, 0, verifierNonceSz+verifierTagSz)
-	out = append(out, nonce...)
-	return append(out, tag...)
-}
-
-func (g ArithmeticBaseline) tag(nonce []byte, canonicalAnswer string) []byte {
-	m := hmac.New(sha256.New, g.macKey)
-	m.Write([]byte(arithMACDomain))
-	m.Write(nonce)
-	m.Write([]byte{0})
-	m.Write([]byte(canonicalAnswer))
-	return m.Sum(nil)
-}
-
 // Verify 判分：对提交值重算摘要再常数时间比较（可离散化题型的允许做法，ADR-003）。
 // 需要容差的题型（角度、区域）自行定义判定方式，不得为此把答案放进 Payload。
 func (g ArithmeticBaseline) Verify(v PrivateVerifier, input string) bool {
-	if len(v) != verifierNonceSz+verifierTagSz {
-		return false
-	}
 	canon, ok := g.NormalizeAnswer(input)
 	if !ok {
 		return false
 	}
-	want := g.tag(v[:verifierNonceSz], canon)
-	return subtle.ConstantTimeCompare(want, v[verifierNonceSz:]) == 1
+	return verifyAnswer(g.macKey, v, canon)
 }
 
 // NormalizeAnswer 定义"什么算一个合法答案串"：

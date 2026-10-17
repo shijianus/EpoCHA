@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"github.com/shijianus/EpoCHA/internal/generator"
 	"github.com/shijianus/EpoCHA/internal/pow"
 	"github.com/shijianus/EpoCHA/internal/store"
+	"github.com/shijianus/EpoCHA/internal/token"
 )
 
 // solveTaskText 是一个**独立**的表达式求值器（测试侧实现），把题面文本算成答案。
@@ -395,54 +397,104 @@ func TestClientCannotDowngradeOrSwapRequirement(t *testing.T) {
 	}
 }
 
-// TestAnswerIsBoundToItsOwnChallenge 答案与题目一题一验证物：
-// 把 A 题的答案提交给 B 题必须失败；而 B 失败后已被终结（一次作答），
-// 所以正向对照用另一张新 challenge 做——这条同时钉住了"答案不是全局可复用的口令"。
+// TestAnswerIsBoundToItsOwnChallenge 证明"跨题不能复用的是 verifier、绑定、PoW 与 token"。
 //
-// 前提"B 与 A 不同答案"用**有界重抽**保证，不用 `t.Skip` 蒙过去：
-// 随机补题确实可能抽出同答案的两道题，但把断言跳过等于把这条安全性质的覆盖率交给概率，
-// 而且 CI 里永远是绿的。d4 档最大单点答案概率实测 ≈0.0136（§8.4），因此"连续 6 次都撞上同一个答案"
-// 的概率上界约 0.0136^6 ≈ 6e-12；真撞上就说明池的多样性本身已经塌了——那时**报错**才是正确的反应。
+// 前提由**受控夹具**给出（internal/api/fixture_test.go），不再靠随机抽题或有界重抽：
+//   - 两道题答案恰好相同是**合法现象**（题池不承诺答案字符串唯一，那也不是任何安全不变量）；
+//     夹具让答案不同，只是为了让下面的断言不空转。
+//   - 真正必须跨题不通用的四样东西，本用例逐条钉住：
+//     1) 私有 verifier：A 的答案在 B 上判假，反之亦然；
+//     2) 题目 ↔ challenge 绑定：四张 challenge 各自领到不同的题行，顺序可复现；
+//     3) PoW：用别的 challenge 的解提交，PoW 失败**且不算作答**（同一 token 之后仍可正确兑换）；
+//     4) 一次作答终结：跨题答案那次提交已经把该 challenge 送进终态，正确答案再来也不通过。
+//
+// 夹具不要求生产 API 支持"指定答案"或"返回答案"：答案出口只存在于测试进程内。
 func TestAnswerIsBoundToItsOwnChallenge(t *testing.T) {
 	h := newHarness(t, nil)
 	site, _ := h.questionSite(t, "questioned", "sk-q", 4)
-	h.fillPool(t, site.Policy.Difficulty, 10)
+
+	h.seedQuestions(t, site.Policy.Difficulty,
+		arithQuestion("40 + 2", "42"), // A
+		arithQuestion("14 - 7", "7"),  // B
+		arithQuestion("3 × 3", "9"),   // C
+		arithQuestion("20 - 2", "18"), // D
+	)
 
 	rA := h.challengeReply("sk-q")
-	taskA := h.questionOf(t, rA)
-	ansA := solveTaskText(t, taskA)
-
-	// 领到一道**答案不同**的 B
-	var rB reply
-	var ansB int64
-	picked := false
-	for range 6 {
-		rB = h.challengeReply("sk-q")
-		ansB = solveTaskText(t, h.questionOf(t, rB))
-		if ansB != ansA {
-			picked = true
-			break
+	rB := h.challengeReply("sk-q")
+	rC := h.challengeReply("sk-q")
+	rD := h.challengeReply("sk-q")
+	for _, r := range []reply{rA, rB, rC, rD} {
+		if r.status != http.StatusOK {
+			t.Fatalf("池里有 4 道题，第 4 次签发应成功：%d %s", r.status, r.body)
 		}
 	}
-	if !picked {
-		t.Fatalf("连续 6 次领到的题都与 A 同答案（%d）：题池多样性已不成立，本测试的前提无法构造", ansA)
+	// 夹具的顺序确实生效（否则"跨题"这个前提就是空的）
+	for i, tc := range []struct {
+		r    reply
+		task string
+	}{{rA, "40 + 2"}, {rB, "14 - 7"}, {rC, "3 × 3"}, {rD, "20 - 2"}} {
+		if got := h.questionOf(t, tc.r); got != tc.task {
+			t.Fatalf("第 %d 次签发的题面 = %q，夹具期望 %q", i+1, got, tc.task)
+		}
+	}
+	// 绑定关系：四个 cid 各自绑到不同的题行
+	seen := map[string]string{}
+	for tag, r := range map[string]reply{"A": rA, "B": rB, "C": rC, "D": rD} {
+		q, err := h.db.QuestionForChallenge(context.Background(), claimsOf(t, r.str("token")).CID)
+		if err != nil {
+			t.Fatalf("%s 题绑定读取失败: %v", tag, err)
+		}
+		if prev, dup := seen[q.ID]; dup {
+			t.Fatalf("%s 与 %s 领到了同一条题池记录 %s", tag, prev, q.ID)
+		}
+		seen[q.ID] = tag
+	}
+	if len(seen) != 4 {
+		t.Fatalf("四条绑定应互不相同，got %d", len(seen))
 	}
 
-	nonceB := h.solvePow(t, rB)
-	if rr := h.redeemAnswer(rB.str("token"), nonceB, strconv.FormatInt(ansA, 10)); rr.status == http.StatusOK {
+	// (1)+(4) verifier 跨题不通用，且那次提交就终结了该 challenge
+	if rr := h.redeemAnswer(rA.str("token"), h.solvePow(t, rA), "7"); rr.status == http.StatusOK {
+		t.Fatal("把 B 题的答案用到 A 题上竟兑换成功")
+	}
+	if rr := h.redeemAnswer(rA.str("token"), h.solvePow(t, rA), "42"); rr.status == http.StatusOK {
+		t.Fatal("A 已被错误答案终结，正确答案竟还能兑换")
+	}
+	if rr := h.redeemAnswer(rB.str("token"), h.solvePow(t, rB), "42"); rr.status == http.StatusOK {
 		t.Fatal("把 A 题的答案用到 B 题上竟兑换成功")
 	}
-	// B 已经被错误答案终结：正确答案也不再能用（一次作答的另一个侧面）
-	if rr := h.redeemAnswer(rB.str("token"), h.solvePow(t, rB), strconv.FormatInt(ansB, 10)); rr.status == http.StatusOK {
-		t.Fatal("错误答案之后同一张 challenge 竟可重试")
+	if rr := h.redeemAnswer(rB.str("token"), h.solvePow(t, rB), "7"); rr.status == http.StatusOK {
+		t.Fatal("B 已被错误答案终结，正确答案竟还能兑换")
 	}
-	// 正向对照：新领一张，自己的答案自己的题
-	rC := h.challengeReply("sk-q")
-	taskC := h.questionOf(t, rC)
-	ansC := strconv.FormatInt(solveTaskText(t, taskC), 10)
-	if rr := h.redeemAnswer(rC.str("token"), h.solvePow(t, rC), ansC); rr.status != http.StatusOK {
-		t.Fatalf("新 challenge 用自己的答案应可兑换：%d %s", rr.status, rr.body)
+
+	// (3) PoW 与 challenge 一一绑定：拿 D 的解提交到 C 上必须失败，
+	// 而**不**消耗 C 的作答机会（PoW 错不是"作答"，ADR-011 #3）。
+	nonceD := h.solvePow(t, rD)
+	if rr := h.redeemAnswer(rC.str("token"), nonceD, "9"); rr.status == http.StatusOK {
+		t.Fatal("用别的 challenge 的 PoW 解竟兑换成功")
 	}
+	if rr := h.redeemAnswer(rC.str("token"), h.solvePow(t, rC), "9"); rr.status != http.StatusOK {
+		t.Fatalf("PoW 失败不应终结该题，正确答案随后应可兑换：%d %s", rr.status, rr.body)
+	}
+	// D 没被上面那次"用它的解"动过：它自己的题仍可用自己的解兑换
+	if rr := h.redeemAnswer(rD.str("token"), h.solvePow(t, rD), "18"); rr.status != http.StatusOK {
+		t.Fatalf("D 应仍可正常兑换：%d %s", rr.status, rr.body)
+	}
+}
+
+// claimsOf 解出 challenge token 的声明（只为拿 cid 做绑定断言；不读答案）。
+func claimsOf(t *testing.T, tok string) token.Claims {
+	t.Helper()
+	signer, err := token.NewSigner(bytes.Repeat([]byte{0x5a}, 32), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := signer.Verify(token.PurposeChallenge, tok, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("解 challenge token: %v", err)
+	}
+	return claims
 }
 
 // --- 池空：可重试，不降级 ---

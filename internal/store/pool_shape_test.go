@@ -11,8 +11,9 @@ import (
 func TestMigration0003Shape(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "epocha.db")
 	d, _ := newDBAt(t, path)
-	if v, _ := d.SchemaVersion(t.Context()); v != 3 {
-		t.Fatalf("schema version = %d，期望 3", v)
+	// 0004（阶段 3B 的图片资产列）之后最新版本是 4；本用例测的仍是 0003 的约束形状。
+	if v, _ := d.SchemaVersion(t.Context()); v != 4 {
+		t.Fatalf("schema version = %d，期望 4", v)
 	}
 	var n int
 	if err := d.h.QueryRowContext(t.Context(), `SELECT count(*) FROM sqlite_master WHERE type='index'

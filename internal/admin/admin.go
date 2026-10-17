@@ -53,7 +53,10 @@ type Server struct {
 	db   *store.DB
 	pool PoolObserver
 	gens *generator.Registry
-	src  *risk.Source
+	// imageBudget 是配置里的全局图片字节预算，只为管理面**如实显示**"已用/上限"。
+	// 判定不在这里：写入时的原子判定在 store，跳过生成的判定在 pool worker。
+	imageBudget int64
+	src         *risk.Source
 	// authFails 复用有界令牌桶做鉴权失败计数：条目数有硬上限，
 	// 否则攻击者用随机源地址就能把失败计数表变成内存放大器（红线 6）。
 	authFails *risk.Limiter
@@ -78,7 +81,8 @@ func New(cfg *config.Config, db *store.DB, log *slog.Logger, observer PoolObserv
 	if err != nil {
 		return nil, err
 	}
-	return &Server{db: db, pool: observer, gens: gens, src: src, authFails: fails, log: log, now: time.Now}, nil
+	return &Server{db: db, pool: observer, gens: gens, src: src, authFails: fails,
+		log: log, now: time.Now, imageBudget: cfg.PoolImageMaxBytes}, nil
 }
 
 // Handler 返回管理路由。**只**应挂在 admin 监听器上。

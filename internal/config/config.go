@@ -49,6 +49,12 @@ const (
 	envPoolWorkers   = "EPOCHA_POOL_WORKERS"
 	envPoolTTL       = "EPOCHA_POOL_QUESTION_TTL_SEC"
 	envPoolPollMs    = "EPOCHA_POOL_POLL_MS"
+	// 阶段 3B：图片题桶独立的水位/预算/让步节奏 + 题型白名单。
+	envPoolImageLow   = "EPOCHA_POOL_IMAGE_LOW_WATERMARK"
+	envPoolImageHigh  = "EPOCHA_POOL_IMAGE_HIGH_WATERMARK"
+	envPoolImageBytes = "EPOCHA_POOL_IMAGE_MAX_TOTAL_BYTES"
+	envPoolImageYield = "EPOCHA_POOL_IMAGE_YIELD_MS"
+	envGenerators     = "EPOCHA_GENERATORS"
 )
 
 // TTL 上下界。上界不是形式主义：challenge/response 的有效期直接决定防重放账本里
@@ -58,6 +64,10 @@ const (
 	maxTTL     = time.Hour
 	minMaxRows = 1
 	maxMaxRows = 1_000_000
+
+	// maxImageBudgetBytes 是图片字节预算的上界。它存在的理由与 TTL 上界一样：
+	// 没有上界的"预算"就是无界的磁盘增长器（ADR-009）。pool 包在构造 worker 时会再查一次。
+	maxImageBudgetBytes = 1 << 30
 )
 
 var (
@@ -123,6 +133,20 @@ type Config struct {
 	PoolWorkers     int
 	PoolQuestionTTL time.Duration
 	PoolPoll        time.Duration
+
+	// 图片题桶（阶段 3B）：**独立**于算术桶的一组资源上界。视觉题的单条成本是文本题的
+	// 上千倍（渲染 + PNG 编码 + 每条几十 KB），继承 PoolLow/PoolHigh/PoolMaxRows
+	// 会让 1 vCPU 机器持续渲染，也会让"20000 行"这个行数上限失去磁盘意义。
+	PoolImageLow      int
+	PoolImageHigh     int
+	PoolImageMaxBytes int64
+	PoolImageYield    time.Duration
+
+	// Generators 是题型白名单：空 = 登记全部已知题型。
+	// 它的作用只有一个——**禁用某个生成器**：不再为它备题、也不再为它签发新题。
+	// 白名单里的名字必须可登记，写错一个字符就拒绝启动，绝不静默忽略（否则"以为关了"
+	// 比"没关"更危险）。
+	Generators []string
 }
 
 // Load 解析命令行参数与环境变量。getenv 为 os.Getenv，测试里可注入。
@@ -165,6 +189,11 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 		PoolWorkers:     1,
 		PoolQuestionTTL: 4200 * time.Second,
 		PoolPoll:        2 * time.Second,
+		// 图片桶默认值与 pool.DefaultConfig() 一致（几十题 + 4MB 预算）。
+		PoolImageLow:      8,
+		PoolImageHigh:     24,
+		PoolImageMaxBytes: 4 << 20,
+		PoolImageYield:    200 * time.Millisecond,
 	}
 	var err error
 	if c.MasterKey, err = readKey(getenv, envMasterKey); err != nil {
@@ -275,11 +304,62 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 		}
 		c.PoolPoll = time.Duration(n) * time.Millisecond
 	}
+	for _, p := range []struct {
+		name string
+		dst  *int
+	}{{envPoolImageLow, &c.PoolImageLow}, {envPoolImageHigh, &c.PoolImageHigh}} {
+		if n, ok, err := parseInt(getenv(p.name)); err != nil {
+			return nil, fmt.Errorf("%w: %s", ErrInvalid, p.name)
+		} else if ok {
+			*p.dst = n
+		}
+	}
+	if n, ok, err := parseInt64(getenv(envPoolImageBytes)); err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrInvalid, envPoolImageBytes)
+	} else if ok {
+		c.PoolImageMaxBytes = n
+	}
+	if n, ok, err := parseInt(getenv(envPoolImageYield)); err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrInvalid, envPoolImageYield)
+	} else if ok {
+		if n < 0 {
+			return nil, fmt.Errorf("%w: %s 不得为负", ErrInvalid, envPoolImageYield)
+		}
+		c.PoolImageYield = time.Duration(n) * time.Millisecond
+	}
 	if c.PoolLow < 1 || c.PoolHigh < c.PoolLow || c.PoolMaxRows < c.PoolHigh ||
 		c.PoolWorkers < 1 || c.PoolWorkers > 4 ||
 		c.PoolQuestionTTL < time.Second || c.PoolQuestionTTL > 24*time.Hour ||
 		c.PoolPoll < 100*time.Millisecond {
 		return nil, fmt.Errorf("%w: 题池参数不合法（水位须递增、上限≥高水位、并发 1..4、TTL 1s..24h、轮询 ≥100ms）", ErrInvalid)
+	}
+	// 图片桶的四条边界各自独立检查，错误文案点名到具体一项：
+	// 一个"题池参数不合法"让运维无法判断是水位、预算还是单位写错了。
+	switch {
+	case c.PoolImageLow < 1:
+		return nil, fmt.Errorf("%w: %s 必须 ≥1", ErrInvalid, envPoolImageLow)
+	case c.PoolImageHigh < c.PoolImageLow:
+		return nil, fmt.Errorf("%w: 图片高水位(%d) 不得低于低水位(%d)", ErrInvalid, c.PoolImageHigh, c.PoolImageLow)
+	case c.PoolImageHigh > c.PoolMaxRows:
+		return nil, fmt.Errorf("%w: 图片高水位(%d) 不得超过总行数上限(%d)", ErrInvalid, c.PoolImageHigh, c.PoolMaxRows)
+	case c.PoolImageMaxBytes < store.MaxAssetBytes:
+		return nil, fmt.Errorf("%w: 图片字节预算(%d) 至少要容得下一条题(%d)", ErrInvalid, c.PoolImageMaxBytes, store.MaxAssetBytes)
+	case c.PoolImageMaxBytes > maxImageBudgetBytes:
+		return nil, fmt.Errorf("%w: 图片字节预算不得超过 %d", ErrInvalid, maxImageBudgetBytes)
+	}
+	if v := getenv(envGenerators); v != "" {
+		seen := map[string]bool{}
+		for _, name := range strings.Split(v, ",") {
+			name = strings.TrimSpace(name)
+			if name == "" || len(name) > 64 || seen[name] {
+				return nil, fmt.Errorf("%w: %s 含空白、过长或重复的题型名", ErrInvalid, envGenerators)
+			}
+			seen[name] = true
+			c.Generators = append(c.Generators, name)
+		}
+		if len(c.Generators) == 0 {
+			return nil, fmt.Errorf("%w: %s 不得为空列表（要全部启用就别设这个变量）", ErrInvalid, envGenerators)
+		}
 	}
 	// 题目必须比 challenge 晚过期，否则领题条件永远不成立、站点只会拿到 503。
 	// 这是配置层面的可诊断错误，不该留到运行时用错误码去暗示。
@@ -414,10 +494,15 @@ func readKey(getenv func(string) string, name string) ([]byte, error) {
 
 // SafeSummary 是可安全写入启动输出与日志的一行摘要。
 func (c *Config) SafeSummary() string {
-	return fmt.Sprintf("listen=%s admin_listen=%s db=%s site_imports=%d challenge_ttl=%s response_ttl=%s trust_proxy=%t ip_rpm=%d site_rpm=%d max_active=%d max_active_per_site=%d admin_key_present=%t pool=%t pool_low=%d pool_high=%d pool_max=%d pool_workers=%d pool_ttl=%s pool_poll=%s",
+	generators := strings.Join(c.Generators, ",")
+	if generators == "" {
+		generators = "all"
+	}
+	return fmt.Sprintf("listen=%s admin_listen=%s db=%s site_imports=%d challenge_ttl=%s response_ttl=%s trust_proxy=%t ip_rpm=%d site_rpm=%d max_active=%d max_active_per_site=%d admin_key_present=%t pool=%t pool_low=%d pool_high=%d pool_max=%d pool_workers=%d pool_ttl=%s pool_poll=%s pool_image_low=%d pool_image_high=%d pool_image_bytes=%d pool_image_yield=%s generators=%s",
 		c.Listen, c.AdminListen, c.DBPath, len(c.Sites), c.ChallengeTTL, c.ResponseTTL, c.TrustProxy,
 		c.RateIPRPM, c.RateSiteRPM, c.MaxActiveChallenges, c.MaxActivePerSite, len(c.AdminKey) > 0,
-		c.PoolEnabled, c.PoolLow, c.PoolHigh, c.PoolMaxRows, c.PoolWorkers, c.PoolQuestionTTL, c.PoolPoll)
+		c.PoolEnabled, c.PoolLow, c.PoolHigh, c.PoolMaxRows, c.PoolWorkers, c.PoolQuestionTTL, c.PoolPoll,
+		c.PoolImageLow, c.PoolImageHigh, c.PoolImageMaxBytes, c.PoolImageYield, generators)
 }
 
 func firstNonEmpty(vals ...string) string {
@@ -447,6 +532,18 @@ func parseInt(v string) (int, bool, error) {
 		return 0, false, nil
 	}
 	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, true, errors.New("invalid")
+	}
+	return n, true, nil
+}
+
+// parseInt64 用于**字节数**这类会超出 int32 的量（32 位平台上 Atoi 会溢出成假值）。
+func parseInt64(v string) (int64, bool, error) {
+	if strings.TrimSpace(v) == "" {
+		return 0, false, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
 		return 0, true, errors.New("invalid")
 	}

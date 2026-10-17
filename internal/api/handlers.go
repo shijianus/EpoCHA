@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -268,7 +267,7 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 		Mode:      ch.Mode,
 	}
 	if q != nil {
-		dto, err := s.questionDTO(ctx, q)
+		dto, err := s.questionDTO(q)
 		if err != nil {
 			// 题面读不出合法 DTO：这张 challenge 已经消耗了一条题，必须作废而不是下发坏题面。
 			s.log.Error("题面不合法", "cid8", shortCID(q.ChallengeID))
@@ -284,10 +283,18 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// questionDTO 是题面出网的唯一通道：生成器的白名单字段 + 题型标识。
+// questionDTO 是题面出网的唯一通道：生成器的白名单字段 + 题型标识（+ 图片资产）。
 // 池行 id **不**出现在响应里：客户端不需要、也不该有一个可枚举的题目标识；
 // 题目与 challenge 的绑定只在服务端（pool.challenge_id）。
-func (s *Server) questionDTO(ctx context.Context, q *store.PoolQuestion) (map[string]any, error) {
+//
+// 图片走 base64 内联而不是一个 /asset/<id> 端点（DESIGN §10.1、ADR-012）：
+// 裸媒体端点会凭空造出一个需要防枚举、防跨 challenge 引用的面，而 3B 的题是一次性的，
+// 内联让"图只跟着它那张 challenge 出去"成为结构事实。
+//
+// 媒体与资产必须**成对一致**：声明 image 却没有图 ⇒ 客户端拿到一道看不见的题；
+// 声明 text 却带图 ⇒ 多出一个客户端不会读的字段。两种都是写库侧的事故，
+// 这里 fail closed（作废该 challenge），而不是"少张图也照样发出去"。
+func (s *Server) questionDTO(q *store.PoolQuestion) (map[string]any, error) {
 	g, err := s.gens.Lookup(q.GeneratorID)
 	if err != nil {
 		return nil, err
@@ -298,8 +305,27 @@ func (s *Server) questionDTO(ctx context.Context, q *store.PoolQuestion) (map[st
 	}
 	fields["generator"] = q.GeneratorID
 	fields["generator_version"] = q.Version
+	if g.Media() == generator.MediaImage {
+		if len(q.Asset) == 0 || q.AssetMime != store.MimeTypePNG {
+			return nil, errAssetInconsistent
+		}
+		if len(q.Asset) > store.MaxAssetBytes {
+			return nil, errAssetInconsistent
+		}
+		fields["media"] = generator.MediaImage
+		fields["image_mime"] = q.AssetMime
+		fields["image_base64"] = base64.StdEncoding.EncodeToString(q.Asset)
+		return fields, nil
+	}
+	if len(q.Asset) > 0 || q.AssetMime != "" {
+		return nil, errAssetInconsistent
+	}
 	return fields, nil
 }
+
+// errAssetInconsistent 是"媒体声明与资产不配对"。它走的是**题面不合法**那条路径：
+// 作废这张 challenge 并返回可重试的 503，绝不下发一道看不见题面的题。
+var errAssetInconsistent = errors.New("api: 题目媒体与资产不一致")
 
 // challengeUnavailable 是"暂时给不出题"的可重试响应：503 + Retry-After。
 // 它与限流分开，因为业务方的处理动作不同（限流要退避更久，缺题只要稍后重试）。
@@ -404,7 +430,9 @@ func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 			s.challengeUnavailable(w)
 			return
 		}
-		q, err := s.db.QuestionForChallenge(ctx, ch.ID)
+		// 判分只读 verifier 一个字段：**不**读题面、更不读图片资产。
+		// 于是"资产被清理/损坏"在结构上不可能影响判分（有测试钉住这条）。
+		verifier, err := s.db.QuestionVerifierForChallenge(ctx, ch.ID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				// 绑定丢了：绝不"那就按没题处理"放行，那是把 pow_question 静默降级
@@ -422,7 +450,7 @@ func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 			s.reject(w, CodeInvalidRequest)
 			return
 		}
-		verdict = g.Verify(q.Verifier, canon)
+		verdict = g.Verify(generator.PrivateVerifier(verifier), canon)
 	}
 
 	ok, err := pow.Params{Algo: pow.Algo, Bits: ch.PowBits, Seed: ch.PowSeed}.Verify(req.PowNonce)

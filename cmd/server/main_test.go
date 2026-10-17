@@ -168,8 +168,8 @@ func TestServeHealthzAndGracefulShutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
-	if v, _ := d.SchemaVersion(context.Background()); v != 3 {
-		t.Fatalf("迁移版本 = %d（阶段 3A 应为 3）", v)
+	if v, _ := d.SchemaVersion(context.Background()); v != 4 {
+		t.Fatalf("迁移版本 = %d（阶段 3B 应为 4）", v)
 	}
 	if _, err := d.SiteByKey(context.Background(), "sk-e2e"); err != nil {
 		t.Fatalf("站点未落库：%v", err)

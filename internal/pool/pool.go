@@ -51,10 +51,27 @@ type Config struct {
 	// 失败退避：Start 起指数增长，封顶 Max。
 	BackoffStart time.Duration
 	BackoffMax   time.Duration
+
+	// --- 阶段 3B：图片题桶的水位与预算 ---
+	// 视觉题的准备成本是算术题的上千倍（光栅化 + PNG 编码 + 每条几十 KB），
+	// 所以它**不继承**算术桶的水位与行数量级：这里给的是独立的一组上界。
+	// 默认值是 [目标]（未曾在目标机上按真实到达率校准），取值理由见 DefaultConfig 注释。
+	ImageLowWatermark  int
+	ImageHighWatermark int
+	// ImageMaxTotalBytes 是**全局**图片字节预算（ready/assigned/terminal 行都算）。
+	// 它是与 MaxRows 正交的第二条容量边界：只看条数时，20 条图片题可能比 2 万条算术题更占地方。
+	ImageMaxTotalBytes int64
+	// ImageYieldPause 是补图片题时每次让步的时长。它比 YieldPause 长，
+	// 因为单题成本已经高了一个量级，同样的让步节奏会把 CPU 吃掉更多。
+	ImageYieldPause time.Duration
 }
 
 // MaxWorkers 是并发生成的硬上限。它存在的意义是防止一个手滑的配置把 1 vCPU 机器打成 N 倍负载。
 const MaxWorkers = 4
+
+// MaxImageBudgetBytes 是图片字节预算自身的上界：没有它，一个手滑的 1e12 就把
+// "有界预算"变成"无界磁盘增长器"（与 ADR-009 给 TTL 上界的理由同一类）。
+const MaxImageBudgetBytes = 1 << 30 // 1 GiB
 
 var ErrBadConfig = errors.New("pool: 配置不合法")
 
@@ -72,6 +89,13 @@ func DefaultConfig() Config {
 		YieldPause:    100 * time.Millisecond,
 		BackoffStart:  100 * time.Millisecond,
 		BackoffMax:    10 * time.Second,
+		// 图片桶：几十题的量级（不是算术题的 50/100，更不是 20000 行上限）。
+		// 取值形状：24 题 ready × 最坏 64KB = 1.5MB，正在作答与待清理的行也落在 4MB 预算内；
+		// 低水位 8 让一轮补题就能撑过一段请求。
+		ImageLowWatermark:  8,
+		ImageHighWatermark: 24,
+		ImageMaxTotalBytes: 4 << 20,
+		ImageYieldPause:    200 * time.Millisecond,
 	}
 }
 
@@ -94,6 +118,20 @@ func (c Config) Validate() error {
 		return fmt.Errorf("%w: CPU 让步参数不合法", ErrBadConfig)
 	case c.BackoffStart < time.Millisecond || c.BackoffMax < c.BackoffStart:
 		return fmt.Errorf("%w: 退避区间不合法", ErrBadConfig)
+	case c.ImageLowWatermark < 1 || c.ImageHighWatermark < c.ImageLowWatermark:
+		return fmt.Errorf("%w: 图片水位须满足 1 ≤ low ≤ high", ErrBadConfig)
+	case c.ImageMaxTotalBytes < store.MaxAssetBytes:
+		return fmt.Errorf("%w: 图片字节预算(%d) 至少要容得下一条题(%d)",
+			ErrBadConfig, c.ImageMaxTotalBytes, store.MaxAssetBytes)
+	case c.ImageMaxTotalBytes > MaxImageBudgetBytes:
+		return fmt.Errorf("%w: 图片字节预算不得超过 %d", ErrBadConfig, MaxImageBudgetBytes)
+	case c.ImageYieldPause < 0:
+		return fmt.Errorf("%w: 图片让步时长不合法", ErrBadConfig)
+	case c.MaxRows < c.ImageHighWatermark:
+		// 图片高水位也必须落在总行数上限内，否则"补到 high"永远达不成，
+		// 迟滞标志一直挂着，每轮白做一次统计。
+		return fmt.Errorf("%w: max_rows(%d) 不能小于图片高水位(%d)",
+			ErrBadConfig, c.MaxRows, c.ImageHighWatermark)
 	}
 	return nil
 }
@@ -218,6 +256,8 @@ func errClass(err error) string {
 	switch {
 	case errors.Is(err, store.ErrPoolFull):
 		return "pool-full"
+	case errors.Is(err, store.ErrImageBudget):
+		return "image-budget"
 	case errors.Is(err, generator.ErrOutOfEntropy):
 		return "entropy"
 	case errors.Is(err, generator.ErrGenerateExhausted):
@@ -323,6 +363,30 @@ func (w *Worker) Tick(ctx context.Context) (int, error) {
 			w.noteFailed(err)
 			continue
 		}
+		// 图片桶与文本桶用**各自**的水位与让步节奏：把算术题的 50/100 继承给视觉题，
+		// 等于让 1 vCPU 机器持续渲染几百张图（DESIGN §8.5 的资源纪律）。
+		var (
+			low, high = w.cfg.LowWatermark, w.cfg.HighWatermark
+			pause     = w.cfg.YieldPause
+			isImage   = g.Media() == generator.MediaImage
+		)
+		if isImage {
+			low, high, pause = w.cfg.ImageLowWatermark, w.cfg.ImageHighWatermark, w.cfg.ImageYieldPause
+		}
+		if isImage {
+			// 预检查只为**避免白烧一次渲染**（生成完才被预算拒绝）。真正的判定仍然在
+			// InsertQuestion 的那条 SQL 里原子完成——这里估的是"最坏一条题"的成本。
+			used, err := w.db.ImageAssetBytes(ctx)
+			if err != nil {
+				w.noteFailed(err)
+				firstErr = err
+				continue
+			}
+			if used+store.MaxAssetBytes > w.cfg.ImageMaxTotalBytes {
+				w.noteRejected(store.ErrImageBudget)
+				continue
+			}
+		}
 		ready, err := w.db.ReadyCount(ctx, spec, now)
 		if err != nil {
 			w.noteFailed(err)
@@ -331,10 +395,10 @@ func (w *Worker) Tick(ctx context.Context) (int, error) {
 		}
 		key := spec.GeneratorID + "|" + spec.Version + "|" + strconv.Itoa(spec.Difficulty)
 		w.mu.Lock()
-		behind := w.refilling[key] || ready < w.cfg.LowWatermark
-		if behind && ready >= w.cfg.HighWatermark {
+		behind := w.refilling[key] || ready < low
+		if behind && ready >= high {
 			w.refilling[key] = false
-			behind = ready < w.cfg.LowWatermark // 已补到高水位：重新武装触发条件
+			behind = ready < low // 已补到高水位：重新武装触发条件
 		}
 		if behind {
 			w.refilling[key] = true
@@ -343,7 +407,7 @@ func (w *Worker) Tick(ctx context.Context) (int, error) {
 		if !behind {
 			continue
 		}
-		need := w.cfg.HighWatermark - ready
+		need := high - ready
 		if need > w.cfg.BatchPerTick {
 			need = w.cfg.BatchPerTick
 		}
@@ -358,7 +422,8 @@ func (w *Worker) Tick(ctx context.Context) (int, error) {
 				return made, nil
 			}
 			if err := w.provision(ctx, g, spec, now); err != nil {
-				if errors.Is(err, store.ErrPoolFull) || errors.Is(err, store.ErrBadConfig) {
+				if errors.Is(err, store.ErrPoolFull) || errors.Is(err, store.ErrImageBudget) ||
+					errors.Is(err, store.ErrBadConfig) {
 					w.noteRejected(err)
 				} else {
 					w.noteFailed(err)
@@ -376,14 +441,14 @@ func (w *Worker) Tick(ctx context.Context) (int, error) {
 			made++
 			bucketMade++
 			w.noteGenerated()
-			if ready+bucketMade >= w.cfg.HighWatermark {
+			if ready+bucketMade >= high {
 				// 补满即撤防：下一次要等 ready 再度跌破 low 才重新触发
 				w.mu.Lock()
 				w.refilling[key] = false
 				w.mu.Unlock()
 			}
 			if made%w.cfg.YieldEvery == 0 {
-				if err := sleepCtx(ctx, w.cfg.YieldPause); err != nil {
+				if err := sleepCtx(ctx, pause); err != nil {
 					return made, err
 				}
 			}
@@ -420,6 +485,21 @@ func (w *Worker) provision(ctx context.Context, g generator.Generator, spec stor
 	if len(payload) > store.MaxPayloadBytes {
 		return fmt.Errorf("%w: 题面超过 %d 字节", store.ErrBadConfig, store.MaxPayloadBytes)
 	}
+	// 媒体声明与资产必须一致：声明 image 却没有图，下发的是一个空白题面；
+	// 声明 text 却带图，DTO 会多出一个客户端不该有的字段。两种都在**写库之前**拒绝，
+	// 而不是等到签发请求时才失败（那时已经消耗了一条池容量）。
+	switch {
+	case g.Media() == generator.MediaImage && len(q.Asset) == 0:
+		return fmt.Errorf("%w: 图片题型没有产出资产", store.ErrBadConfig)
+	case g.Media() != generator.MediaImage && len(q.Asset) > 0:
+		return fmt.Errorf("%w: 非图片题型产出了资产", store.ErrBadConfig)
+	case len(q.Asset) > 0 && q.MimeType != store.MimeTypePNG:
+		return fmt.Errorf("%w: 资产 MIME %q 不在允许集合", store.ErrBadConfig, q.MimeType)
+	}
+	if len(q.Asset) > store.MaxAssetBytes {
+		return fmt.Errorf("%w: 图片资产 %d 字节，上限 %d",
+			store.ErrBadConfig, len(q.Asset), store.MaxAssetBytes)
+	}
 	row := &store.PoolQuestion{
 		ID:          id,
 		GeneratorID: spec.GeneratorID,
@@ -428,10 +508,14 @@ func (w *Worker) provision(ctx context.Context, g generator.Generator, spec stor
 		Status:      store.PoolReady,
 		PayloadJSON: string(payload),
 		Verifier:    []byte(q.Verifier),
+		Asset:       q.Asset,
+		AssetMime:   q.MimeType,
 		CreatedAt:   now.UTC(),
 		ExpiresAt:   now.UTC().Add(w.cfg.QuestionTTL),
 	}
-	return w.db.InsertQuestion(ctx, row, w.cfg.MaxRows)
+	return w.db.InsertQuestion(ctx, row, store.PoolLimits{
+		MaxRows: w.cfg.MaxRows, MaxImageBytes: w.cfg.ImageMaxTotalBytes,
+	})
 }
 
 // newQuestionID 生成 16 字节随机 hex 的池行 id。

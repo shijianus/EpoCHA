@@ -161,6 +161,8 @@ func TestRefillStopsAtMaxRows(t *testing.T) {
 		c.HighWatermark = 5
 		c.MaxRows = limit
 		c.BatchPerTick = 20
+		// 图片水位也必须落在这个极小的行数上限内（Validate 会挡"永远补不到高水位"的配置）
+		c.ImageLowWatermark, c.ImageHighWatermark = 1, 2
 	}, nil)
 	// 两个分桶共用同一个**全局**上限：第二个桶才会撞上
 	h.questionSite("alpha", 1)

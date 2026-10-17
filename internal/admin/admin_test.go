@@ -796,7 +796,7 @@ func TestPoolStatusIsReadOnlyAndLeakFree(t *testing.T) {
 			Verifier:    []byte("SECRET-VERIFIER-MUST-NEVER-LEAVE-THE-SERVER"),
 			CreatedAt:   time.Now().UTC(),
 			ExpiresAt:   time.Now().Add(time.Hour).UTC(),
-		}, 1000); err != nil {
+		}, store.PoolLimits{MaxRows: 1000, MaxImageBytes: 64 << 20}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -844,7 +844,7 @@ func TestPoolStatusReflectsAssignment(t *testing.T) {
 		Difficulty:  site.Policy.Difficulty,
 		PayloadJSON: `{"task":"1 + 1","answer_type":"integer","max_answer_len":14}`,
 		Verifier:    []byte("v"), CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().Add(2 * time.Hour).UTC(),
-	}, 100); err != nil {
+	}, store.PoolLimits{MaxRows: 100, MaxImageBytes: 64 << 20}); err != nil {
 		t.Fatal(err)
 	}
 	cid := strings.Repeat("f", 32)

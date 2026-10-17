@@ -11,6 +11,9 @@ package generator
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"io"
 	"sort"
@@ -20,6 +23,13 @@ import (
 
 // 协议边界。
 const MaxDifficulties = 5
+
+// 媒体类别。题池 worker 用它决定水位与字节预算这一组资源参数（DESIGN §8.5），
+// API 用它决定 DTO 是否必须带图片——所以它是**契约值**，不是描述文字。
+const (
+	MediaText  = "text"
+	MediaImage = "image"
+)
 
 var (
 	ErrUnknownGenerator = errors.New("generator: 未注册的题型")
@@ -128,6 +138,56 @@ func (r *Registry) IDs() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// --- 共用的判分形态 ---
+
+// 可离散化题型（3A 的算术、3B 的视觉字符）共用**同一条** verifier 构造：
+//
+//	verifier = nonce(16B) || HMAC(K(qver), "epocha/v1|qver|" || nonce || 0x00 || 规范化答案)
+//
+// 之所以放在一个实现里而不是每个题型抄一遍：这是安全关键构造，两份拷贝会各自漂移，
+// 而"库里的旧 verifier 被新解释读成另一批答案"是静默的正确性事故（DESIGN §5.4、ADR-011 #4）。
+// 需要连续容差的题型（角度、区域）不适用这条路径，按 ADR-003 自行定义判定方式。
+const (
+	verifierNonceSz = 16
+	verifierTagSz   = sha256.Size
+
+	// AnswerVerifierLen 是共用 verifier 的字节长度（48）。库侧的 MaxVerifierBytes=512 是上限，
+	// 这里有测试按 48 钉住实际形态，改长度必须同时改 0003 迁移注释与 DESIGN §5.4。
+	AnswerVerifierLen = verifierNonceSz + verifierTagSz
+
+	// answerMACDomain 是域分隔前缀。它与站点 secret 摘要串、token 派生串、管理凭据串都不同，
+	// 因此这几类 HMAC 不可互换（DESIGN §6）。
+	answerMACDomain = "epocha/v1|qver|"
+)
+
+// answerTag 算答案的 HMAC 标签。
+func answerTag(macKey, nonce []byte, canonicalAnswer string) []byte {
+	m := hmac.New(sha256.New, macKey)
+	m.Write([]byte(answerMACDomain))
+	m.Write(nonce)
+	m.Write([]byte{0})
+	m.Write([]byte(canonicalAnswer))
+	return m.Sum(nil)
+}
+
+// answerVerifier 拼出私有判分数据：nonce || tag。答案明文到此为止，不进库、不出门。
+func answerVerifier(macKey, nonce []byte, canonicalAnswer string) []byte {
+	tag := answerTag(macKey, nonce, canonicalAnswer)
+	out := make([]byte, 0, AnswerVerifierLen)
+	out = append(out, nonce...)
+	return append(out, tag...)
+}
+
+// verifyAnswer 对候选答案重算同一条 HMAC 再常数时间比较。
+// **没有任何**读回答案的接口：这是"答案不落库明文"能被证明的结构原因。
+func verifyAnswer(macKey []byte, v PrivateVerifier, canonicalAnswer string) bool {
+	if len(v) != AnswerVerifierLen {
+		return false
+	}
+	want := answerTag(macKey, v[:verifierNonceSz], canonicalAnswer)
+	return subtle.ConstantTimeCompare(want, v[verifierNonceSz:]) == 1
 }
 
 // --- 共享的输入规范化工具 ---

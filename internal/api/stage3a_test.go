@@ -398,26 +398,42 @@ func TestClientCannotDowngradeOrSwapRequirement(t *testing.T) {
 // TestAnswerIsBoundToItsOwnChallenge 答案与题目一题一验证物：
 // 把 A 题的答案提交给 B 题必须失败；而 B 失败后已被终结（一次作答），
 // 所以正向对照用另一张新 challenge 做——这条同时钉住了"答案不是全局可复用的口令"。
+//
+// 前提"B 与 A 不同答案"用**有界重抽**保证，不用 `t.Skip` 蒙过去：
+// 随机补题确实可能抽出同答案的两道题，但把断言跳过等于把这条安全性质的覆盖率交给概率，
+// 而且 CI 里永远是绿的。d4 档最大单点答案概率实测 ≈0.0136（§8.4），因此"连续 6 次都撞上同一个答案"
+// 的概率上界约 0.0136^6 ≈ 6e-12；真撞上就说明池的多样性本身已经塌了——那时**报错**才是正确的反应。
 func TestAnswerIsBoundToItsOwnChallenge(t *testing.T) {
 	h := newHarness(t, nil)
 	site, _ := h.questionSite(t, "questioned", "sk-q", 4)
-	h.fillPool(t, site.Policy.Difficulty, 4)
+	h.fillPool(t, site.Policy.Difficulty, 10)
 
 	rA := h.challengeReply("sk-q")
-	rB := h.challengeReply("sk-q")
 	taskA := h.questionOf(t, rA)
-	taskB := h.questionOf(t, rB)
-	if taskA == taskB {
-		t.Skip() // 基线题型允许偶发同题面；这不是安全性质，见 DESIGN §8.4 的去重说明
+	ansA := solveTaskText(t, taskA)
+
+	// 领到一道**答案不同**的 B
+	var rB reply
+	var ansB int64
+	picked := false
+	for range 6 {
+		rB = h.challengeReply("sk-q")
+		ansB = solveTaskText(t, h.questionOf(t, rB))
+		if ansB != ansA {
+			picked = true
+			break
+		}
 	}
-	ansA := strconv.FormatInt(solveTaskText(t, taskA), 10)
+	if !picked {
+		t.Fatalf("连续 6 次领到的题都与 A 同答案（%d）：题池多样性已不成立，本测试的前提无法构造", ansA)
+	}
+
 	nonceB := h.solvePow(t, rB)
-	if rr := h.redeemAnswer(rB.str("token"), nonceB, ansA); rr.status == http.StatusOK {
+	if rr := h.redeemAnswer(rB.str("token"), nonceB, strconv.FormatInt(ansA, 10)); rr.status == http.StatusOK {
 		t.Fatal("把 A 题的答案用到 B 题上竟兑换成功")
 	}
 	// B 已经被错误答案终结：正确答案也不再能用（一次作答的另一个侧面）
-	ansB := strconv.FormatInt(solveTaskText(t, taskB), 10)
-	if rr := h.redeemAnswer(rB.str("token"), h.solvePow(t, rB), ansB); rr.status == http.StatusOK {
+	if rr := h.redeemAnswer(rB.str("token"), h.solvePow(t, rB), strconv.FormatInt(ansB, 10)); rr.status == http.StatusOK {
 		t.Fatal("错误答案之后同一张 challenge 竟可重试")
 	}
 	// 正向对照：新领一张，自己的答案自己的题

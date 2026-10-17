@@ -11,7 +11,7 @@ import (
 	"io"
 	"os"
 
-	"epocha/internal/version"
+	"github.com/shijianus/EpoCHA/internal/version"
 )
 
 func main() {

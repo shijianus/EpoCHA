@@ -39,6 +39,15 @@
 
 常用命令见 `Makefile`：`make help` 列出。关键项：`make build` / `make test` / `make race` / `make vet` / `make stage1-check`（curl 全流程）/ `make secret-scan`（日志泄露密钥的 grep 测试）/ `make widget-size`。
 
+## 仓库与推送
+远端：`git@github.com:shijianus/EpoCHA`（private，SSH 已认证为 `shijianus`）。模块路径 `github.com/shijianus/EpoCHA`。
+**用户已预先授权：每次阶段完成后 `git commit` → `git tag stage-N-done` → `git push origin main --follow-tags`。**
+但推送仍有硬边界：
+- **禁止 `--force` / `--no-verify`**；非快进（远端有别人的提交）→ 停下来问我，不要 rebase 或覆盖。
+- **禁止把真实密钥材料提交进仓库**，即使仓库是 private：`EPOCHA_MASTER_KEY`、`EPOCHA_PEPPER`、任何站点 `secret_key`、`admin_key`、`.env`、`*.key`、`*.pepper`（已在 `.gitignore`）。理由见 DESIGN §6 末段：private 不等于安全边界（历史不可撤销、任何 repo 令牌/CI 产物/未来的可见性切换都会泄露），且 pepper 与 DB 同仓库存放会让摘要保护直接失效。需要示例时更新 `.env.example` 的占位符。
+- **题库、语料、字体、图片素材属于非机密资产，可以提交**（DESIGN §8.2 R3 的许可问题仍需单独确认）。注意 GitHub 单文件 >100MB 直接拒收、仓库 >1GB 告警：这类资产先量体积，超限时改用 Git LFS 或改为"由生成器确定性派生（记录 seed）"而不入库。
+- 提交前跑 `git status` 复核暂存内容，发现像密钥的东西（高熵串、`*_key`、`credentials`）就停下来问。
+
 ## 停止并问我（不要自作主张）
 - 要**删除已有文件**（含看起来无用的）。
 - 要**改动依赖大版本**或新增依赖。

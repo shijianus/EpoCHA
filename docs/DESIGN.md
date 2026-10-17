@@ -175,7 +175,14 @@ payload 必填字段：`typ`（`chal`|`resp`）、`kid`、`jti`、`sid`（站点
 轮换：`kid` 允许同时存在 current + previous（`--master-key-previous`），旧 token 在 TTL 内自然过期。
 
 `secret_key` 校验：`want = HMAC(pepper, provided_secret)`，`subtle.ConstantTimeCompare(want, site.secret_mac)`。admin_key 同法（存摘要，不存明文）。
+**管理密钥引导**：库中无 admin 记录时，用 `EPOCHA_ADMIN_KEY` 登记其摘要（只此一次，之后靠 `/api/admin/keys/rotate` 与审计管理）；有记录后该环境变量忽略。
 日志红线：禁止输出 `secret`、`response`/`token` 全文、`answer`、payload 完整 JSON、未掩码 IP。允许输出：nonce 前 8 字符、site_key、耗时、错误码。
+
+**密钥材料的存放（硬约束）**：`EPOCHA_MASTER_KEY` / `EPOCHA_PEPPER` / 站点 `secret_key` / `admin_key` **一律不进仓库**，即使仓库是 private。
+三条理由：(1) git 历史不可撤销，泄露后只能轮换全部密钥；(2) private 的访问面不等于零——任何带 repo 范围的令牌、CI 产物、镜像层、未来的可见性切换或开源导出都会带出历史；
+(3) 本设计的安全前提是 **pepper 与 DB 分离存放**（§5 的答案摘要、§6 的密钥摘要都依赖它）。把两者放进同一个仓库/同一次备份 = 摘要保护归零。
+存放方式：`/etc/epocha/env`（`0600`，属主为服务账号）或 systemd `EnvironmentFile`/密钥管理，与 `/var/lib/epocha/*.db` 分目录、分备份策略。
+仓库里只放 `.env.example`（占位符）。题库、语料、字体、图片素材属非机密资产，可入库（R3 许可另议，>100MB 改用 LFS 或派生 seed）。
 
 ## 7. PoW 层
 
@@ -461,3 +468,4 @@ docs/                本文件、AGENTS.md、部署/威胁模型补充
 ## 19. 变更日志
 
 - 2026-10-17 v1：阶段 0 定稿（目录骨架、三层防线、API 契约、SQLite schema、密钥体系、CF 折衷、四题型反枚举设计、威胁模型与残余风险 R1–R8）。
+- 2026-10-17 v1.1：模块路径改为 `github.com/shijianus/EpoCHA`（远端 private 仓库已确定，SSH 推送为默认工作流）。§6 新增两条：管理密钥引导（`EPOCHA_ADMIN_KEY` 仅在建库首启时登记摘要）与**密钥材料不入仓库**的硬约束——`AGENTS.md` 同步；真实密钥走 `/etc/epocha/env`（0600）与 DB 分离存放、分离备份。非机密的题库/语料/字体/素材允许入库，>100MB 改 Git LFS 或记录派生 seed。

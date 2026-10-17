@@ -1,5 +1,5 @@
 SHELL := /bin/bash
-MODULE      := epocha
+MODULE      := github.com/shijianus/EpoCHA
 BIN         := bin/epocha
 VERSION     := $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.0.0-dev)
 COMMIT      := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)

@@ -52,11 +52,19 @@ func NewLimiter(rpm, maxStates int) (*Limiter, error) {
 	}, nil
 }
 
-// Allow 记录一次命中并返回是否放行。
-func (l *Limiter) Allow(key string) bool {
+// Allow 用构造时的默认速率计数。
+func (l *Limiter) Allow(key string) bool { return l.AllowN(key, l.rpm) }
+
+// AllowN 按调用方给定的速率计数——阶段 2 的 rpm 是**站点级**配置，
+// 而限流器只需要关心"状态条目有界"这一件事，两者因此分开。
+// rpm<=0 视为配置错误：宁可拒绝放行也不能变成"不限流"。
+func (l *Limiter) AllowN(key string, rpm int) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	if rpm <= 0 {
+		return false
+	}
 	cur := l.bucket()
 	c, ok := l.states[key]
 	if !ok {
@@ -68,7 +76,7 @@ func (l *Limiter) Allow(key string) bool {
 		c.bucket, c.count = cur, 0
 	}
 	c.count++
-	return c.count <= l.rpm
+	return c.count <= rpm
 }
 
 // RetryAfter 返回该 key 建议等待时长；未超限也返回窗口剩余时间，便于调用方设置表头。

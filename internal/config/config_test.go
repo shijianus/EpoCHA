@@ -143,8 +143,11 @@ func TestErrorMessagesDoNotLeakSecrets(t *testing.T) {
 			t.Fatalf("SafeSummary 泄露 %q：%s", leak, sum)
 		}
 	}
-	if strings.Contains(sum, "sites=") == false {
-		t.Fatalf("SafeSummary 缺少站点计数：%s", sum)
+	if !strings.Contains(sum, "site_imports=") || !strings.Contains(sum, "admin_listen=") {
+		t.Fatalf("SafeSummary 缺少站点导入数或管理监听地址：%s", sum)
+	}
+	if strings.Contains(sum, "admin_key_present=true") {
+		t.Fatal("SafeSummary 不该带出凭据内容")
 	}
 }
 
@@ -176,13 +179,19 @@ func TestMissingDBAndSites(t *testing.T) {
 	if _, err := Load(nil, envMap(env)); !errors.Is(err, ErrInvalid) {
 		t.Error("缺 DB 路径应拒绝")
 	}
+	// 阶段 2：站点配置只是可选的一次性导入入口，SQLite 才是权威数据源，
+	// 所以"没有配置文件"必须能正常启动（站点全从库里读）。
 	env = baseEnv(t)
 	delete(env, envSites)
-	if _, err := Load(nil, envMap(env)); !errors.Is(err, ErrInvalid) {
-		t.Error("缺站点配置应拒绝")
+	c, err := Load(nil, envMap(env))
+	if err != nil {
+		t.Errorf("缺站点配置不应拒绝：%v", err)
+	} else if len(c.Sites) != 0 {
+		t.Errorf("无配置文件时站点导入列表应为空：%+v", c.Sites)
 	}
+	// 但**指定了**文件却读不到，仍然是配置错误（静默忽略会让运维以为导入发生了）
 	if _, err := Load([]string{"--sites", filepath.Join(t.TempDir(), "nope.json")}, envMap(baseEnv(t))); !errors.Is(err, ErrInvalid) {
-		t.Error("站点文件不存在应拒绝")
+		t.Error("显式指定的站点文件不存在应拒绝")
 	}
 	if _, err := Load([]string{"--unknown-flag", "1"}, envMap(baseEnv(t))); !errors.Is(err, ErrInvalid) {
 		t.Error("未知 flag 应拒绝")
@@ -342,5 +351,87 @@ func TestTTLUpperBoundAndActiveCaps(t *testing.T) {
 		if _, err := Load(nil, envMap(env)); !errors.Is(err, ErrInvalid) {
 			t.Errorf("全局=%q 单站=%q 应拒绝，got %v", bad.global, bad.site, err)
 		}
+	}
+}
+
+// TestAdminBootstrapConfig 覆盖管理引导凭据的三条边界：缺失合法、过短/含空白拒绝、
+// 以及错误文案不回显凭据本身。
+func TestAdminBootstrapConfig(t *testing.T) {
+	env := baseEnv(t)
+	c, err := Load(nil, envMap(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.AdminKey) != 0 {
+		t.Fatalf("未设置 %s 时不应有引导凭据", envAdminKey)
+	}
+	const adminKey = "ak_0123456789abcdef0123456789abcdef"
+	env[envAdminKey] = adminKey
+	c, err = Load(nil, envMap(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(c.AdminKey) != adminKey {
+		t.Fatal("引导凭据应与环境变量逐字节相同（不做 base64 变换，登记形式与发送形式必须一致）")
+	}
+	for name, v := range map[string]string{
+		"过短":    "short",
+		"含空白":   "ak with spaces inside it here!!",
+		"含控制字符": "ak_" + string(rune(7)) + "bcdefghijklmnopqrstuvwxyz0123456",
+	} {
+		env := baseEnv(t)
+		env[envAdminKey] = v
+		if _, err := Load(nil, envMap(env)); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s 的引导凭据应拒绝", name)
+		} else if strings.Contains(err.Error(), v) {
+			t.Errorf("错误文案回显了凭据：%v", err)
+		}
+	}
+	// 管理监听地址：默认 loopback，flag 可覆盖
+	c, err = Load(nil, envMap(baseEnv(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(c.AdminListen, "127.0.0.1:") {
+		t.Fatalf("管理监听默认应只在 loopback，got %s", c.AdminListen)
+	}
+	c, err = Load([]string{"--admin-listen", "127.0.0.1:9999"}, envMap(baseEnv(t)))
+	if err != nil || c.AdminListen != "127.0.0.1:9999" {
+		t.Fatalf("--admin-listen 未生效：%v %+v", err, c)
+	}
+}
+
+// TestSitesFileOriginsValidation 确认配置里的来源条目在装载阶段就规范化并被严格校验。
+func TestSitesFileOriginsValidation(t *testing.T) {
+	cases := map[string]string{
+		"合法":     `[{"name":"a","site_key":"k","secret":"aaaaaaaaaaaaaaaaaaaa","origins":["https://app.example.com"]}]`,
+		"通配符":    `[{"name":"a","site_key":"k","secret":"aaaaaaaaaaaaaaaaaaaa","origins":["https://*.example.com"]}]`,
+		"null":   `[{"name":"a","site_key":"k","secret":"aaaaaaaaaaaaaaaaaaaa","origins":["null"]}]`,
+		"相似后缀":   `[{"name":"a","site_key":"k","secret":"aaaaaaaaaaaaaaaaaaaa","origins":["https://evil-example.com"]}]`,
+		"非 http": `[{"name":"a","site_key":"k","secret":"aaaaaaaaaaaaaaaaaaaa","origins":["ftp://example.com"]}]`,
+	}
+	for name, body := range cases {
+		path := writeSites(t, body)
+		if name == "合法" || name == "相似后缀" {
+			if _, err := Load([]string{"--sites", path}, envMap(baseEnv(t))); err != nil {
+				t.Fatalf("%s 应通过：%v", name, err)
+			}
+			continue
+		}
+		if _, err := Load([]string{"--sites", path}, envMap(baseEnv(t))); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s 应被拒绝，got %v", name, err)
+		}
+	}
+	// 合法条目要带上规范化结果与显式放行标志
+	path := writeSites(t, `[{"name":"a","site_key":"k","secret":"aaaaaaaaaaaaaaaaaaaa","origins":["https://app.example.com:443"],"allow_missing_origin":true}]`)
+	c, err := Load([]string{"--sites", path}, envMap(baseEnv(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Sites[0].Origins) != 1 || c.Sites[0].Origins[0] != "https://app.example.com" {
+		t.Fatalf("默认端口未规范化：%+v", c.Sites[0].Origins)
+	}
+	if !c.Sites[0].AllowMissingOrigin {
+		t.Fatal("allow_missing_origin 未生效")
 	}
 }

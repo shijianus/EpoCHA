@@ -24,7 +24,8 @@ help:
 	@echo "make size         断言二进制 <= $(MAX_BIN_MB)MB（DESIGN §13）"
 	@echo "make widget-size  断言 web/widget/v1.js gzip <= $(MAX_WIDGET_KB)KB（阶段 4）"
 	@echo "make secret-scan  按值扫描日志密钥泄露（阶段 2 起生效）"
-	@echo "make stage1-check curl 全流程验收（阶段 1 起生效）"
+	@echo "make stage1-check 全流程验收（阶段 1 起生效）"
+	@echo "make stage2-check 管理面 + 来源策略 + 轮换 + 重启语义端到端验收（阶段 2）"
 	@echo "make run          以临时 DB 启动（仅本地调试）"
 
 .PHONY: build
@@ -83,6 +84,10 @@ secret-scan:
 .PHONY: stage1-check
 stage1-check:
 	@bash docs/scripts/stage1.sh
+
+.PHONY: stage2-check
+stage2-check:
+	@bash docs/scripts/stage2.sh
 
 .PHONY: tidy
 tidy:

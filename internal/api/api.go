@@ -24,6 +24,7 @@ import (
 
 // 请求体上限：公开端点小，siteverify 略大（表单可能带 hostname/remoteip）。
 const (
+	maxBodyAdmin    = 64 << 10
 	maxBodyPublic   = 4 << 10
 	maxBodyVerify   = 8 << 10
 	maxFieldLen     = 512
@@ -54,16 +55,14 @@ const (
 var ErrInternal = errors.New("api: 内部错误")
 
 type Server struct {
-	db           *store.DB
-	signer       *token.Signer
-	src          *risk.Source
-	ipLimit      *risk.Limiter
-	siteLimit    *risk.Limiter
-	log          *slog.Logger
-	now          func() time.Time
-	challengeTTL time.Duration
-	responseTTL  time.Duration
-	caps         store.Caps
+	db        *store.DB
+	signer    *token.Signer
+	src       *risk.Source
+	ipLimit   *risk.Limiter
+	siteLimit *risk.Limiter
+	log       *slog.Logger
+	now       func() time.Time
+	caps      store.Caps
 }
 
 // New 组装服务。限流器与代理裁决来自配置。
@@ -88,16 +87,21 @@ func New(cfg *config.Config, db *store.DB, signer *token.Signer, log *slog.Logge
 	}
 	return &Server{
 		db: db, signer: signer, src: src, ipLimit: ipLimit, siteLimit: siteLimit,
-		log: log, now: time.Now, challengeTTL: cfg.ChallengeTTL, responseTTL: cfg.ResponseTTL,
+		log: log, now: time.Now,
 		caps: store.Caps{MaxActive: cfg.MaxActiveChallenges, MaxActivePerSite: cfg.MaxActivePerSite},
 	}, nil
 }
 
-// Handler 返回带中间件的根路由。
+// Handler 返回**公共**监听器上的根路由。
+//
+// 这里刻意不挂任何 /api/admin/*：管理路由只在 admin 监听器上存在（internal/admin），
+// 公共端口即便配了管理密钥也找不到入口。OPTIONS 只做预检，不落库、不消费状态。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/challenge", s.handleChallenge)
+	mux.HandleFunc("OPTIONS /api/challenge", s.handlePreflight)
 	mux.HandleFunc("POST /api/redeem", s.handleRedeem)
+	mux.HandleFunc("OPTIONS /api/redeem", s.handlePreflight)
 	mux.HandleFunc("POST /siteverify", s.handleSiteverify)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	return s.recoverMiddleware(s.headerMiddleware(s.accessLogMiddleware(mux)))

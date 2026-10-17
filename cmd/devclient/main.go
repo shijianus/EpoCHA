@@ -75,9 +75,10 @@ func run(args []string, getenv func(string) string) error {
 	fs := flag.NewFlagSet("devclient", flag.ContinueOnError)
 	base := fs.String("base", "http://127.0.0.1:8080", "服务地址")
 	siteKey := fs.String("site-key", "", "站点 site_key（公开）")
-	mode := fs.String("mode", "full", "full|double-redeem|double-verify|wrong-secret|acquire|verify-only")
+	mode := fs.String("mode", "full", "full|double-redeem|double-verify|wrong-secret|acquire|redeem-only|verify-only")
 	file := fs.String("response-file", "", "acquire 写入 / verify 读取的 response 文件")
-	hostname := fs.String("hostname", "", "siteverify 自报 hostname（仅回显）")
+	hostname := fs.String("hostname", "", "siteverify 自报 hostname（阶段 2 起服务端不采信，仅用于验证它不会被回显）")
+	origin := fs.String("origin", "", "浏览器 Origin 头（阶段 2 来源策略；留空表示无来源的直接调用）")
 	maxIter := fs.Int64("max-iterations", 50_000_000, "PoW 搜索迭代上限")
 	timeout := fs.Duration("timeout", 30*time.Second, "单次 HTTP 超时")
 	if err := fs.Parse(args); err != nil {
@@ -86,7 +87,7 @@ func run(args []string, getenv func(string) string) error {
 	if *siteKey == "" {
 		return errors.New("缺少 --site-key")
 	}
-	c := &client{base: strings.TrimRight(*base, "/"), http: &http.Client{Timeout: *timeout}}
+	c := &client{base: strings.TrimRight(*base, "/"), origin: *origin, http: &http.Client{Timeout: *timeout}}
 
 	switch *mode {
 	case "full":
@@ -99,6 +100,8 @@ func run(args []string, getenv func(string) string) error {
 		return c.wrongSecret(*siteKey, getenv, *maxIter)
 	case "acquire":
 		return c.acquire(*siteKey, getenv, *maxIter, *file)
+	case "redeem-only":
+		return c.redeemOnly(*siteKey, *maxIter, *file)
 	case "verify-only":
 		return c.verifyOnly(getenv, *file, "failure")
 	default:
@@ -107,8 +110,9 @@ func run(args []string, getenv func(string) string) error {
 }
 
 type client struct {
-	base string
-	http *http.Client
+	base   string
+	origin string // 非空时每个请求都带上该 Origin，用于演示白名单放行路径
+	http   *http.Client
 }
 
 func (c *client) challenge(siteKey string) (challengeResp, error) {
@@ -146,6 +150,9 @@ func (c *client) post(path string, body []byte, contentType string, dst any) (in
 		return 0, err
 	}
 	req.Header.Set("Content-Type", contentType)
+	if c.origin != "" {
+		req.Header.Set("Origin", c.origin)
+	}
 	res, err := c.http.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("请求 %s: %w", path, err)
@@ -300,6 +307,28 @@ func (c *client) acquire(siteKey string, getenv func(string) string, maxIter int
 		return err
 	}
 	fmt.Println("RESULT step=acquire status=ok consumed=1")
+	return nil
+}
+
+// redeemOnly 走到 redeem 后把 response 存文件，**不做任何验证**。
+// 阶段 2 的管理动作（停用站点、撤销凭据）要用"尚未消费的 token"来演示，
+// 而 acquire 会当场消费掉它——两者不能混用。
+func (c *client) redeemOnly(siteKey string, maxIter int64, path string) error {
+	ch, _, err := c.solve(siteKey, maxIter)
+	if err != nil {
+		return err
+	}
+	r, status, err := c.redeem(ch.Token, ch.nonce)
+	if err != nil || status != http.StatusOK {
+		return fmt.Errorf("redeem 失败：status=%d codes=%s err=%v", status, r.codes(), err)
+	}
+	if path == "" {
+		return errors.New("redeem-only 需要 --response-file")
+	}
+	if err := os.WriteFile(path, []byte(r.Response), 0o600); err != nil {
+		return err
+	}
+	fmt.Println("RESULT step=redeem status=ok consumed=0")
 	return nil
 }
 

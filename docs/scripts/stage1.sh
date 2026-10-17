@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # stage1.sh — 阶段 1 端到端验收（DESIGN §17 阶段 1）。
 #
+# 阶段 2 之后本脚本仍然有效，只有两处随契约更新（都不降低验收力度）：
+#   1. 站点配置显式写上 "allow_missing_origin": true —— 阶段 2 的默认策略是拒绝无 Origin 的
+#      直接调用，devclient 不是浏览器，所以放行必须是配置里的明确决定；
+#   2. 启动日志的站点就绪标记改为阶段 2 的实际文案，并给管理监听器也分配随机端口，
+#      避免与本机 8081 上的别的进程相撞。
+#
 # 一个命令完成：随机生成演示密钥 → 启动临时服务 → 领 challenge → 真实暴力求解 PoW →
 # redeem → siteverify，并明确演示"第二次兑换失败""第二次验证失败""重启后重放失败"。
 # 没有任何写死的解，也没有绕过验证的分支；密钥全部来自运行时随机数，临时目录用完即删。
@@ -53,7 +59,8 @@ MASTER_KEY="$(head -c32 /dev/urandom | base64 | tr -d '\n')"
 PEPPER="$(head -c32 /dev/urandom | base64 | tr -d '\n')"
 SITE_SECRET="$(head -c24 /dev/urandom | base64 | tr -d '\n')"
 SITE_KEY="sk-e2e-$(head -c6 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-printf '[{"name":"e2e","site_key":"%s","secret":"%s","pow_bits":12}]\n' "$SITE_KEY" "$SITE_SECRET" > "$WORK/sites.json"
+printf '[{"name":"e2e","site_key":"%s","secret":"%s","pow_bits":12,"allow_missing_origin":true}]\n' \
+  "$SITE_KEY" "$SITE_SECRET" > "$WORK/sites.json"
 chmod 600 "$WORK/sites.json"
 
 DB_PATH="$WORK/epocha.db"
@@ -67,14 +74,16 @@ BASE=""
 start_server() {
   : > "$SERVER_LOG"
   EPOCHA_MASTER_KEY="$MASTER_KEY" EPOCHA_PEPPER="$PEPPER" \
-    "$SERVER" --sites "$WORK/sites.json" --db "$DB_PATH" --listen "127.0.0.1:0" \
+    "$SERVER" --sites "$WORK/sites.json" --db "$DB_PATH" \
+    --listen "127.0.0.1:0" --admin-listen "127.0.0.1:0" \
     >>"$SERVER_LOG" 2>&1 &
   SERVER_PID=$!
   for _ in $(seq 1 150); do
     if ! kill -0 "$SERVER_PID" 2>/dev/null; then fail "服务进程启动后退出：$(tail -n 3 "$SERVER_LOG")"; fi
-    if grep -q "msg=站点已就绪.*site_key=${SITE_KEY}" "$SERVER_LOG" \
+    if grep -q "site_key=${SITE_KEY}" "$SERVER_LOG" \
        && grep -q "msg=已监听" "$SERVER_LOG"; then
-      PORT="$(sed -n 's/.*addr=127\.0\.0\.1:\([0-9]*\).*/\1/p' "$SERVER_LOG" | head -n1)"
+      # 只取公共监听器的端口（阶段 2 起日志里有两个 addr= 行）
+      PORT="$(sed -n 's/.*msg=已监听 addr=127\.0\.0\.1:\([0-9]*\).*/\1/p' "$SERVER_LOG" | head -n1)"
       [[ -n "$PORT" ]] || fail "无法从服务日志解析监听端口"
       BASE="http://127.0.0.1:${PORT}"
       for _ in $(seq 1 50); do

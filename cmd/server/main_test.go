@@ -21,6 +21,7 @@ import (
 
 const (
 	sentinelSiteSecret = "SENTINEL-SITE-SECRET-4b7c9d1e2f"
+	sentinelAdminKey   = "ak_SENTINEL-ADMIN-9d3f7a1c5e2b8046"
 	sentinelMasterB64  = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 	sentinelPepperB64  = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 )
@@ -28,7 +29,10 @@ const (
 func writeSitesFile(t *testing.T, secret string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "sites.json")
-	body := `[{"name":"e2e","site_key":"sk-e2e","secret":"` + secret + `","pow_bits":12}]`
+	// allow_missing_origin 显式打开：这些测试与 devclient 一样走"无 Origin 的直接 API 调用"，
+	// 而阶段 2 的默认策略是拒绝——放行必须是配置里的一个明确决定。
+	body := `[{"name":"e2e","site_key":"sk-e2e","secret":"` + secret +
+		`","pow_bits":12,"allow_missing_origin":true}]`
 	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -42,6 +46,7 @@ func testEnv(t *testing.T) map[string]string {
 		"EPOCHA_PEPPER":     sentinelPepperB64,
 		"EPOCHA_DB":         filepath.Join(t.TempDir(), "epocha.db"),
 		"EPOCHA_SITES_FILE": writeSitesFile(t, sentinelSiteSecret),
+		"EPOCHA_ADMIN_KEY":  sentinelAdminKey,
 		"EPOCHA_LISTEN":     "127.0.0.1:0",
 	}
 }
@@ -82,7 +87,7 @@ func TestRunRefusesWithoutSecrets(t *testing.T) {
 				t.Logf("错误类型未归到 config.ErrInvalid：%v", err)
 			}
 			joined := err.Error() + out.String()
-			for _, leak := range []string{sentinelSiteSecret, "AAAA", env["EPOCHA_MASTER_KEY"], env["EPOCHA_PEPPER"]} {
+			for _, leak := range []string{sentinelSiteSecret, sentinelAdminKey, "AAAA", env["EPOCHA_MASTER_KEY"], env["EPOCHA_PEPPER"]} {
 				if leak != "" && strings.Contains(joined, leak) {
 					t.Fatalf("启动失败信息泄露密钥材料 %q：%s", leak, joined)
 				}
@@ -108,7 +113,12 @@ func TestServeHealthzAndGracefulShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	out := &syncWriter{}
-	go func() { done <- serve(ctx, cfg, ln, out) }()
+	aln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.AdminListen = aln.Addr().String()
+	go func() { done <- serve(ctx, cfg, ln, aln, out) }()
 
 	base := "http://" + ln.Addr().String()
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -156,8 +166,8 @@ func TestServeHealthzAndGracefulShutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
-	if v, _ := d.SchemaVersion(context.Background()); v != 1 {
-		t.Fatalf("迁移版本 = %d", v)
+	if v, _ := d.SchemaVersion(context.Background()); v != 2 {
+		t.Fatalf("迁移版本 = %d（阶段 2 应为 2）", v)
 	}
 	if _, err := d.SiteByKey(context.Background(), "sk-e2e"); err != nil {
 		t.Fatalf("站点未落库：%v", err)
@@ -179,10 +189,16 @@ func TestServeStopsListening(t *testing.T) {
 	cfg.Listen = addr
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { _ = serve(ctx, cfg, ln, io.Discard); done <- nil }()
-	time.Sleep(150 * time.Millisecond)
+	// serve 的错误必须传到断言里：早退（比如库打不开）同样会让端口没关，那是另一个问题，
+	// 不能伪装成"关闭后仍可连接"这种含糊的失败。
+	go func() { done <- serve(ctx, cfg, ln, nil, io.Discard) }()
+	if err := waitForHealthz("http://" + addr); err != nil {
+		t.Fatalf("服务未就绪：%v", err)
+	}
 	cancel()
-	<-done
+	if err := <-done; err != nil {
+		t.Fatalf("serve 返回错误：%v", err)
+	}
 	c, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
 	if err == nil {
 		c.Close()
@@ -201,7 +217,7 @@ func TestServeFailsOnBadDBPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := serve(context.Background(), cfg, ln, io.Discard); err == nil {
+	if err := serve(context.Background(), cfg, ln, nil, io.Discard); err == nil {
 		t.Fatal("数据库路径不可写时应返回错误")
 	}
 }
@@ -223,4 +239,206 @@ func (w *syncWriter) String() string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.buf.String()
+}
+
+// TestPublicListenerHasNoAdminRoutes 是阶段 2 最重要的一条结构性保证：
+// 管理路由只存在于 admin 监听器上，公共端口上根本没有这条路——
+// 不是"有路由但鉴权失败"，而是"路由不存在"。
+func TestPublicListenerHasNoAdminRoutes(t *testing.T) {
+	env := testEnv(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	aln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(nil, getenvOf(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Listen, cfg.AdminListen = ln.Addr().String(), aln.Addr().String()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, cfg, ln, aln, io.Discard) }()
+	if err := waitForHealthz("http://" + cfg.Listen); err != nil {
+		t.Fatalf("公共面未就绪：%v", err)
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	// 公共端口：GET/POST 管理路径都应是 404/405，而不是 401（401 意味着路由挂上了、只差鉴权）
+	for _, path := range []string{"/api/admin/sites", "/api/admin/audit", "/api/admin/whoami"} {
+		for _, method := range []string{http.MethodGet, http.MethodPost} {
+			req, _ := http.NewRequest(method, "http://"+cfg.Listen+path, strings.NewReader("{}"))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("%s %s: %v", method, path, err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusOK {
+				t.Fatalf("公共监听器竟暴露了管理路由：%s %s -> %d %s", method, path, resp.StatusCode, body)
+			}
+		}
+	}
+	// admin 端口：同一路径存在但要求鉴权（引导凭据没带上 → 401）
+	resp, err := client.Get("http://" + cfg.AdminListen + "/api/admin/sites")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("管理监听器未鉴权请求应 401，got %d %s", resp.StatusCode, body)
+	}
+	if strings.Contains(string(body), sentinelAdminKey) {
+		t.Fatalf("401 响应泄露管理凭据：%s", body)
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("优雅关闭：%v", err)
+	}
+}
+
+// TestNoAdminKeyMeansAdminRefuses 覆盖"缺少管理凭据不能意外开放管理功能"：
+// 库里没有管理密钥记录时，带任何 Bearer 都被拒。
+func TestNoAdminKeyMeansAdminRefuses(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "EPOCHA_ADMIN_KEY")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	aln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(nil, getenvOf(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Listen, cfg.AdminListen = ln.Addr().String(), aln.Addr().String()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	out := &syncWriter{}
+	go func() { done <- serve(ctx, cfg, ln, aln, out) }()
+	if err := waitForHealthz("http://" + cfg.Listen); err != nil {
+		t.Fatalf("公共面未就绪：%v", err)
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	req, _ := http.NewRequest(http.MethodPost, "http://"+cfg.AdminListen+"/api/admin/sites",
+		strings.NewReader(`{"name":"rogue","site_key":"pk_rogue"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer anything")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("没有登记管理凭据时应一律 401，got %d", resp.StatusCode)
+	}
+	if !strings.Contains(out.String(), "库中没有可用管理凭据") {
+		t.Errorf("启动日志应提示管理面处于关闭状态：%s", out.String())
+	}
+	cancel()
+	<-done
+}
+
+func waitForHealthz(base string) error {
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		res, err := client.Get(base + "/healthz")
+		if err == nil {
+			io.Copy(io.Discard, res.Body)
+			res.Body.Close()
+			if res.StatusCode == http.StatusOK {
+				return nil
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return errors.New("healthz 未在 3s 内可用")
+}
+
+// TestSiteFileDoesNotOverwriteDatabaseOnRestart 覆盖阶段 2 的权威数据源语义：
+// 配置文件只在"库里还没有这个 site_key"时导入；重启绝不把旧配置覆盖回库，
+// 因此"已停用站点"不会因为重启而复活。
+func TestSiteFileDoesNotOverwriteDatabaseOnRestart(t *testing.T) {
+	env := testEnv(t)
+	cfg, err := config.Load(nil, getenvOf(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := cfg.DBPath
+	ctx := context.Background()
+
+	// 第一轮：导入站点
+	ln1, _ := net.Listen("tcp", "127.0.0.1:0")
+	aln1, _ := net.Listen("tcp", "127.0.0.1:0")
+	cfg.Listen, cfg.AdminListen = ln1.Addr().String(), aln1.Addr().String()
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- serve(runCtx, cfg, ln1, aln1, io.Discard) }()
+	if err := waitForHealthz("http://" + cfg.Listen); err != nil {
+		t.Fatal(err)
+	}
+	d, err := store.Open(ctx, dbPath, cfg.Pepper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := d.SiteByKey(ctx, "sk-e2e")
+	if err != nil {
+		t.Fatalf("站点未导入：%v", err)
+	}
+	if !site.Enabled {
+		t.Fatal("首导入站点应为启用")
+	}
+	// 运维停用该站点
+	if _, err := d.SetSiteEnabled(ctx, site.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	versionAfterDisable := site.Version
+	d.Close()
+	cancel()
+	<-done
+
+	// 第二轮：用同一份配置文件重启
+	ln2, _ := net.Listen("tcp", "127.0.0.1:0")
+	aln2, _ := net.Listen("tcp", "127.0.0.1:0")
+	cfg2, err := config.Load(nil, getenvOf(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg2.DBPath, cfg2.Listen, cfg2.AdminListen = dbPath, ln2.Addr().String(), aln2.Addr().String()
+	runCtx2, cancel2 := context.WithCancel(ctx)
+	done2 := make(chan error, 1)
+	go func() { done2 <- serve(runCtx2, cfg2, ln2, aln2, io.Discard) }()
+	if err := waitForHealthz("http://" + cfg2.Listen); err != nil {
+		t.Fatal(err)
+	}
+	d2, err := store.Open(ctx, dbPath, cfg2.Pepper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d2.Close()
+	after, err := d2.SiteByKey(ctx, "sk-e2e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Enabled {
+		t.Fatal("重启把已停用站点重新启用了：配置文件覆盖了权威数据源")
+	}
+	if after.Version <= versionAfterDisable {
+		t.Fatalf("重启改动了站点版本（%d → %d）", versionAfterDisable, after.Version)
+	}
+	cancel2()
+	<-done2
 }

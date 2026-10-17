@@ -1,6 +1,8 @@
 package store
 
 import (
+	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -35,9 +37,35 @@ func newDBAt(t *testing.T, path string) (*DB, string) {
 
 func mustSite(t *testing.T, d *DB, name string) *Site {
 	t.Helper()
-	s, err := d.PutSite(t.Context(), name, "sk-"+name, "secret-"+name+"-SENTINEL", 14)
+	s := mustSiteSecret(t, d, name, "secret-"+name+"-SENTINEL")
+	return s
+}
+
+// mustSiteSecret 建一个测试站点并返回它；secret 由调用方给定，便于直接拿去验证。
+func mustSiteSecret(t *testing.T, d *DB, name, secret string) *Site {
+	t.Helper()
+	s, _, err := d.CreateSite(t.Context(), name, "sk-"+name, SitePolicy{PowBits: 14})
 	if err != nil {
-		t.Fatalf("PutSite: %v", err)
+		t.Fatalf("CreateSite: %v", err)
+	}
+	if secret != "" {
+		s = replaceTestSecret(t, d, s, secret)
+	}
+	return s
+}
+
+// replaceTestSecret 把站点的第一把凭据换成调用方指定的 secret：
+// 先把新 secret 登记进去，再立即撤销旧的那把，模拟真实轮换后"只剩一把有效"的形态。
+func replaceTestSecret(t *testing.T, d *DB, s *Site, secret string) *Site {
+	t.Helper()
+	if _, err := d.h.ExecContext(t.Context(),
+		`DELETE FROM site_secrets WHERE site_id=?`, s.ID); err != nil {
+		t.Fatalf("清空测试凭据: %v", err)
+	}
+	if _, err := d.h.ExecContext(t.Context(),
+		`INSERT INTO site_secrets(key_id, site_id, secret_mac, created_at) VALUES(?, ?, ?, ?)`,
+		"test-"+fmt.Sprint(s.ID), s.ID, hex.EncodeToString(d.SecretMac(secret)), formatTime(time.Now().UTC())); err != nil {
+		t.Fatalf("登记测试凭据: %v", err)
 	}
 	return s
 }
@@ -129,52 +157,77 @@ func TestMigrationIdempotentAndDataSurvives(t *testing.T) {
 	}
 }
 
-func TestPutSiteValidates(t *testing.T) {
+func TestCreateSiteValidates(t *testing.T) {
 	d := newDB(t)
-	if _, err := d.PutSite(t.Context(), "x", "k", "", 14); !errors.Is(err, ErrBadConfig) {
-		t.Error("空 secret 应拒绝")
-	}
-	if _, err := d.PutSite(t.Context(), "x", "k", "s", 11); !errors.Is(err, ErrBadConfig) {
+	if _, _, err := d.CreateSite(t.Context(), "x", "k", SitePolicy{PowBits: 11}); !errors.Is(err, ErrBadConfig) {
 		t.Error("bits 下界外应拒绝")
 	}
-	if _, err := d.PutSite(t.Context(), "x", "k", "s", 25); !errors.Is(err, ErrBadConfig) {
+	if _, _, err := d.CreateSite(t.Context(), "x", "k", SitePolicy{PowBits: 25}); !errors.Is(err, ErrBadConfig) {
 		t.Error("bits 上界外应拒绝")
 	}
-	s1, err := d.PutSite(t.Context(), "x", "k", "secret-one", 14)
+	if _, _, err := d.CreateSite(t.Context(), "x", "k", SitePolicy{PowBits: 14, ChallengeTTL: 2 * time.Hour}); !errors.Is(err, ErrBadConfig) {
+		t.Error("TTL 越界应拒绝")
+	}
+	if _, _, err := d.CreateSite(t.Context(), " x ", "k", SitePolicy{PowBits: 14}); !errors.Is(err, ErrBadConfig) {
+		t.Error("带空白的站点名应拒绝（审计与日志要打印它）")
+	}
+	if _, _, err := d.CreateSite(t.Context(), "x", "k", SitePolicy{PowBits: 14, RateSiteRPM: -1}); !errors.Is(err, ErrBadConfig) {
+		t.Error("负 rpm 应拒绝")
+	}
+	site, secret, err := d.CreateSite(t.Context(), "x", "k", SitePolicy{PowBits: 14})
 	if err != nil {
 		t.Fatal(err)
 	}
-	s2, err := d.PutSite(t.Context(), "x", "k", "secret-two", 15)
-	if err != nil {
-		t.Fatal(err)
+	if !strings.HasPrefix(secret, SecretPrefix) || len(secret) < 32 {
+		t.Fatalf("生成的 secret 形状不符: len=%d", len(secret))
 	}
-	if s1.ID != s2.ID {
-		t.Error("同 site_key 重复登记应复用 id")
+	if _, _, err := d.CreateSite(t.Context(), "y", "k", SitePolicy{PowBits: 14}); !errors.Is(err, ErrConflict) {
+		t.Errorf("site_key 重复应 ErrConflict，got %v", err)
 	}
-	if s2.PowBits != 15 {
-		t.Error("重复登记应更新配置")
+	if _, _, err := d.CreateSite(t.Context(), "x", "z", SitePolicy{PowBits: 14}); !errors.Is(err, ErrConflict) {
+		t.Errorf("站点名重复应 ErrConflict，got %v", err)
+	}
+	// 创建即有一把有效凭据：否则会出现"站点存在但永远无法验证"的半状态
+	if _, err := d.FindSiteBySecret(t.Context(), secret, time.Now()); err != nil {
+		t.Fatalf("新建站点的凭据不可用: %v", err)
+	}
+	if got, _ := d.ListSecrets(t.Context(), site.ID); len(got) != 1 {
+		t.Fatalf("新建站点应有 1 把凭据，got %d", len(got))
 	}
 }
 
-func TestSecretHandling(t *testing.T) {
+func TestSecretLookup(t *testing.T) {
 	d := newDB(t)
-	s, err := d.PutSite(t.Context(), "demo", "key-demo", "top-secret-value", 14)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !d.MatchSecret(s, "top-secret-value") {
-		t.Error("正确 secret 应匹配")
-	}
-	if d.MatchSecret(s, "Top-Secret-Value") {
-		t.Error("大小写不同不应匹配")
-	}
-	if got, err := d.FindSiteBySecret(t.Context(), "top-secret-value"); err != nil || got.ID != s.ID {
+	s := mustSiteSecret(t, d, "demo", "top-secret-value")
+	now := time.Now()
+	if got, err := d.FindSiteBySecret(t.Context(), "top-secret-value", now); err != nil || got.ID != s.ID {
 		t.Fatalf("按 secret 定位站点失败: %v %+v", err, got)
 	}
-	if _, err := d.FindSiteBySecret(t.Context(), "nope"); !errors.Is(err, ErrNotFound) {
+	if _, err := d.FindSiteBySecret(t.Context(), "Top-Secret-Value", now); !errors.Is(err, ErrNotFound) {
+		t.Errorf("大小写不同不应匹配，got %v", err)
+	}
+	if _, err := d.FindSiteBySecret(t.Context(), "nope", now); !errors.Is(err, ErrNotFound) {
 		t.Errorf("未知 secret 应 ErrNotFound，got %v", err)
 	}
-	// 库文件里不得出现 secret 明文
+	// 定位到的站点必须带上策略字段——/siteverify 与签发都要靠它
+	got, err := d.FindSiteBySecret(t.Context(), "top-secret-value", now)
+	if err != nil || got.PowBits != 14 || got.Policy.ChallengeTTL == 0 {
+		t.Fatalf("站点策略未随定位返回: %+v err %v", got, err)
+	}
+}
+
+func TestLegacySitesColumnCannotAuthenticate(t *testing.T) {
+	// 0002 迁移把 sites.secret_mac 中和掉；阶段 2 新建的站点该列只是占位。
+	// 若哪段代码误读它，就会把"已撤销/不存在的凭据"当成有效——这条测试把它挡在编译期之外。
+	d := newDB(t)
+	s := mustSiteSecret(t, d, "alpha", "top-secret-value")
+	var mac string
+	if err := d.h.QueryRowContext(t.Context(), `SELECT secret_mac FROM sites WHERE id=?`, s.ID).Scan(&mac); err != nil {
+		t.Fatal(err)
+	}
+	if subtle.ConstantTimeCompare([]byte(mac), []byte(hex.EncodeToString(d.SecretMac("top-secret-value")))) == 1 {
+		t.Fatal("sites.secret_mac 仍等于可用摘要：迁移/新建路径没有中和它")
+	}
 	if err := d.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -184,10 +237,12 @@ func TestSecretNotStoredInPlaintext(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "epocha.db")
 	d, _ := newDBAt(t, path)
 	const sentinel = "SENTINEL-SECRET-9f3c8a1e7b"
-	if _, err := d.PutSite(t.Context(), "s1", "key-1", sentinel, 14); err != nil {
+	mustSiteSecret(t, d, "s1", sentinel)
+	if _, _, err := d.CreateSite(t.Context(), "s2", "sk-s2", SitePolicy{PowBits: 14}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.PutSite(t.Context(), "s2", "key-2", "other-secret", 14); err != nil {
+	const adminSentinel = "SENTINEL-ADMINKEY-4d1f9c2a8b7e"
+	if _, err := d.AddAdminKey(t.Context(), "ops", adminSentinel); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.Close(); err != nil {
@@ -197,8 +252,10 @@ func TestSecretNotStoredInPlaintext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(raw), sentinel) {
-		t.Fatal("DB 文件里出现 secret 明文")
+	for _, secret := range []string{sentinel, adminSentinel} {
+		if strings.Contains(string(raw), secret) {
+			t.Fatalf("DB 文件里出现凭据明文（%d 字节文件，哨兵长度 %d）", len(raw), len(secret))
+		}
 	}
 }
 

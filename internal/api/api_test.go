@@ -39,6 +39,7 @@ type harness struct {
 	srv     *Server
 	db      *store.DB
 	dbPath  string
+	cfg     *config.Config
 	logs    *bytes.Buffer
 	bodies  []string
 	clock   time.Time
@@ -64,7 +65,7 @@ func newHarness(t *testing.T, tune func(*config.Config)) *harness {
 	if tune != nil {
 		tune(cfg)
 	}
-	h := &harness{t: t, logs: &bytes.Buffer{}, clock: time.Now().UTC().Truncate(time.Second)}
+	h := &harness{t: t, logs: &bytes.Buffer{}, clock: time.Now().UTC().Truncate(time.Second), cfg: cfg}
 
 	db, err := store.Open(context.Background(), cfg.DBPath, cfg.Pepper)
 	if err != nil {
@@ -72,9 +73,15 @@ func newHarness(t *testing.T, tune func(*config.Config)) *harness {
 	}
 	h.db, h.dbPath = db, cfg.DBPath
 	for _, s := range cfg.Sites {
-		site, err := db.PutSite(context.Background(), s.Name, s.SiteKey, s.Secret, s.PowBits)
+		// 站点由"一次性导入"进入库：secret 用测试哨兵值，TTL 用 1 分钟便于推进注入时钟，
+		// allow_missing_origin 打开——测试请求大多不带 Origin，走的正是直接 API 调用那条路。
+		policy := store.SitePolicy{
+			PowBits: s.PowBits, ChallengeTTL: time.Minute, ResponseTTL: time.Minute,
+			RateIPRPM: cfg.RateIPRPM, RateSiteRPM: cfg.RateSiteRPM, AllowMissingOrigin: true,
+		}
+		site, _, err := db.ImportSite(context.Background(), s.Name, s.SiteKey, s.Secret, policy)
 		if err != nil {
-			t.Fatalf("PutSite(%s): %v", s.Name, err)
+			t.Fatalf("ImportSite(%s): %v", s.Name, err)
 		}
 		if s.Name == "alpha" {
 			h.siteA = site
@@ -315,7 +322,7 @@ func TestChallengeResponseShapeAndNoStore(t *testing.T) {
 	}
 }
 
-func TestSiteverifySupportsJSONAndFormAndHostnameEcho(t *testing.T) {
+func TestSiteverifySupportsJSONAndFormAndIgnoresCallerHostname(t *testing.T) {
 	h := newHarness(t, nil)
 	tok, nonce := h.challengeOK(t, "sk-alpha")
 	resp := h.redeemOK(t, tok, nonce)
@@ -327,9 +334,23 @@ func TestSiteverifySupportsJSONAndFormAndHostnameEcho(t *testing.T) {
 	if !r.got["success"].(bool) {
 		t.Fatalf("JSON 形式应成功：%s", r.body)
 	}
-	assertKeySet(t, r, "success", "challenge_ts", "hostname")
-	if r.str("hostname") != "app.example.com" {
-		t.Errorf("hostname 未回显：%s", r.body)
+	// 阶段 2：hostname 由服务端签发时绑定的来源裁决，调用方自报值**不采信也不回显**。
+	// 这条流程没有 Origin（站点显式放行直接 API 调用），所以字段整体缺省。
+	assertKeySet(t, r, "success", "challenge_ts")
+	if strings.Contains(r.body, "app.example.com") {
+		t.Fatalf("自报 hostname 被回显了：%s", r.body)
+	}
+
+	tok2, nonce2 := h.challengeOK(t, "sk-alpha")
+	resp2 := h.redeemOK(t, tok2, nonce2)
+	r2 := h.do(http.MethodPost, "/siteverify",
+		strings.NewReader("secret="+sentinelSecret+"&response="+resp2+"&hostname=evil.example"),
+		"application/x-www-form-urlencoded", "203.0.113.7:5555", nil)
+	if !r2.got["success"].(bool) {
+		t.Fatalf("表单形式应成功：%s", r2.body)
+	}
+	if strings.Contains(r2.body, "evil.example") {
+		t.Fatalf("表单里的自报 hostname 被回显：%s", r2.body)
 	}
 }
 

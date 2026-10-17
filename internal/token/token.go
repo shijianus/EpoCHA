@@ -37,9 +37,14 @@ var (
 
 // Claims 是签名覆盖的全部安全相关参数。客户端无法改动难度、TTL 或站点绑定。
 type Claims struct {
-	Typ  string `json:"typ"`
-	Kid  string `json:"kid"`
-	Sid  int64  `json:"sid"`
+	Typ string `json:"typ"`
+	Kid string `json:"kid"`
+	Sid int64  `json:"sid"`
+	// Svid 是签发时的站点版本。停用/重新启用站点会提升它，于是"停用前签发的未消费 token
+	// 在站点重新启用后也不会复活"这条性质由签名保证，而不依赖库里还留着那行状态。
+	// 阶段 1 的 token 没有这个字段（解出为 0）→ 一律拒绝：升级后最多 1 小时内的旧 token 失效，
+	// 这是有意的一次性影响，账本里"已消费"的状态完整保留（DESIGN §5.3、ADR-010）。
+	Svid int64  `json:"svid"`
 	CID  string `json:"cid"`
 	RID  string `json:"rid,omitempty"`
 	Iat  int64  `json:"iat"`
@@ -99,6 +104,9 @@ func (s *Signer) Sign(purpose string, c Claims, now time.Time) (string, error) {
 	}
 	if c.Sid <= 0 || c.CID == "" {
 		return "", fmt.Errorf("%w: 缺少站点或 challenge 绑定", ErrUnusableKey)
+	}
+	if c.Svid <= 0 {
+		return "", fmt.Errorf("%w: 缺少站点版本绑定", ErrUnusableKey)
 	}
 	if purpose == PurposeResponse && c.RID == "" {
 		return "", fmt.Errorf("%w: response 令牌缺少 rid", ErrUnusableKey)
@@ -162,7 +170,7 @@ func (s *Signer) Verify(purpose string, tok string, now time.Time) (Claims, erro
 	if err := dec.Decode(&c); err != nil {
 		return zero, fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
-	if c.Typ != purpose || c.Kid != parts[1] || c.CID == "" || c.Sid <= 0 {
+	if c.Typ != purpose || c.Kid != parts[1] || c.CID == "" || c.Sid <= 0 || c.Svid <= 0 {
 		return zero, ErrMalformed
 	}
 	if purpose == PurposeResponse && c.RID == "" {

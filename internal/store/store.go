@@ -6,7 +6,6 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"database/sql"
 	_ "embed"
 	"encoding/hex"
@@ -21,8 +20,14 @@ import (
 //go:embed migrations/0001_stage1.sql
 var migration0001 string
 
-// schemaVersion 是 migration0001 对应的版本号，写入 meta 表。
-const schemaVersion = 1
+//go:embed migrations/0002_stage2.sql
+var migration0002 string
+
+// schemaVersion 是最后一条迁移对应的版本号，写入 meta 表。
+const schemaVersion = 2
+
+// retiredPrefix 是阶段 1 secret_mac 列被中和时加在摘要输入上的域分隔串（见 0002 注释）。
+const retiredPrefix = "epocha/v1|retired|"
 
 // MaxFailedAttempts 是一个 challenge 允许的失败兑换次数；达到即作废（DESIGN §3 失败策略）。
 const MaxFailedAttempts = 3
@@ -54,6 +59,9 @@ var (
 	ErrBadConfig      = errors.New("store: 参数不合法")
 	ErrSchemaConflict = errors.New("store: 数据库版本比程序新")
 	ErrCapExceeded    = errors.New("store: 活动 challenge 已达上限")
+	ErrConflict       = errors.New("store: 与已有记录冲突")
+	ErrDisabled       = errors.New("store: 站点已停用")
+	ErrRevoked        = errors.New("store: 凭据已撤销或不在有效期")
 
 	// timeLayout 用固定 9 位小数（不裁剪尾零）：账本里的过期判定是 SQL 内的字符串比较，
 	// 只有定宽格式才能让字典序与时间序一致。time.RFC3339Nano 会裁掉尾随零，
@@ -67,19 +75,11 @@ type DB struct {
 	pepper []byte
 }
 
-// Site 是一个已配置站点。secret 明文只存在于调用方，库里只有带 pepper 的摘要。
-type Site struct {
-	ID        int64
-	Name      string
-	SiteKey   string
-	SecretMac []byte
-	PowBits   uint8
-}
-
 // Challenge 是一次 challenge 的权威记录：PoW 参数以此行为准，不接受客户端自报。
 type Challenge struct {
 	ID         string
 	SiteID     int64
+	Origin     string // 签发时看到的规范化 Origin（''=无浏览器来源且站点放行）
 	PowSeed    []byte
 	PowBits    uint8
 	Status     string
@@ -103,6 +103,7 @@ type Verification struct {
 	SiteID             int64
 	ChallengeID        string
 	ChallengeCreatedAt time.Time
+	Origin             string // 签发时绑定的规范化 Origin；/siteverify 的 hostname 由此裁决，不采信调用方自报值
 }
 
 // Open 打开（必要时创建）数据库并应用迁移。pepper 必须 ≥32 字节。
@@ -134,7 +135,8 @@ func Open(ctx context.Context, path string, pepper []byte) (*DB, error) {
 
 func (d *DB) Close() error { return d.h.Close() }
 
-// migrate 幂等应用迁移：版本相同则跳过，库版本更新则拒绝启动。
+// migrate 逐条应用迁移：版本相同则跳过，库版本更新则拒绝启动。
+// 阶段 1 的库走 0001→0002 两步增量迁移，账本数据全程保留；迁移后的库再打开只做版本比对。
 func (d *DB) migrate(ctx context.Context) error {
 	tx, err := d.h.BeginTx(ctx, nil)
 	if err != nil {
@@ -152,18 +154,43 @@ func (d *DB) migrate(ctx context.Context) error {
 	if cur > schemaVersion {
 		return fmt.Errorf("%w: 库为 v%d，程序支持 v%d", ErrSchemaConflict, cur, schemaVersion)
 	}
+	for _, m := range migrations {
+		if cur >= m.version {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, m.sql); err != nil {
+			return fmt.Errorf("store: 应用迁移 %04d: %w", m.version, err)
+		}
+		if m.data != nil {
+			if err := m.data(ctx, tx, d.pepper); err != nil {
+				return fmt.Errorf("store: 迁移 %04d 的数据步骤: %w", m.version, err)
+			}
+		}
+		cur = m.version
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO meta(k, v) VALUES('schema_version', ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`,
+			fmt.Sprint(cur)); err != nil {
+			return fmt.Errorf("store: 记录版本: %w", err)
+		}
+	}
 	if cur == schemaVersion {
 		return tx.Commit()
 	}
-	if _, err := tx.ExecContext(ctx, migration0001); err != nil {
-		return fmt.Errorf("store: 应用迁移: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO meta(k, v) VALUES('schema_version', ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`,
-		fmt.Sprint(schemaVersion)); err != nil {
-		return fmt.Errorf("store: 记录版本: %w", err)
-	}
-	return tx.Commit()
+	return fmt.Errorf("%w: 缺少 %d→%d 的迁移路径", ErrSchemaConflict, cur, schemaVersion)
+}
+
+type migration struct {
+	version int
+	sql     string
+	// data 需要 pepper（把旧摘要中和成带 pepper 的双重摘要），因此显式传入而不是挂在闭包里。
+	data func(ctx context.Context, tx *sql.Tx, pepper []byte) error
+}
+
+// migrations 是有序迁移表。0002 的数据步骤把阶段 1 的单 secret 迁进 site_secrets，
+// 再把 sites.secret_mac 中和成"任何真实 secret 都匹配不上"的双重摘要。
+var migrations = []migration{
+	{version: 1, sql: migration0001},
+	{version: 2, sql: migration0002, data: migrateStage2Data},
 }
 
 // SchemaVersion 返回当前库版本。
@@ -205,101 +232,6 @@ func (d *DB) SecretMac(secret string) []byte {
 	return m.Sum(nil)
 }
 
-// PutSite 幂等登记配置里的站点（阶段 1 站点来自配置文件，管理 API 属阶段 2）。
-func (d *DB) PutSite(ctx context.Context, name, siteKey, secret string, bits uint8) (*Site, error) {
-	if name == "" || siteKey == "" || secret == "" {
-		return nil, fmt.Errorf("%w: 站点字段不完整", ErrBadConfig)
-	}
-	if bits < 12 || bits > 24 {
-		return nil, fmt.Errorf("%w: pow_bits=%d 越界", ErrBadConfig, bits)
-	}
-	mac := d.SecretMac(secret)
-	_, err := d.h.ExecContext(ctx, `
-INSERT INTO sites(name, site_key, secret_mac, pow_bits, created_at) VALUES(?,?,?,?,?)
-ON CONFLICT(site_key) DO UPDATE SET name=excluded.name, secret_mac=excluded.secret_mac, pow_bits=excluded.pow_bits`,
-		name, siteKey, hex.EncodeToString(mac), int(bits), formatTime(time.Now().UTC()))
-	if err != nil {
-		return nil, fmt.Errorf("store: 登记站点: %w", err)
-	}
-	// site_key 上有唯一约束，回读得到稳定 id；不使用 RETURNING（不假设驱动捆绑的 SQLite 版本支持它）。
-	got, err := d.SiteByKey(ctx, siteKey)
-	if err != nil {
-		return nil, err
-	}
-	return got, nil
-}
-
-// SiteByKey 按公开 site_key 查站点。
-func (d *DB) SiteByKey(ctx context.Context, siteKey string) (*Site, error) {
-	return d.querySite(ctx, `SELECT id, name, site_key, secret_mac, pow_bits FROM sites WHERE site_key=?`, siteKey)
-}
-
-// SiteByID 按内部 id 查站点。
-func (d *DB) SiteByID(ctx context.Context, id int64) (*Site, error) {
-	return d.querySite(ctx, `SELECT id, name, site_key, secret_mac, pow_bits FROM sites WHERE id=?`, id)
-}
-
-func (d *DB) querySite(ctx context.Context, q string, arg any) (*Site, error) {
-	var (
-		id, bits int64
-		macHex   string
-		s        = &Site{}
-	)
-	err := d.h.QueryRowContext(ctx, q, arg).Scan(&id, &s.Name, &s.SiteKey, &macHex, &bits)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("store: 查站点: %w", err)
-	}
-	mac, err := hex.DecodeString(macHex)
-	if err != nil {
-		return nil, fmt.Errorf("store: 站点摘要损坏: %w", err)
-	}
-	s.ID, s.SecretMac, s.PowBits = id, mac, uint8(bits)
-	return s, nil
-}
-
-// MatchSecret 常数时间比较调用方 secret 与站点摘要。
-// 阶段 1 站点数量来自配置（很小），逐个比较的代价可忽略；阶段 2 站点规模变大时需重新评估此处的时序面。
-func (d *DB) MatchSecret(site *Site, secret string) bool {
-	return subtle.ConstantTimeCompare(d.SecretMac(secret), site.SecretMac) == 1
-}
-
-// FindSiteBySecret 用于 /siteverify：先由 secret 定位站点，再做任何状态消费。
-// 找不到即返回 ErrNotFound，调用方不得据此触碰 token 状态（DESIGN §10.1）。
-func (d *DB) FindSiteBySecret(ctx context.Context, secret string) (*Site, error) {
-	rows, err := d.h.QueryContext(ctx, `SELECT id, name, site_key, secret_mac, pow_bits FROM sites`)
-	if err != nil {
-		return nil, fmt.Errorf("store: 遍历站点: %w", err)
-	}
-	defer rows.Close()
-	want := d.SecretMac(secret)
-	for rows.Next() {
-		var (
-			id, bits int64
-			macHex   string
-			s        = &Site{}
-		)
-		if err := rows.Scan(&id, &s.Name, &s.SiteKey, &macHex, &bits); err != nil {
-			return nil, fmt.Errorf("store: 扫描站点: %w", err)
-		}
-		mac, err := hex.DecodeString(macHex)
-		if err != nil {
-			return nil, fmt.Errorf("store: 站点摘要损坏: %w", err)
-		}
-		// 遍历所有行而非提前返回，避免通过响应时间区分"命中第几个站点"。
-		if subtle.ConstantTimeCompare(want, mac) == 1 {
-			s.ID, s.SecretMac, s.PowBits = id, mac, uint8(bits)
-			return s, nil
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: 遍历站点: %w", err)
-	}
-	return nil, ErrNotFound
-}
-
 // NewID 生成 32 字符小写 hex 标识（challenge id / response id）。
 func NewID() (string, error) {
 	b := make([]byte, 16)
@@ -321,12 +253,12 @@ func (d *DB) InsertChallenge(ctx context.Context, c *Challenge, caps Caps) error
 			ErrBadConfig, caps.MaxActive, caps.MaxActivePerSite)
 	}
 	res, err := d.h.ExecContext(ctx, `
-INSERT INTO challenges(id, site_id, pow_seed, pow_bits, status, attempts, created_at, expires_at)
-SELECT ?,?,?,?,?,?,?,?
+INSERT INTO challenges(id, site_id, pow_seed, pow_bits, status, attempts, created_at, expires_at, origin)
+SELECT ?,?,?,?,?,?,?,?,?
 WHERE (SELECT count(*) FROM challenges WHERE status=? AND expires_at>?) < ?
   AND (SELECT count(*) FROM challenges WHERE site_id=? AND status=? AND expires_at>?) < ?`,
 		c.ID, c.SiteID, c.PowSeed, int(c.PowBits), statusIssued, 0,
-		formatTime(c.CreatedAt.UTC()), formatTime(c.ExpiresAt.UTC()),
+		formatTime(c.CreatedAt.UTC()), formatTime(c.ExpiresAt.UTC()), c.Origin,
 		statusIssued, formatTime(c.CreatedAt.UTC()), caps.MaxActive,
 		c.SiteID, statusIssued, formatTime(c.CreatedAt.UTC()), caps.MaxActivePerSite)
 	if err != nil {
@@ -350,9 +282,9 @@ func (d *DB) Challenge(ctx context.Context, id string) (*Challenge, error) {
 		siteID   int64
 	)
 	err := d.h.QueryRowContext(ctx, `
-SELECT id, site_id, pow_seed, pow_bits, status, attempts, created_at, expires_at, redeemed_at
+SELECT id, site_id, pow_seed, pow_bits, status, attempts, created_at, expires_at, redeemed_at, origin
 FROM challenges WHERE id=?`, id).
-		Scan(&c.ID, &siteID, &c.PowSeed, &c.PowBits, &status, &c.Attempts, &created, &expires, &redeemed)
+		Scan(&c.ID, &siteID, &c.PowSeed, &c.PowBits, &status, &c.Attempts, &created, &expires, &redeemed, &c.Origin)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -467,9 +399,9 @@ WHERE id=? AND site_id=? AND used=0 AND expires_at>?`,
 	v := &Verification{SiteID: siteID}
 	var created string
 	err = tx.QueryRowContext(ctx, `
-SELECT r.challenge_id, c.created_at
+SELECT r.challenge_id, c.created_at, c.origin
 FROM responses r JOIN challenges c ON c.id = r.challenge_id
-WHERE r.id=? AND r.site_id=?`, responseID, siteID).Scan(&v.ChallengeID, &created)
+WHERE r.id=? AND r.site_id=?`, responseID, siteID).Scan(&v.ChallengeID, &created, &v.Origin)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrConsumed
 	}

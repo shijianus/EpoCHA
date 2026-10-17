@@ -15,11 +15,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/shijianus/EpoCHA/internal/store"
 )
 
 const (
 	minKeyBytes       = 32
 	minSecretLen      = 16
+	minAdminKeyLen    = 32
 	maxSites          = 64
 	sitesFileMaxBytes = 1 << 16
 
@@ -38,6 +41,8 @@ const (
 	envRateStates    = "EPOCHA_RATE_MAX_STATES"
 	envMaxActive     = "EPOCHA_MAX_ACTIVE_CHALLENGES"
 	envMaxActiveSite = "EPOCHA_MAX_ACTIVE_CHALLENGES_PER_SITE"
+	envAdminListen   = "EPOCHA_ADMIN_LISTEN"
+	envAdminKey      = "EPOCHA_ADMIN_KEY"
 )
 
 // TTL 上下界。上界不是形式主义：challenge/response 的有效期直接决定防重放账本里
@@ -57,12 +62,18 @@ var (
 	ErrMissingPepper    = fmt.Errorf("%w: 缺少 %s", ErrInvalid, envPepper)
 )
 
-// Site 是阶段 1 由配置装载的一个站点（完整站点管理属阶段 2）。
+// Site 是配置文件里的一个站点条目。**只用于一次性导入**：site_key 已存在于库中时
+// 本条完全不生效（不覆盖 secret、不重新启用停用站点），见 store.ImportSite 与 ADR-010。
 type Site struct {
 	Name    string `json:"name"`
 	SiteKey string `json:"site_key"`
 	Secret  string `json:"secret"`
 	PowBits uint8  `json:"pow_bits"`
+	// Origins 是允许来源列表（规范化后精确匹配）。空列表 = 不接受任何浏览器来源。
+	Origins []string `json:"origins"`
+	// AllowMissingOrigin 放行"没有 Origin 的直接 API 调用"。
+	// 默认拒绝；演示/验收客户端必须在这一条上显式写 true，不对所有站点静默放开。
+	AllowMissingOrigin bool `json:"allow_missing_origin"`
 }
 
 // Config 是服务运行参数。
@@ -70,11 +81,15 @@ type Config struct {
 	// ShowVersion 由 --version 置位。版本查询不要求密钥与数据库，Load 在该情况下提前返回。
 	ShowVersion bool
 
-	Listen       string
-	DBPath       string
-	MasterKey    []byte
-	PrevMaster   []byte
-	Pepper       []byte
+	Listen      string
+	AdminListen string
+	DBPath      string
+	MasterKey   []byte
+	PrevMaster  []byte
+	Pepper      []byte
+	// AdminKey 是**可选**的引导凭据：仅当库里没有任何管理密钥记录时登记一次
+	// （store.BootstrapAdminKey）。之后运维应在管理 API 里管理，并可以清空这个环境变量。
+	AdminKey     []byte
 	Sites        []Site
 	ChallengeTTL time.Duration
 	ResponseTTL  time.Duration
@@ -104,7 +119,8 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 	showVersion := fs.Bool("version", false, "打印版本信息后退出")
 	listen := fs.String("listen", "", "监听地址（覆盖 "+envListen+"）")
 	db := fs.String("db", "", "SQLite 文件路径（覆盖 "+envDB+"）")
-	sites := fs.String("sites", "", "站点配置 JSON 文件（覆盖 "+envSites+"）")
+	sites := fs.String("sites", "", "站点配置 JSON 文件，仅作一次性导入（覆盖 "+envSites+"）")
+	adminListen := fs.String("admin-listen", "", "管理 API 监听地址，默认仅 loopback（覆盖 "+envAdminListen+"）")
 	if err := fs.Parse(args); err != nil {
 		return nil, fmt.Errorf("%w: 命令行参数", ErrInvalid)
 	}
@@ -115,6 +131,7 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 
 	c := &Config{
 		Listen:       firstNonEmpty(*listen, getenv(envListen), "127.0.0.1:8080"),
+		AdminListen:  firstNonEmpty(*adminListen, getenv(envAdminListen), "127.0.0.1:8081"),
 		DBPath:       firstNonEmpty(*db, getenv(envDB)),
 		ChallengeTTL: 180 * time.Second,
 		ResponseTTL:  120 * time.Second,
@@ -208,12 +225,18 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 		return nil, fmt.Errorf("%w: 单站上限不得高于全局上限", ErrInvalid)
 	}
 
-	sitesPath := firstNonEmpty(*sites, getenv(envSites))
-	if sitesPath == "" {
-		return nil, fmt.Errorf("%w: 缺少站点配置（--sites 或 %s）", ErrInvalid, envSites)
+	// 站点配置是**可选的导入入口**：阶段 2 起 SQLite 才是权威数据源。
+	// 没有配置文件也能正常启动（站点全部来自库）；有则只导入库里尚不存在的 site_key。
+	if sitesPath := firstNonEmpty(*sites, getenv(envSites)); sitesPath != "" {
+		if c.Sites, err = loadSites(sitesPath); err != nil {
+			return nil, err
+		}
 	}
-	if c.Sites, err = loadSites(sitesPath); err != nil {
-		return nil, err
+	// 管理引导凭据是可选的：库里已有管理密钥记录时它完全不生效（见 store.BootstrapAdminKey）。
+	if v := getenv(envAdminKey); v != "" {
+		if c.AdminKey, err = readAdminKey(v); err != nil {
+			return nil, err
+		}
 	}
 	return c, nil
 }
@@ -231,10 +254,12 @@ func loadSites(path string) ([]Site, error) {
 		return nil, fmt.Errorf("%w: 站点文件过大或不可读", ErrInvalid)
 	}
 	var raw []struct {
-		Name    string `json:"name"`
-		SiteKey string `json:"site_key"`
-		Secret  string `json:"secret"`
-		PowBits *int   `json:"pow_bits"`
+		Name               string   `json:"name"`
+		SiteKey            string   `json:"site_key"`
+		Secret             string   `json:"secret"`
+		PowBits            *int     `json:"pow_bits"`
+		Origins            []string `json:"origins"`
+		AllowMissingOrigin bool     `json:"allow_missing_origin"`
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
@@ -269,10 +294,39 @@ func loadSites(path string) ([]Site, error) {
 			return nil, fmt.Errorf("%w: 站点 %q 的 pow_bits=%d 越界", ErrInvalid, s.Name, bits)
 		}
 		s.PowBits = uint8(bits)
+		s.AllowMissingOrigin = r.AllowMissingOrigin
+		s.Origins = make([]string, 0, len(r.Origins))
+		if len(r.Origins) > 32 {
+			return nil, fmt.Errorf("%w: 站点 %q 的来源条目超过 32", ErrInvalid, s.Name)
+		}
+		// 配置里的来源必须是可规范化的完整 Origin：在这里就拒绝，不把问题留到导入之后。
+		for _, o := range r.Origins {
+			n, err := store.NormalizeOrigin(o)
+			if err != nil {
+				return nil, fmt.Errorf("%w: 站点 %q 的来源 %q 不合法", ErrInvalid, s.Name, o)
+			}
+			s.Origins = append(s.Origins, n)
+		}
 		seenKey[s.SiteKey], seenName[s.Name] = true, true
 		out = append(out, s)
 	}
 	return out, nil
+}
+
+// readAdminKey 读取管理引导凭据。它与运维实际发出的 Bearer 值**逐字节相同**——
+// 不做 base64 解码：把"库中登记的形式"和"线上发送的形式"分开会制造两套真相。
+func readAdminKey(v string) ([]byte, error) {
+	v = strings.TrimSpace(v)
+	if len(v) < minAdminKeyLen {
+		// 不回显原值
+		return nil, fmt.Errorf("%w: %s 短于 %d 字符", ErrInvalid, envAdminKey, minAdminKeyLen)
+	}
+	for _, r := range v {
+		if r < 0x21 || r > 0x7e {
+			return nil, fmt.Errorf("%w: %s 含空白或控制字符", ErrInvalid, envAdminKey)
+		}
+	}
+	return []byte(v), nil
 }
 
 // readKey 读取 base64 编码的密钥材料，要求解码后 ≥32 字节。
@@ -297,9 +351,9 @@ func readKey(getenv func(string) string, name string) ([]byte, error) {
 
 // SafeSummary 是可安全写入启动输出与日志的一行摘要。
 func (c *Config) SafeSummary() string {
-	return fmt.Sprintf("listen=%s db=%s sites=%d challenge_ttl=%s response_ttl=%s trust_proxy=%t ip_rpm=%d site_rpm=%d max_active=%d max_active_per_site=%d",
-		c.Listen, c.DBPath, len(c.Sites), c.ChallengeTTL, c.ResponseTTL, c.TrustProxy,
-		c.RateIPRPM, c.RateSiteRPM, c.MaxActiveChallenges, c.MaxActivePerSite)
+	return fmt.Sprintf("listen=%s admin_listen=%s db=%s site_imports=%d challenge_ttl=%s response_ttl=%s trust_proxy=%t ip_rpm=%d site_rpm=%d max_active=%d max_active_per_site=%d admin_key_present=%t",
+		c.Listen, c.AdminListen, c.DBPath, len(c.Sites), c.ChallengeTTL, c.ResponseTTL, c.TrustProxy,
+		c.RateIPRPM, c.RateSiteRPM, c.MaxActiveChallenges, c.MaxActivePerSite, len(c.AdminKey) > 0)
 }
 
 func firstNonEmpty(vals ...string) string {

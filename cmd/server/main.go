@@ -1,7 +1,10 @@
 // Command server 是 epocha 人机验证服务的单二进制入口。
 //
-// 启动顺序固定为 config → store（迁移）→ signer → api → http；任一步失败即退出，
-// 不做"部分可用"的降级：安全关键组件缺失时必须拒绝启动（DESIGN §6、红线 12）。
+// 启动顺序固定为 config → store（迁移）→ 引导管理凭据 → 站点一次性导入 → signer → api/admin → http；
+// 任一步失败即退出，不做"部分可用"的降级：安全关键组件缺失时必须拒绝启动（DESIGN §6、红线 12）。
+//
+// 两个监听器：公共 API 与**独立的管理 API**。管理路由只挂在 admin 监听器上，
+// 公共监听器根本没有这些路径——即便有人从公网拿到了管理凭据，也没有那条路可走。
 package main
 
 import (
@@ -17,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/shijianus/EpoCHA/internal/admin"
 	"github.com/shijianus/EpoCHA/internal/api"
 	"github.com/shijianus/EpoCHA/internal/config"
 	"github.com/shijianus/EpoCHA/internal/store"
@@ -32,6 +36,7 @@ const (
 	writeTimeout      = 15 * time.Second
 	idleTimeout       = 20 * time.Second
 	maxHeaderBytes    = 8 << 10
+	bootstrapLabel    = "bootstrap"
 )
 
 func main() {
@@ -56,18 +61,31 @@ func run(args []string, getenv func(string) string, stdout io.Writer) error {
 		// 只回显地址，不回显任何密钥或站点 secret。
 		return fmt.Errorf("监听 %s 失败", cfg.Listen)
 	}
+	adminLn, err := net.Listen("tcp", cfg.AdminListen)
+	if err != nil {
+		_ = ln.Close()
+		return fmt.Errorf("监听管理地址 %s 失败", cfg.AdminListen)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return serve(ctx, cfg, ln, stdout)
+	return serve(ctx, cfg, ln, adminLn, stdout)
 }
 
 // serve 在给定 listener 上提供服务，直到 ctx 被取消。listener 由调用方创建，
-// 这样测试可以用 :0 拿到确定端口，而不必猜。
-func serve(ctx context.Context, cfg *config.Config, ln net.Listener, stdout io.Writer) error {
+// 这样测试可以用 :0 拿到确定端口，而不必猜。adminLn 为 nil 时只跑公共面。
+func serve(ctx context.Context, cfg *config.Config, ln, adminLn net.Listener, stdout io.Writer) error {
 	// 启动信息与请求日志共用一个 slog 写入器：并行 Fprintf + slog 会并发写同一个 writer，
-	// 既可能交错整行，也会被 -race 判为数据竞争（cmd/server 测试实测触发过）。
+	// 既可能交错整行，也会被 -race 判为数据竞争（阶段 1 实测触发过）。
 	log := slog.New(slog.NewTextHandler(stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	log.Info("启动", "version", version.Version, "config", cfg.SafeSummary())
+
+	// listener 由调用方创建，所以也必须由本函数保证关闭：http.Server.Shutdown 只会关闭
+	// "已经被 Serve 登记过"的监听器。若在 Serve 真正接管之前 ctx 就取消（竞态测试里实测出现过），
+	// 端口会保持打开——进程已退出但端口还在接受连接。
+	defer func() { _ = ln.Close() }()
+	if adminLn != nil {
+		defer func() { _ = adminLn.Close() }()
+	}
 
 	db, err := store.Open(ctx, cfg.DBPath, cfg.Pepper)
 	if err != nil {
@@ -79,13 +97,11 @@ func serve(ctx context.Context, cfg *config.Config, ln net.Listener, stdout io.W
 		}
 	}()
 
-	// 站点来自配置（阶段 1）；只打印公开标识。
-	for _, s := range cfg.Sites {
-		site, err := db.PutSite(ctx, s.Name, s.SiteKey, s.Secret, s.PowBits)
-		if err != nil {
-			return fmt.Errorf("登记站点 %q: %w", s.Name, err)
-		}
-		log.Info("站点已就绪", "name", site.Name, "site_key", site.SiteKey, "pow_bits", int(site.PowBits))
+	if err := bootstrapAdmin(ctx, cfg, db, adminLn, log); err != nil {
+		return err
+	}
+	if err := importSites(ctx, cfg, db, log); err != nil {
+		return err
 	}
 
 	signer, err := token.NewSigner(cfg.MasterKey, cfg.PrevMaster)
@@ -96,23 +112,31 @@ func serve(ctx context.Context, cfg *config.Config, ln net.Listener, stdout io.W
 	if err != nil {
 		return fmt.Errorf("初始化 API: %w", err)
 	}
+	srv := newHTTPServer(ln, handler.Handler())
 
-	srv := &http.Server{
-		Addr:              ln.Addr().String(),
-		Handler:           handler.Handler(),
-		ReadHeaderTimeout: readHeaderTimeout,
-		ReadTimeout:       readTimeout,
-		WriteTimeout:      writeTimeout,
-		IdleTimeout:       idleTimeout,
-		MaxHeaderBytes:    maxHeaderBytes,
+	var adminSrv *http.Server
+	if adminLn != nil {
+		adminHandler, err := admin.New(cfg, db, log)
+		if err != nil {
+			return fmt.Errorf("初始化管理 API: %w", err)
+		}
+		adminSrv = newHTTPServer(adminLn, adminHandler.Handler())
+		log.Info("管理面已挂载", "addr", adminLn.Addr().String())
 	}
 
-	httpErr := make(chan error, 1)
+	httpErr := make(chan error, 2)
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			httpErr <- err
+			httpErr <- fmt.Errorf("公共 API: %w", err)
 		}
 	}()
+	if adminSrv != nil {
+		go func() {
+			if err := adminSrv.Serve(adminLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				httpErr <- fmt.Errorf("管理 API: %w", err)
+			}
+		}()
+	}
 	purgeDone := make(chan struct{})
 	go purgeLoop(ctx, db, log, purgeDone)
 
@@ -123,7 +147,7 @@ func serve(ctx context.Context, cfg *config.Config, ln net.Listener, stdout io.W
 	case err := <-httpErr:
 		// 不在这里 close(purgeDone)：清理 goroutine 会在 ctx 取消后自行关闭，
 		// 手动关一次再被 defer 关第二次就是 close of closed channel。
-		return fmt.Errorf("HTTP 服务: %w", err)
+		return err
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
@@ -131,13 +155,99 @@ func serve(ctx context.Context, cfg *config.Config, ln net.Listener, stdout io.W
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("关闭 HTTP: %w", err)
 	}
+	if adminSrv != nil {
+		if err := adminSrv.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("关闭管理 HTTP: %w", err)
+		}
+	}
 	<-purgeDone
 	log.Info("已停止")
 	return nil
 }
 
-// purgeLoop 只清理账本体积，不参与任何安全判定：过期状态一律由时间戳即时判定，
-// 因此清理任务停摆也不会让已消费 token 重新可用。
+// bootstrapAdmin 处理管理引导凭据（DESIGN §6）：库里没有任何管理密钥记录时登记 env 带来的那把，
+// 有记录之后这个环境变量**不再生效**——否则"我在管理 API 里撤销了它"会被下一次重启悄悄推翻。
+func bootstrapAdmin(ctx context.Context, cfg *config.Config, db *store.DB, adminLn net.Listener, log *slog.Logger) error {
+	if len(cfg.AdminKey) > 0 {
+		key, already, err := db.BootstrapAdminKey(ctx, string(cfg.AdminKey), bootstrapLabel)
+		switch {
+		case errors.Is(err, store.ErrConflict):
+			// 两个实例抢同一个库时可能撞标签；不影响安全性，继续以库里的记录为准。
+			already = true
+		case err != nil:
+			return fmt.Errorf("登记引导管理凭据: %w", err)
+		}
+		if already {
+			log.Info("管理凭据已存在于库中，忽略 EPOCHA_ADMIN_KEY（撤销不会因重启复活）")
+		} else {
+			log.Info("已登记引导管理凭据", "key_id", key.KeyID, "label", key.Label)
+		}
+	}
+	keys, err := db.ListAdminKeys(ctx)
+	if err != nil {
+		return fmt.Errorf("检查管理凭据: %w", err)
+	}
+	if len(keys) == 0 {
+		log.Warn("库中没有可用管理凭据：管理 API 一律拒绝（不设 EPOCHA_ADMIN_KEY 等于关闭管理面）")
+	}
+	if adminLn != nil && !isLoopback(adminLn.Addr()) {
+		log.Warn("管理监听地址不是 loopback，请在反代/防火墙侧再加一层来源限制", "addr", adminLn.Addr().String())
+	}
+	return nil
+}
+
+func isLoopback(addr net.Addr) bool {
+	tcpAddr, ok := addr.(*net.TCPAddr)
+	return ok && tcpAddr.IP.IsLoopback()
+}
+
+// importSites 是配置文件的**一次性导入**：库里已有同一个 site_key 时什么都不做。
+// 这条路径让"从阶段 1 升级"和脚本化初始化可写，但它绝不覆盖权威数据源——
+// 已撤销的密钥不会被配置文件里的旧值复活，已停用的站点不会被重启重新启用。
+func importSites(ctx context.Context, cfg *config.Config, db *store.DB, log *slog.Logger) error {
+	for _, s := range cfg.Sites {
+		// 配置文件里的 TTL/限流只在"首次导入"时成为站点策略；之后它们是库里的一行数据，
+		// 改这些环境数字不会再影响已导入的站点（DESIGN §5.3）。
+		policy := store.SitePolicy{
+			PowBits: s.PowBits, AllowMissingOrigin: s.AllowMissingOrigin,
+			ChallengeTTL: cfg.ChallengeTTL, ResponseTTL: cfg.ResponseTTL,
+			RateIPRPM: cfg.RateIPRPM, RateSiteRPM: cfg.RateSiteRPM,
+		}
+		site, imported, err := db.ImportSite(ctx, s.Name, s.SiteKey, s.Secret, policy)
+		if err != nil {
+			return fmt.Errorf("导入站点 %q: %w", s.Name, err)
+		}
+		if !imported {
+			log.Info("站点已在库中，配置条目不生效（SQLite 是权威数据源）",
+				"site_key", site.SiteKey, "enabled", site.Enabled, "pow_bits", int(site.PowBits))
+			continue
+		}
+		if len(s.Origins) > 0 {
+			if _, err := db.ReplaceOrigins(ctx, site.ID, s.Origins); err != nil {
+				return fmt.Errorf("导入站点 %q 的来源: %w", s.Name, err)
+			}
+		}
+		log.Info("站点已导入", "name", site.Name, "site_key", site.SiteKey,
+			"pow_bits", int(site.PowBits), "origins", len(s.Origins),
+			"allow_missing_origin", site.Policy.AllowMissingOrigin)
+	}
+	return nil
+}
+
+func newHTTPServer(ln net.Listener, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              ln.Addr().String(),
+		Handler:           h,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    maxHeaderBytes,
+	}
+}
+
+// purgeLoop 只清理账本与审计体积，不参与任何安全判定：过期状态一律由时间戳即时判定，
+// 因此清理任务停摆也不会让已消费 token 重新可用（DESIGN §5.1）。
 func purgeLoop(ctx context.Context, db *store.DB, log *slog.Logger, done chan<- struct{}) {
 	defer close(done)
 	t := time.NewTicker(purgeEvery)
@@ -149,12 +259,24 @@ func purgeLoop(ctx context.Context, db *store.DB, log *slog.Logger, done chan<- 
 		case now := <-t.C:
 			r, c, err := db.Purge(ctx, now)
 			if err != nil {
-				log.Error("清理账本", "err", err)
+				log.Error("清理账本", "err", errKindOf(err))
 				continue
 			}
-			if r > 0 || c > 0 {
-				log.Info("清理账本", "responses", r, "challenges", c)
+			a, err := db.PurgeAudit(ctx, now)
+			if err != nil {
+				log.Error("清理审计", "err", errKindOf(err))
+			}
+			if r > 0 || c > 0 || a > 0 {
+				log.Info("清理", "responses", r, "challenges", c, "audit", a)
 			}
 		}
 	}
+}
+
+// errKindOf 只保留错误类别：驱动/SQL 文本会带表名与约束名，不该进日志。
+func errKindOf(err error) string {
+	if err == nil {
+		return "nil"
+	}
+	return "unspecified"
 }

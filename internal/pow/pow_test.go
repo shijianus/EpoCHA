@@ -218,12 +218,20 @@ func TestSolutionNotPortableAcrossSeeds(t *testing.T) {
 		t.Fatal(err)
 	}
 	solution := solve(t, a)
-	b, err := NewParams(MinBits)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(a.Seed) == string(b.Seed) {
-		t.Skip("极小概率的 seed 冲突")
+	// 取到不同 seed 的参数再比较：不用 t.Skip 把"seed 相同"变成跳过理由——
+	// 128 位随机值重复本来就该当失败处理，而不是当"这次不测了"。
+	var b Params
+	for i := 0; i < 10; i++ {
+		b, err = NewParams(MinBits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(a.Seed) != string(b.Seed) {
+			break
+		}
+		if i == 9 {
+			t.Fatal("连续 10 次生成同一个 seed：CSPRNG 使用有误")
+		}
 	}
 	ok, err := b.Verify(solution)
 	if err != nil {

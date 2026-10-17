@@ -1,0 +1,14 @@
+bin/
+*.db
+*.db-wal
+*.db-shm
+*.key
+*.pepper
+.env
+.env.*
+!.env.example
+/tmp/
+.DS_Store
+*.log
+coverage.out
+web/widget/dist/

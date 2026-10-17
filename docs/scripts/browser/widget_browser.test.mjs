@@ -211,8 +211,10 @@ test("闭环：显示图片 → 输入 → 浏览器内 PoW → redeem → 业�
   const log = await bidi.evaluateJSON(c, `window.__statusLog.map(x=>x.text)`);
   const progress = log.filter((t) => t && t.includes("已尝试"));
   const powMs = parsePowMs(progress[progress.length - 1]);
-  console.log(`  [实测] 浏览器 PoW：进度上报 ${progress.length} 次，最后一条解析出的计算耗时 = ${powMs} ms；`
-    + `点击提交→verified 的墙钟 = ${wallMs} ms（含 PoW + 一次 localhost 往返）`);
+  // bits=12 时一次求解常在进度节流阈值（5 万次）之前完成 ⇒ "进度上报 0 次"是预期，不是没算。
+  // 单次求解耗时与吞吐由浏览器侧的独立测量给出（docs/STAGE4A.md §4），这里只记墙钟。
+  console.log(`  [实测] 浏览器 PoW（bits=12）：点击提交→verified 墙钟 = ${wallMs} ms；`
+    + `进度上报 ${progress.length} 次（0 次属预期：求解快于 5 万次的进度节流阈值），解析出的耗时 = ${powMs} ms`);
 });
 
 test("答错即终结：同一题不能重试；换题拿到的是另一道题", async () => {

@@ -944,7 +944,7 @@ swap: 512M + vm.swappiness=10；GOMEMLIMIT=56MiB GOMAXPROCS=1
 | 有限批次生成耗时 | — | `[实测]` 补 100 题：纯生成+写入 **29ms**（0.29ms/题）；补 1000 题：**339–391ms**（0.34–0.39ms/题）。总墙钟 1.03s / 10.3s 里**主动让出 CPU 占 1s / 10s**（`YieldEvery=10`/`YieldPause=100ms`，是设计意图不是开销）。测量条件：本机 4 核可见但 `BatchPerTick=n` 单轮补满、`t.TempDir()` 独立库、2026-10-17 | `BenchmarkPoolFill`（需显式 `-bench`） |
 | 题池磁盘占用 | `[目标]` 20000 行上限 | `[估算]` 按上行的 432 B/题 ⇒ 上限约 **8.4MB**（**外推值，未实测到 20000 行**；50GB 磁盘下不构成约束）。WAL 在写入进行中额外占 ~4.7MB（自动 checkpoint 阈值 1000 页） | `MaxRows` 同语句判定 |
 | widget 体积 | `gzip [目标]` <30KB（`make widget-size`） | `[实测]` **v1.js 原文 48,412 B / gzip 16,687 B**；与 `v1.worker.js` 合计 gzip 21,121 B（2026-10-18，同一构建口径） | 浏览器只下载 v1.js（worker 源码内嵌其中）；方案 B 另取 worker 文件 |
-| 浏览器 PoW 吞吐 | 未设线（先测再说） | `[实测]` **422,833 次/秒**（Firefox 147 headless、linux/arm64、Dedicated Worker 内纯 JS SHA-256） | bits=12 求解 4–6ms；bits=20 提交→verified **309–1,862ms**（同一难度的抽样抖动很大，别当常量） |
+| 浏览器 PoW 吞吐 | 未设线（先测再说） | `[实测]` **422,833 次/秒**（Firefox 147 headless、linux/arm64、Dedicated Worker 内纯 JS SHA-256） | bits=12 求解 4–6ms；bits=20 提交→verified 四次采样 309–4,064ms（几何分布 + 负载差异，别当常量） |
 | 内嵌字体 | `[估算]` Latin 1–3MB；CJK 子集 4–6MB | `[实测]` **Go Regular 单档 148,672 字节**（`goregular.TTF`，3B 只用这一档，不子集化：字符集只有 32 个字形，收益远小于复杂度）；二进制因此从 9,896,228 → **10,813,732 字节** | `docs/NOTICE.md` + `make size` |
 | 单题图片资产 | `[目标]` PNG ≤65,536B（库内 CHECK 强制） | `[实测]` d1 **1,126–2,557B**（均值 1,911）；d5 **5,648–6,902B**（均值 6,315）；base64 后 d5 一张约 8KB 响应（2026-10-18，60 样本） | `0004` CHECK + `store.MaxAssetBytes` + `TestAssetColumnChecksAreReal` |
 | 视觉题生成成本 | `[目标]` 平均 CPU ≤15% | `[实测]` 纯生成 **1.81ms(d1) → 3.91ms(d5)/题**；生成+写库+落盘约 **6ms/题**（含进程启动）。视觉桶独立水位 8/24 + 独立让步 200ms + 全局 4MiB 字节预算，**不继承**算术桶的 50/100/20000 | `EPOCHA_POOL_IMAGE_*` + `TestImageBucketUsesOwnWatermarks` + `TestImageByteBudgetStopsGenerationWithoutWastingRender` |
@@ -954,7 +954,7 @@ swap: 512M + vm.swappiness=10；GOMEMLIMIT=56MiB GOMAXPROCS=1
 | `/siteverify` p99 | `[目标]` <60ms | 待填（阶段 1 未做性能测量） | 基准测试 `TestBenchmarkSiteVerify` |
 | `/api/challenge` p99 | `[目标]` <120ms | 待填 | 同上 |
 | 混合吞吐 | `[目标]` ≥150 req/s 且无 `SQLITE_BUSY` | 待填 | `make loadtest`（阶段 5） |
-| PoW 求解时延 | 未设线（先测再说） | `[实测]` 纯 JS SHA-256 在 worker 里 **422,833 次/秒**（Firefox 147 headless、linux/arm64、2026-10-18）：bits=12 求解 **4–6ms**、提交→verified 墙钟 **103–148ms**；bits=20 提交→verified **309–1,862ms**（同难度抽样抖动大，不是常量） | 难度不能为了"看着快"往下降；`cmd/exampleapp` 的 8394 端口专测生产难度 |
+| PoW 求解时延 | 未设线（先测再说） | `[实测]` 纯 JS SHA-256 在 worker 里 **422,833 次/秒**（Firefox 147 headless、linux/arm64、2026-10-18）：bits=12 求解 **4–6ms**、提交→verified 墙钟 **103–173ms**（三次采样）；bits=20 提交→verified 四次采样 **309 / 1,551 / 1,862 / 4,064 ms** —— 第一个解的位置是几何分布，别把任何单次值当常量 | 难度不能为了"看着快"往下降；`cmd/exampleapp` 的 8394 端口专测生产难度 |
 
 **未测项与原因（3A 明确列出，不编造数值）**：
 **稳态**服务进程 RSS 与库体积（已测的是"200 题 + 20 次闭环"的功能形状采样，见上表；

@@ -336,6 +336,35 @@ CREATE INDEX pool_expire ON pool(status, expires_at);
 把"答案错"实现成返回 error 会让整笔事务回滚，题目回到 `ready`、challenge 回到可重试状态 ⇒ 无限重试同一道题。
 这个失败模式有专门的故障注入回归（§17）。
 
+### 5.5 阶段 3B 实际实现（图片资产、字节预算、判分与资产解耦）
+
+迁移仍是**增量**的（`0004_stage3b.sql`）：阶段 1/2/3A 的数据全部保留，旧行 `asset_blob` 为 NULL、
+`asset_mime` 为 `''`，因此算术题与 `pow_only` 的行为完全不变（有测试用一个只跑过 `0001..0003` 的库验证）。
+
+```sql
+-- 0004_stage3b.sql
+ALTER TABLE pool ADD COLUMN asset_blob BLOB  CHECK (asset_blob IS NULL OR length(asset_blob) <= 65536);
+ALTER TABLE pool ADD COLUMN asset_mime TEXT NOT NULL DEFAULT '' CHECK (asset_mime IN ('', 'image/png'));
+```
+
+四条纪律，每条都有测试：
+
+1. **两条资源边界各自独立、都在写入的同一条 SQL 内判定**：`pool` 的行数上限（3A 已有）与
+   **全局图片字节预算**（`(SELECT coalesce(sum(length(asset_blob)),0) FROM pool) + length(?) <= ?`）。
+   只看条数等于没看——一条图片题的字节可以是算术题的上百倍（实测 6KB vs 63B）。
+   预算为 0 的含义是"禁止任何图片资产"，不是"不限"（与 ADR-009 给 TTL 上界同一理由）。
+2. **统计绝不把 BLOB 读进 Go**：字节数一律用 SQLite 的 `sum(length(asset_blob))` 聚合，
+   跨进程边界的只有一个整数。`PoolStats` 因此多了 `ready_asset_bytes` / `total_asset_bytes`。
+3. **只有领取路径读资产**：`readQuestionTx`（按 id 精确读那一行）是资产进入 Go 内存的唯一位置；
+   判分走 `QuestionVerifierForChallenge`，只 SELECT `verifier_blob`。于是"图片被清理或损坏"
+   在结构上不可能影响验证——测试把 `asset_blob` 置为 NULL 后仍兑换成功来钉这条。
+4. **资产与题目同一行、同生同死**：`Purge` 删 `pool` 行时 PNG 一起消失，不存在孤儿文件，
+   也不需要路径清理或对象存储。代价是库体积，所以第 1 条是硬要求而不是优化项。
+
+MIME 存进库（而不是由生成器当前代码推断）是为了让资产**自描述**且已签发题目不会因为后来改代码而换类型；
+CHECK 把可选值封成一项，浏览器就没有 `data:<任意 MIME>` 的空间。资产与 MIME 必须成对出现，
+这条在 Go 侧拒绝（库侧两条 CHECK 各自限取值，跨列约束 `ADD COLUMN` 写不了）。
+
 ## 6. 密钥体系与 token
 
 **主密钥**：`EPOCHA_MASTER_KEY`（32B，env 或 `--master-key-file`，权限 0600）；**pepper**：`EPOCHA_PEPPER`（32B，与 DB 文件分离存放，独立挂载）。两者缺一服务拒绝启动（不静默降级）。
@@ -526,6 +555,44 @@ M1–M4 填表（ADR-002；实测条件：本机 go1.24.5/linux-arm64，2026-10-
 结论照 §8.2 的硬门槛执行：**`arithmetic-baseline-v1` 只用于验收与接口回归，不得作为站点面向真实流量的题型配置**；
 文档、错误码、管理响应都不声称它抗自动解题。分布数据是"答案聚集程度"的度量，不是"安全性"的度量。
 
+### 8.5 阶段 3B 实现：`text-image-v1`（实验性视觉题型）
+
+**定位**：这是第一个视觉生成器，交付的是"图片资产 → 存储 → 下发 → 判分"这条工程链路，
+**不是**已验证的抗 AI 方案。管理面里它带 `experimental:true` + `production_ready:false`。
+
+取值定义：长度固定 6；字符集 `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`（32 个，剔除易混的 I/1、O/0，
+它是**公开常量**、进 payload）；字符由 `crypto/rand.Int` 均匀抽取；归一化 = 裁首尾 ASCII 空白 →
+小写折大写 → 长度必须恰好 6 → 每字符必须在字符集内，否则一律**畸形**（不消耗作答机会，ADR-011 #3）。
+verifier 与算术题**同一条构造**（`nonce(16B) ‖ HMAC(K(qver), domain‖nonce‖0x00‖答案)`，48B），
+本轮没有发明新的密码学协议。
+
+渲染参数**必须有界**且只有五档（不组合出几百个未测配置）：画布 ≤640×256 且像素总数 ≤120,000、
+字号 16..96pt、DPI 72..150、单字旋转 ≤15°、基线/字间抖动 ≤12px、干扰线 ≤8 条×≤8 段、
+噪点 ≤ 像素数的 5%、PNG ≤65,536B。越界即 `ErrBadParams`，**不"夹紧后继续画"**。
+可读性由几何保证而非目测：字形旋转后的包围盒必须完整落在画布内（离边 ≥2px）且相邻水平重叠
+≤ 较窄者的 1/4，做不到就有界重试（128 次）后返回可重试的 `ErrGenerateExhausted`——
+**代码里不存在"发出被裁切或字符挤在一起的图"这条路径**。d1 是零抖动的"干净档"（可读性对照 + 字节级可复现）。
+
+M1–M4 填表（ADR-002；实测条件：本机 go1.24.5/linux-arm64，2026-10-18，见 `docs/STAGE3B.md` §5–§6）：
+
+| 指标 | 值 | 说明 |
+|---|---|---|
+| M1 题面随机空间 | 答案串 32^6 ≈ 1.07e9，再乘连续旋转/抖动/干扰线/噪声的组合 | **无防御价值**，只说明同题复用概率低（红线 14：不得用它论证抗 AI） |
+| M2 答案空间与接受容差 | 答案空间 32^6 = 1,073,741,824；容差 **0**（精确匹配） | 大小写折叠只增加"同一答案的写法数"，接受域仍是 1 个规范化串 |
+| M3 随机猜测通过率 | 单题 `p = 9.31e-10`；3 次**独立新挑战**累计 `1-(1-p)^3 = 2.79e-9`（上界 3p） | 一题只有一次作答机会 ⇒ 要 n 次机会必须领 n 道题、每次重付 PoW 与池容量。**猜测下限极低不等于抗机器**：它只说明"猜"不是攻击路径 |
+| M4 每次尝试成本 | **未测（阻塞）** | 本机无任何离线 OCR（tesseract/gocr/cuneiform 都不存在，未获授权安装），无人工参与数据，未获授权调用外部多模态 API。因此**不得**声称抗 AI/抗 OCR；已交付的是评测适配器 + 有测试的评分器（`internal/eval`、`cmd/evalgen`、`cmd/evalocr`） |
+
+评测纪律：样本分 **dev 调参集**与 **holdout 固定验收集**（holdout 的 seed 写死在代码里、不允许覆盖），
+避免"看完验收集结果再调参、仍拿同一集当独立证明"。文件名只带序号、不编码答案；
+ground truth 与样本图落在 `eval-out/`（已 gitignore）。固定测试熵源在 `internal/eval`，
+`stage3b.sh` 用 `go list -deps ./cmd/server` 证明**服务二进制不链接它**。
+评分器同时报两个分母（`StrictAccuracy` 把缺测与工具失败算不通过、`ScoredAccuracy` 只在成功跑完的样本上算），
+并把"工具失败"与"答错"分开计数——只报一个数就能把结论做出来。
+
+无障碍边界（不许含糊）：这是**纯视觉**题型，对无法看图的用户本质上不可完成；本轮没有音频或文本等价通道
+（§11 的非视觉等价通道属阶段 4）。**PoW-only 降级不是等效无障碍方案**：它换掉的是"题目这一层"，
+防线少一层，安全语义不同。预览页与 `alt` 文本都按这个口径写。
+
 ### 8.3 题池水位与预生成
 
 > **3A 实现见本节末尾与 §5.4**；下面第一段是阶段 0 草稿，`low_watermark` 公式与 `max_rows` 沿用，
@@ -612,7 +679,7 @@ TTL 有 `[1s, 1h]` 上下界——有效期长度直接决定防重放账本必�
 | POST | `/api/redeem` | challenge token | 1（3A 起接受 `answer`） | 提交 PoW 解（与答案），成功换一次性 `response` |
 | POST | `/siteverify` | `secret` | 1 | reCAPTCHA 风格，服务端调用 |
 | GET | `/healthz` | 无 | 1 | 存活探针，只返回 `{"status":"ok"}`，不含版本/路径/计数/依赖信息，不做健康即放行的语义 |
-| GET | `/asset/<pool_id>/<sig>` | 签名 | 3 | 题目图片，`Cache-Control: no-store` |
+| ~~GET~~ | ~~`/asset/<pool_id>/<sig>`~~ | — | **未采用（3B）** | 草稿里的签名媒体端点没有实现：它会凭空造出一个需要防枚举、防跨 challenge 引用的面，而题目是一次性的。图片改为**内联在 `/api/challenge` 的公开 DTO 里**（§10.1 下方、ADR-012） |
 | GET | `/widget/v1.js` | 公开 | 4 | widget 静态资源（gzip） |
 
 阶段 1 的公开端点**只有 PoW**：响应里不存在 `challenge` 对象，也不接受 `answer`/`behavior`。文档与实现都必须如实反映这一点，
@@ -648,6 +715,20 @@ TTL 有 `[1s, 1h]` 上下界——有效期长度直接决定防重放账本必�
 题目 ↔ challenge 的绑定只存在于服务端 `pool.challenge_id`）。`mode` 是站点策略的**签发快照**，同时被签名覆盖。
 草稿里写的 `challenge: {id, media, asset_url, task}` 形状**没有采用**：3A 无图片资产，
 把 `id` 与 `asset_url` 发给客户端会凭空造出一个需要防枚举、防跨 challenge 引用的面。
+
+**阶段 3B 追加三个键**（只有 `media=image` 的题型会出现；算术题的字段集合与 3A **逐字节相同**，
+有测试钉住这条兼容性）：
+```json
+{ "question": { "kind": "text-image", "length": 6, "charset": "ABCDEFGHJKLMNPQRSTUVWXYZ23456789",
+                "answer_type": "text", "max_answer_len": 6, "image_width": 300, "image_height": 112,
+                "generator": "text-image-v1", "generator_version": "v1",
+                "media": "image", "image_mime": "image/png", "image_base64": "iVBORw0KG…" } }
+```
+`image_base64` 是**标准 base64**（配 `data:image/png;base64,` 使用），不是 base64url；
+它的上界由 `pool.asset_blob` 的 CHECK 给出（65,536B ⇒ base64 后 ≤87,386 字符，实测 d5 约 8KB 响应）。
+媒体声明与资产**必须成对**：`media=image` 而库里没有资产（或 MIME 不是 `image/png`）时，
+`questionDTO` 返回错误 ⇒ 作废该 challenge + 503 可重试，**绝不**下发一道看不见的题，
+也**绝不**退化成 `pow_only`（§14-14）。图片只随这一次响应出去，之后任何路径都不再读它。
 
 给不出题时（题池空、或站点配的生成器本进程没登记）是**可重试的资源状态**，不是验证失败：
 `503` + `Retry-After: 2` + `{ "error-codes": ["challenge-unavailable"] }`，且响应里**没有** `pow`/`token`。
@@ -726,8 +807,8 @@ token 验签 → 站点存在且启用且 `svid` 一致 → 站点/IP 限流 →
 | GET/POST | `/api/admin/admin-keys` | 列出管理凭据元数据 / 新增一把 |
 | POST | `/api/admin/admin-keys/{key_id}/revoke` | 撤销管理凭据（自撤销时返回 `warning:"self-revoked"`） |
 | GET | `/api/admin/audit?before_id=&limit=` | 审计倒序游标分页（上限 500） |
-| GET | `/api/admin/generators` | **3A**：本进程登记的题型（`id`/`version`/`media`/`production_ready`/`note`）+ `max_difficulty` |
-| GET | `/api/admin/pool` | **3A**：按 `(generator, version, difficulty)` 分桶的 `ready`/`assigned`/`terminal`/`total` 计数 + worker 观测 |
+| GET | `/api/admin/generators` | **3A**：本进程登记的题型（`id`/`version`/`media`/`note`）+ `max_difficulty`；**3B** 追加 `experimental` 与 `production_ready`（两个题型现在都是 `true`/`false`） |
+| GET | `/api/admin/pool` | **3A**：按 `(generator, version, difficulty)` 分桶的 `ready`/`assigned`/`terminal`/`total` 计数 + worker 观测；**3B** 每桶追加 `ready_asset_bytes`/`total_asset_bytes`，顶层追加 `image.{asset_bytes,budget_bytes,per_question_max_bytes}` |
 
 尚未实现（阶段 3B/5）：`/api/admin/sites/{id}/generators`（多题型权重）、`/api/admin/stats`、master key 的 `kid` 轮换登记接口。
 
@@ -742,6 +823,15 @@ token 验签 → 站点存在且启用且 `svid` 一致 → 站点/IP 限流 →
   等于让公开流量把审计表打满（阶段 3A 明确不做，见下方"审计边界"）。
 - `production_ready` 与 `note` 是刻意的自我标记：`arithmetic-baseline-v1` 在这里**如实写明**"题面可被脚本直接求值，
   不抗自动解题，仅用于验证题池与提交生命周期"，让运维在管理面就看到基线题型的定位，而不是只写在文档里。
+- **3B 的自我标记默认拒绝**（`generatorLifecycle`）：没有登记结论的题型一律报
+  `experimental:true` + `production_ready:false`，于是"忘了写"不会变成"看起来可用"。
+  `text-image-v1` 的 `note` 明写"图片中可见字符本来就要给答题者看，不具备密码学保密性；
+  抗 OCR/抗多模态能力**未经**评测"。**未经评测不得改成 `production_ready:true`；评测通过也只证明"测过"，
+  不等于生产安全认证**（ADR-002/ADR-006）。
+- 生成器的启用/禁用是**进程级**的（`EPOCHA_GENERATORS` 白名单，§16 配置面）：禁用后不再为该题型备题，
+  指向它的站点得到 503（不降级）；**已经签发的题目**判分时找不到生成器 ⇒ 同样 503 且**不消耗作答机会**
+  （状态不变，重新启用后仍可完成）。这套语义有测试（`TestDisabledGeneratorIssuesNothingButKeepsLedger`）。
+- 字节观测只给聚合整数：`/api/admin/pool` 的实现里没有任何一处把 `asset_blob` 读进 Go（§5.5 纪律 2）。
 
 `DELETE /sites/{id}` 是**软吊销**（停用 + 提升版本），不删任何账本行——已消费的 response 行正是"重放必失败"的证据。
 
@@ -828,7 +918,11 @@ swap: 512M + vm.swappiness=10；GOMEMLIMIT=56MiB GOMAXPROCS=1
 | 单题数据体积 | `[目标]` payload ≤4096B / verifier ≤512B（库内 CHECK 强制） | `[实测]` `arithmetic-baseline-v1` 较大块 **62–63 字节**（verifier 恒为 16B nonce + 32B HMAC = 48B）；库内**净增 ≈432 字节/题**（1000 题与 100 题两次 checkpoint 后大小之差 ÷ 900 行；SQLite 4KB 页填充率决定了它远大于裸字段和） | `store.MaxPayloadBytes`/`MaxVerifierBytes` + 有测试 |
 | 有限批次生成耗时 | — | `[实测]` 补 100 题：纯生成+写入 **29ms**（0.29ms/题）；补 1000 题：**339–391ms**（0.34–0.39ms/题）。总墙钟 1.03s / 10.3s 里**主动让出 CPU 占 1s / 10s**（`YieldEvery=10`/`YieldPause=100ms`，是设计意图不是开销）。测量条件：本机 4 核可见但 `BatchPerTick=n` 单轮补满、`t.TempDir()` 独立库、2026-10-17 | `BenchmarkPoolFill`（需显式 `-bench`） |
 | 题池磁盘占用 | `[目标]` 20000 行上限 | `[估算]` 按上行的 432 B/题 ⇒ 上限约 **8.4MB**（**外推值，未实测到 20000 行**；50GB 磁盘下不构成约束）。WAL 在写入进行中额外占 ~4.7MB（自动 checkpoint 阈值 1000 页） | `MaxRows` 同语句判定 |
-| 内嵌字体 | `[估算]` Latin 1–3MB；CJK 子集 4–6MB | 待填（**3A 没有字体**：基线题型是纯文本，光栅路径属 3B） | 子集脚本 + NOTICE |
+| 内嵌字体 | `[估算]` Latin 1–3MB；CJK 子集 4–6MB | `[实测]` **Go Regular 单档 148,672 字节**（`goregular.TTF`，3B 只用这一档，不子集化：字符集只有 32 个字形，收益远小于复杂度）；二进制因此从 9,896,228 → **10,813,732 字节** | `docs/NOTICE.md` + `make size` |
+| 单题图片资产 | `[目标]` PNG ≤65,536B（库内 CHECK 强制） | `[实测]` d1 **1,126–2,557B**（均值 1,911）；d5 **5,648–6,902B**（均值 6,315）；base64 后 d5 一张约 8KB 响应（2026-10-18，60 样本） | `0004` CHECK + `store.MaxAssetBytes` + `TestAssetColumnChecksAreReal` |
+| 视觉题生成成本 | `[目标]` 平均 CPU ≤15% | `[实测]` 纯生成 **1.81ms(d1) → 3.91ms(d5)/题**；生成+写库+落盘约 **6ms/题**（含进程启动）。视觉桶独立水位 8/24 + 独立让步 200ms + 全局 4MiB 字节预算，**不继承**算术桶的 50/100/20000 | `EPOCHA_POOL_IMAGE_*` + `TestImageBucketUsesOwnWatermarks` + `TestImageByteBudgetStopsGenerationWithoutWastingRender` |
+| 图片池磁盘 | `[目标]` 全局图片字节预算 4MiB | `[实测]` 新库 + ≥20 条 ready 图片题 + 40 条算术题 + 20 次闭环 ⇒ `wal_checkpoint(TRUNCATE)` 后 **278,528B**（写入中主文件仅 4,096B + WAL 2,855,192B——**只 stat 主文件会得到假数**）。每行图片的净磁盘开销本轮**未单独隔离测量** | `ImageAssetBytes` + `TestPurgeReleasesImageBytes` |
+| 服务进程驻留（含图片） | `[目标]` <100MB | `[实测]` **VmRSS 18,776 kB / VmHWM 18,904 kB / Threads 10**（`cmd/server` 二进制，形状 = 视觉桶 ≥20 条 + 20 次混合闭环 0 失败；2026-10-18）。仍是功能闭环形状采样，**不是**稳态，未压过预算满载 | `stage3b.sh` 第十三步 |
 | 池预生成 CPU | `[目标]` 平均 ≤15%（补 10 题睡 100ms） | 待填（未做持续负载测量；0.35ms/题的纯成本意味着按默认 `BatchPerTick=20`/`PollInterval=2s` 稳态补题时 CPU 占用远低于该目标，但这是算术推论不是实测） | metric `pool_gen_ms` 直方图（阶段 5） |
 | `/siteverify` p99 | `[目标]` <60ms | 待填（阶段 1 未做性能测量） | 基准测试 `TestBenchmarkSiteVerify` |
 | `/api/challenge` p99 | `[目标]` <120ms | 待填 | 同上 |
@@ -882,8 +976,14 @@ internal/store/      SQLite 打开、PRAGMA、迁移（0001/0002/0003）、原�
                      题池与题目 ↔ challenge 绑定 pool.go、终结性作答 RedeemAttempt（阶段 3A）
 internal/pool/       后台预生成 worker：水位迟滞、有界批次、CPU 让步、指数退避（阶段 3A 实现）；
                      领取与终态化在 store 的事务方法里，不在这里
-internal/generator/  Generator 契约 + Registry + arithmetic-baseline-v1（阶段 3A 实现，工程基线题型）；
-                     视觉题型与渲染路径属 3B
+internal/generator/  Generator 契约 + Registry + arithmetic-baseline-v1（3A）+ text-image-v1（3B：有界渲染参数、
+                     字形包围盒几何校验、image.Gray → PNG）；共用的 verifier 构造在 generator.go
+    internal/eval/     **开发期**评测底座：确定性测试熵源 + 与题型无关的评分器。cmd/server 不链接它（有证明）
+    cmd/preview/       本地预览的演示后端（仅 loopback、持 secret 调 /siteverify、验证目标不可由浏览器指定）
+    web/preview/       预览页单文件 HTML/CSS/JS + go:embed（放这里是因为 go:embed 只能嵌本包子树）
+    cmd/evalgen/       离线样本生成（dev / holdout 两集，输出 eval-out/ 不入库）
+    cmd/evalocr/       外部 OCR 适配器（exec argv、逐张计时、缺工具时退出码 3 = 未测）
+    cmd/devseed/       受控题目注入（端到端验收用；需要主密钥，只操作本地库，不提供答案查询）
 internal/risk/       有界令牌桶与来源地址裁决（阶段 1）；打分（阶段 3+）
 internal/admin/      管理 API：鉴权/审计/站点与凭据生命周期（阶段 2，admin.go + handlers.go）；
                      模式与生成器配置校验、`/api/admin/generators` 与 `/api/admin/pool` 只读观测（阶段 3A）；页面属阶段 5
@@ -896,8 +996,8 @@ deploy/docker/       Dockerfile + compose（阶段 5）
 deploy/cloudflare/   Worker + wrangler.toml（阶段 5 之后评估）
 internal/store/migrations/  NNNN_*.sql（阶段 1 起）——偏离"顶层 migrations/"是有意的：
                      go:embed 只能嵌入本包子树，放在仓库根就无法编进单二进制
-docs/                DESIGN.md、DECISIONS.md、STAGE3A.md（3A 状态转换表与资源实测）、
-                     scripts/（stage1.sh、stage2.sh、stage3a.sh）、reviews/（阶段自检报告）
+docs/                DESIGN.md、DECISIONS.md、STAGE3A.md、STAGE3B.md（3B 数据流/配置/预览/评测方法与未测项）、
+                     NOTICE.md（依赖与**字体**许可）、scripts/（stage1.sh…stage3b.sh）、reviews/
 ```
 调整需说明理由；测试与被测文件同包同目录（`*_test.go`），集成测试用 `t.TempDir()` 建独立 DB，禁止依赖外部环境。
 
@@ -908,10 +1008,15 @@ docs/                DESIGN.md、DECISIONS.md、STAGE3A.md（3A 状态转换表�
 | `modernc.org/sqlite` | **v1.46.1**（锁定） | 纯 Go SQLite 驱动，防重放账本持久化 | BSD-3-Clause（SQLite 本体 public domain） | `mattn/go-sqlite3`（需 cgo）；`v1.46.2+` 要求 Go≥1.25、`v1.60.x` 要求 Go≥1.26 → 会隐式升级工具链，禁止 |
 | 标准库 `net/http` | — | 路由用 Go 1.22+ `ServeMux` 方法模式 | — | `gin`/`echo`/`chi`（无必要） |
 | 标准库 `crypto/*` | — | HMAC-SHA256 签名与派生、`crypto/rand`、`crypto/subtle` | — | `golang.org/x/crypto/hkdf`（本设计每用途一把固定长度密钥，域分隔 HMAC 即可，见 §6） |
+| 标准库 `image`、`image/png` | — | 画布与 PNG 编码（`image.Gray` 单通道，裸数据比 RGBA 小 4 倍） | — | 任何外部图像库/命令行工具 |
+| `golang.org/x/image` | **v0.36.0**（锁定） | 3B 视觉题：`font/opentype` + `font/gofont/goregular`（内嵌 Go Regular）+ `draw`（逐字旋转合成） | BSD-3-Clause；字体本身是 Bigelow & Holmes 的 BSD-3（见 `docs/NOTICE.md`） | **不能升到 v0.37.0+**：其 `go` 指令要求 Go≥1.25，在 `GOTOOLCHAIN=local` 下等于隐式升级工具链（ADR-007）。也不引 `x/image/vector`（自己写十几行线段采样更好验证，且实测混用两种 Bresenham 约定会死循环） |
 | 无 ORM | — | 手写 SQL 保证原子条件更新与可读性 | — | `gorm`/`sqlc` |
 
-**阶段 2 没有引入任何新依赖**（仍是只有 `modernc.org/sqlite` + 标准库）。
-阶段 3 才可能需要 `golang.org/x/image`（`font/opentype` 等），**现在不引入**。传递依赖清单与许可记录在 ADR-007，我们只直接 import `modernc.org/sqlite`。
+**阶段 2 没有引入任何新依赖**。阶段 3A 也没有。**阶段 3B 引入了 `golang.org/x/image` v0.36.0**
+（用户在本轮明确批准，条件是锁版本、不触发工具链升级、核对字体许可）：直接 import 只有
+`font/opentype`、`font/gofont/goregular`、`font`、`draw`、`math/f64`、`math/fixed` 六个子包。
+传递依赖 `golang.org/x/text v0.34.0`（`font/sfnt` 的编码表需要，`go` 指令 1.24.0，兼容本机 go1.24.5）。
+完整许可记录在 `docs/NOTICE.md`。除这两个之外仍**没有任何**第三方依赖。
 `Makefile` 设 `GOTOOLCHAIN=local`：构建过程不得下载或切换 Go 工具链；不擅自升级 Go。
 
 ## 17. 开发阶段与验收标准
@@ -992,13 +1097,33 @@ api 侧 `TestWrongAnswerTerminatesChallenge`、`TestAnswerIsBoundToItsOwnChallen
 `TestDisableDoesNotReturnQuestionAndRestartKeepsState`、`TestFailedChallengeStaysFailedAfterRestart`。
 随后恢复正确实现并复跑为绿；故意破坏的版本**没有提交**（`grep` 确认注入标记不在树里）。
 
-**阶段 3B（未开始）— 视觉生成器 + 反自动解题基线测量**
-前置条件：字体/图片素材的**再分发许可**先定（§18-R3，未确认就不动代码），可能需要 `golang.org/x/image`
-（属新增依赖，须先问用户，AGENTS.md）。
-验收：池低于水位自动补至 `high_watermark`；payload 属性测试断言答案与可推导种子不在其中（各 500 题随机）；
-并发生成/claim 在 `-race` 下无竞争、无重复下发；统计计数与并发写一致；字体缺失时启动即失败（不静默降级）。
-**ADR-002 的硬门槛**：每个题型必须提交 M1–M4 四个指标，其中 M4（每次尝试成本）与 M3（猜测通过率）需带**本地基线测量**的
-方法与日期；`rotate` 的"144"这类数字在完成测量前不得写成安全性论据。M3 在 3 次尝试下累计通过率 >10% 的题型不得启用。
+**阶段 3B — 首个视觉生成器 + 图片资产接线 + 本地预览 + 可复现评测（已实现，2026-10-18）**
+前置条件处理：字体许可已核（Go 字体是 BSD-3，非 OFL；`docs/NOTICE.md` 履行"二进制再分发须复制声明"）；
+`golang.org/x/image` 经用户批准后引入并锁在 v0.36.0。素材方面**没有任何外部素材**——图片全部实时生成。
+
+范围边界（与"下一步"分界）：3B 做**工程链路**，不做正式 widget、不做完整后台/容器/边缘、
+**不做生产可用的结论**。`make stage3b-check` 的 22 项全部真实跑绿（退出码 0）：
+依赖隔离（服务二进制不链接 `internal/eval` 与任何开发命令）、管理面题型登记与未知题型拒绝、
+池空 503 不降级、注入受控图片题后 DTO 字段集合、base64 解码为合法灰度 PNG 且块类型仅 IHDR/IDAT/IEND、
+客户端真实求解 PoW 的完整闭环、错误答案终结、畸形答案不消耗机会（与上一条构成对照）、
+重启后终态与一次性、视觉桶用自己的水位而算术桶用自己的、全局图片字节预算先于水位生效、
+`EPOCHA_GENERATORS` 禁用后不签发新题、`pow_only` 与 `arithmetic-baseline-v1` 两条旧路径回归、
+凭据按值扫描（响应/日志/库文件）与私有字段按名扫描、预览拒绝非 loopback / 拒绝目标注入 /
+secret 不进浏览器 / 演示后端真实验证成功、资源实测（PNG 分布、生成耗时、库与 WAL 体积、服务进程 RSS）。
+
+**未达成项（如实记录，不算通过）**：
+- **M4 每次尝试成本未测**：本机无离线 OCR（未获授权安装或下载模型），OCR 基线**未执行**；
+  已交付适配器 + 有测试的评分器 + 固定输入输出格式。缺测**不得**被读成"题目抗机器能力强"。
+- **人工可读性未测**：盲测页面与统计口径已交付，但没有真实参与者数据；agent 不代填。
+- 浏览器内"输入答案 → 提交 → 成功"这一击**未自动化**（无 geckodriver/playwright）：
+  Firefox headless 已验证页面加载、脚本执行、预检 204 + 领题 200、以及真实 `image_base64` 可被浏览器
+  渲染成可读图（这一步抓到一个 `?site_key=` 缺失导致预检 403 的真 bug），但截图不能点击/输入。
+- §8.2 的 M3 门槛（3 次累计 >10% 不得启用）对本题型远低于阈值（2.79e-9），但**M3 低不代表安全**：
+  真正的门槛是 M4，而它未测。因此 `production_ready:false` 保持不变。
+
+**阶段 3C / 下一步（未开始）**：题型权重与多生成器选择、风险打分（第三层）、
+分级淘汰与统计面、正式 widget（含非视觉等价通道）、OCR 与人工基线测量。
+`rotate-v1` 的"144"这类数字在完成 M1–M4 测量前仍不得写成安全性论据。
 
 **阶段 4 — Widget + 示例页**
 验收：题型人工各过 5 次；`make widget-size` 断言 gzip `<30KB [目标]`；键盘-only 完成一题；`aria-live` 播报经 DOM 断言；
@@ -1026,10 +1151,30 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
 | R9 | **§13 与 §7 的全部性能数字均未实测**，阶段 1 只做功能正确性 | 已按 `[目标]`/`[估算]` 标注 | 阶段 5 压测回填；在此之前不得据此做容量或选型决策 |
 | R10 | 配额类外部事实会随平台变化（ADR-001 的教训） | 文档已改为"引用来源 + 使用时重新核对" | 任何平台限制写入文档时注明日期与出处 |
 | R11 | `arithmetic-baseline-v1` 可被脚本 O(1) 解出（M4 ≈ 0）；d1 单点答案概率实测 ≈4.5%–4.8%（两次抽样，众数在 `0` 与 `14` 之间并列），3 次尝试累计 ≈13.5%–14.4%，已超 §8.2 的 10% 线 | **已知且刻意**：它是流程/生命周期的工程基线，不是生产题型。管理面用 `production_ready:false` + `note` 显式标记；把它当真实防线用属运维误配 | 3B 用视觉题型与基线测量替换；在此之前不得用它论证任何抗 AI 结论（§8.4） |
+| R13 | `text-image-v1` 的**每次尝试成本（M4）未测**：没有 OCR、没有人工基线，因此它既没被证明能被机器解出、也没被证明解不出 | **已知且刻意**：管理面 `experimental:true` + `production_ready:false`，文档与错误响应都不声称抗机器；把它当生产防线用属运维误配 | 装一个离线 OCR 后跑 `make ocr-baseline`（适配器与评分器已交付并有测试）；再做人工可读性盲测；两者都有数据前不改 `production_ready` |
+| R14 | 图片题把资源压力从 CPU 搬到**磁盘与响应体**：单题 6KB、base64 后约 8KB 响应，池里几十条就是几百 KB | 已用四条边界压住：单题 CHECK 65,536B、全局图片字节预算、视觉桶独立低水位（8/24）、生成不在事务内且预算先于渲染生效 | 阶段 5 用真实到达率重设水位与预算；widget 侧再评估是否需要分块或缓存策略（当前刻意不做裸媒体端点） |
 | R12 | 池容量不足时公共请求直接吃 503（不降级是正确的，但对调用方表现为"暂时不可用"） | 默认水位 50/100 与 20000 行上限都是 `[目标]`，**未经真实流量校准** | 3B/阶段 5 按 `[实测]` 到达率重设水位；运维侧先用 `/api/admin/pool` 观测 |
 
 ## 19. 变更日志
 
+- 2026-10-18 **v2.6（阶段 3B 实现完成）**：新增 §5.5（`0004` 图片资产列与两条独立资源边界的原子判定、
+  统计不加载 BLOB、判分与资产解耦、资产随 `pool` 行同生同死）、§8.5（`text-image-v1` 的取值定义、
+  五档有界渲染参数、可读性的几何保证、M1–M4 填表与**M4 未测**的结论）、§10.1（图片以 base64 内联进
+  `question` DTO，**不采用**草稿里的 `/asset/<id>` 签名端点；媒体与资产不配对即作废 challenge + 503）、
+  §10.2（`experimental`/`production_ready` 默认拒绝、`EPOCHA_GENERATORS` 禁用语义、池的字节观测）、
+  §13（图片资产字节、生成耗时、图片池磁盘、服务进程 RSS 的 `[实测]`）、§16（引入 `golang.org/x/image` v0.36.0
+  与"不能升到 v0.37+"的理由）、§17（3B 已实现 + 未达成项清单）、§18（新增 R13/R14）。
+  新增 ADR-012、`docs/STAGE3B.md`、`docs/NOTICE.md`、`make stage3b-check`（22 项）。
+  本轮另修掉四个实测踩到的东西：① 混用两种 Bresenham 符号约定导致**陡线死循环**（改成有界步数的
+  参数化采样，并有终止性测试）；② `x/image/draw` 的 `Transform` 实测**不采纳 `sr.Min`**（identity 矩阵下
+  把 (10,20) 的块画到 (10,10)），字形 tile 因此改为原点建图、平移写进矩阵；③ 预览页配置用
+  `HTMLEscapeString` 注入会让 `<script type="application/json">` 里的 `JSON.parse` 抛异常
+  （script 数据块不解码 HTML 实体）——页面"加载成功但什么都不做"；④ 预览页 fetch 没带 `?site_key=`，
+  JSON 请求触发的 CORS 预检只能从查询参数认站点 ⇒ 浏览器拿到 `OPTIONS 403`（curl 测不出来，
+  是 Firefox headless 截图发现的）。
+  纠正两条：跨题绑定测试改用**受控夹具**（不再靠随机抽题/有界重抽，且明确"答案相同是合法现象、
+  不可跨题复用的是 verifier/绑定/PoW/token"）；标签规则改为"完成后打 `stage-3b-done`，
+  不移动 3A 标签、不打 `stage-3-done`、不自动 push"。
 - 2026-10-17 **v2.5（阶段 3A 交付复核）**：v2.4 的表述里有 6 处与代码不符或依赖了未验证机制，本轮逐条按实测更正——
   ① `0003` 迁移注释与 ADR-011 原稿把 verifier 写成 `HMAC(…, pool.id ‖ 答案)`，实现是 **每题随机 nonce**，注释按实现改写；
   ② `claimAttempts` 的注释声称"并发对手赢下该行后 `RowsAffected==0` ⇒ 换下一个候选"，实测**不成立**：同进程被

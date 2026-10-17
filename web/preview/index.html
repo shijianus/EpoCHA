@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>epocha 视觉题预览 / text-image-v1 preview</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0 auto; max-width: 46rem; padding: 1.5rem 1rem 3rem; }
+  h1 { font-size: 1.25rem; margin: 0 0 .25rem; }
+  .sub { color: #666; font-size: .85rem; margin-bottom: 1.25rem; }
+  .card { border: 1px solid #bbb; border-radius: .5rem; padding: 1rem; }
+  .imgwrap { display: flex; justify-content: center; background: #fff; border: 1px dashed #999; border-radius: .35rem; padding: .5rem; min-height: 4rem; }
+  canvas, img { max-width: 100%; height: auto; image-rendering: auto; }
+  label { display: block; font-weight: 600; margin: 1rem 0 .35rem; }
+  input[type=text] { width: 100%; font: inherit; letter-spacing: .35em; text-transform: uppercase; padding: .5rem; box-sizing: border-box; }
+  button { font: inherit; padding: .5rem .9rem; margin-right: .5rem; margin-top: .9rem; cursor: pointer; }
+  button:disabled { opacity: .55; cursor: progress; }
+  .status { margin-top: 1rem; padding: .6rem .75rem; border-radius: .35rem; border: 1px solid #bbb; min-height: 1.25rem; }
+  .status[data-kind=ok] { border-color: #2a7d3f; background: rgba(42,125,63,.08); }
+  .status[data-kind=err] { border-color: #a33; background: rgba(170,51,51,.08); }
+  .status[data-kind=busy] { border-color: #36c; background: rgba(51,102,204,.07); }
+  .meta { color: #666; font-size: .8rem; margin-top: .75rem; word-break: break-all; }
+  table { border-collapse: collapse; width: 100%; margin-top: .5rem; font-size: .85rem; }
+  th, td { border-bottom: 1px solid #ccc; text-align: left; padding: .3rem .4rem; }
+  details { margin-top: 1.25rem; }
+  .warn { border-left: 3px solid #b0761a; padding-left: .75rem; }
+  code { background: rgba(127,127,127,.15); padding: .05rem .3rem; border-radius: .2rem; }
+</style>
+</head>
+<body>
+<h1>epocha — text-image-v1 本地预览</h1>
+<p class="sub">开发用预览页，<strong>不是</strong>正式 widget（正式 widget 属阶段 4）。
+演示后端（本机进程）持有站点验证凭据并调用 <code>/siteverify</code>；凭据不下发到浏览器。</p>
+
+<div class="card">
+  <div id="imgwrap" class="imgwrap" aria-hidden="true">（还没有题目：点“取一张新题”）</div>
+
+  <label for="answer">请输入图中显示的 6 个字符 / type the 6 characters</label>
+  <input id="answer" name="answer" type="text" autocomplete="off" autocapitalize="characters"
+         spellcheck="false" maxlength="8" aria-describedby="answerhint"
+         aria-invalid="false" aria-required="true">
+  <span id="answerhint" class="meta">字符集 <code id="charset">—</code>；不含易混字符 I O 0 1；
+    大小写不敏感。每题<strong>只有一次作答机会</strong>：答错该题即作废。</span>
+
+  <div>
+    <button id="refresh" type="button">取一张新题（换题）</button>
+    <button id="submit" type="submit" form="qform" disabled>提交答案</button>
+  </div>
+
+  <p id="status" class="status" role="status" aria-live="polite" data-kind="idle">就绪。</p>
+  <p id="meta" class="meta"></p>
+</div>
+
+<form id="qform" hidden><input hidden></form>
+
+<details>
+  <summary>盲测模式 / readability trial（统计完成率、错误率、换题次数、耗时）</summary>
+  <p class="sub">这一模式<strong>不显示标准答案</strong>，只记录你每次提交的结果（由服务端判分给出）。
+     它测量的是"人能不能读出来"，与 OCR/模型无关，也不会把答案回显给页面。</p>
+  <label for="trials">题数（1–20）</label>
+  <input id="trials" type="number" min="1" max="20" value="10" style="width:5rem">
+  <label for="tier">难度档（1=干净档，5=抖动最多）</label>
+  <input id="tier" type="number" min="1" max="5" value="2" style="width:5rem">
+  <button id="starttrial" type="button">开始盲测</button>
+  <button id="stoptrial" type="button" disabled>停止</button>
+  <table id="trialtable" hidden>
+    <thead><tr><th>#</th><th>结果</th><th>用时(ms)</th><th>换题次数</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <p id="trialsummary" class="meta"></p>
+</details>
+
+<details class="warn">
+  <summary>无障碍与诚实边界（请先读）</summary>
+  <ul>
+    <li>本页的题目是<strong>纯视觉</strong>的：对无法看图或低视力的用户，这道题本质上不可完成。
+        这里<strong>没有</strong>音频或文本等价通道。</li>
+    <li>PoW-only 模式不是"等效替代"：它换掉的是"题目这一层"，防线少了一层，
+        安全含义与视觉题不同，不能被称为无障碍等价方案。</li>
+    <li>图片 <code>alt</code> 只描述用途，不含答案。表单可用键盘完成（Tab → 输入 → Enter）。</li>
+    <li>本页不构成完整跨站点 SDK API，也未做完整无障碍合规验证（阶段 4 的 widget 才做）。</li>
+  </ul>
+</details>
+
+<script id="cfg" type="application/json">{{CFG_JSON}}</script>
+<script>
+"use strict";
+// 配置由演示后端注入：只有公开字段（api 基址、site_key、演示验证路径）。
+// 演示后端的验证目标与站点 secret 都不在这里，浏览器无法指定验证目标 URL。
+const CFG = JSON.parse(document.getElementById("cfg").textContent);
+
+const els = {
+  wrap: document.getElementById("imgwrap"),
+  answer: document.getElementById("answer"),
+  status: document.getElementById("status"),
+  meta: document.getElementById("meta"),
+  refresh: document.getElementById("refresh"),
+  submit: document.getElementById("submit"),
+  charset: document.getElementById("charset"),
+};
+let current = null;      // {token, pow, answer 字段等}
+let solving = false;
+let refreshCount = 0;
+let lastFetchMs = 0;
+
+function say(text, kind) {
+  els.status.textContent = text;
+  els.status.dataset.kind = kind || "idle";
+}
+function busy(v) {
+  els.submit.disabled = v || !current || solving;
+  els.refresh.disabled = v || solving;
+}
+function apiBase() { return CFG.api_base.replace(/\/$/, ""); }
+function b64urlToBytes(s) {
+  const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
+  const bin = atob(s.replace(/-/g, "+").replace(/_/g, "/") + pad);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function leadingZeroBits(bytes, bits) {
+  let seen = 0;
+  for (const b of bytes) {
+    if (b === 0) { seen += 8; }
+    else {
+      let z = 0;
+      for (let m = 0x80; m & 0xff; m >>= 1) { if (b & m) break; z++; }
+      seen += z;
+      break;
+    }
+    if (seen >= bits) return true;
+  }
+  return seen >= bits;
+}
+const nextTick = () => new Promise(r => setTimeout(r, 0));
+
+// 浏览器自己暴力求解 PoW：服务端不代替用户计算。
+async function solvePow(seedB64url, bits, shouldAbort) {
+  const seed = b64urlToBytes(seedB64url);
+  const buf = new Uint8Array(seed.length + 16);
+  buf.set(seed);
+  const max = 20000000n;
+  let n = 0n, i = 0;
+  for (; n < max; n++, i++) {
+    if (i % 500 === 0) {
+      if (shouldAbort && shouldAbort()) return null;
+      await nextTick();
+    }
+    const s = n.toString();
+    for (let j = 0; j < s.length; j++) buf[seed.length + j] = s.charCodeAt(j);
+    const d = new Uint8Array(await crypto.subtle.digest("SHA-256", buf.subarray(0, seed.length + s.length)));
+    if (leadingZeroBits(d, bits)) return s;
+  }
+  return null;
+}
+
+async function fetchChallenge() {
+  if (!crypto.subtle) {
+    say("这个浏览器没有 WebCrypto（crypto.subtle），无法在本地计算 PoW。", "err");
+    return;
+  }
+  solving = false;
+  busy(true);
+  say("正在领取新题…", "busy");
+  const t0 = performance.now();
+  let r;
+  try {
+    // URL 上带 site_key：JSON 请求会触发 CORS 预检，而预检没有请求体，
+    // 服务端只能从查询参数（或 X-Epocha-Site-Key 头）认站点。少带这一个参数，
+    // 浏览器拿到的就是 OPTIONS 403 —— 本轮在真实 Firefox 里实测到过。
+    r = await fetch(apiBase() + "/api/challenge?site_key=" + encodeURIComponent(CFG.site_key), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ site_key: CFG.site_key, lang: "zh-CN" }),
+    });
+  } catch (e) {
+    say("无法访问验证服务：" + e.message, "err");
+    busy(false);
+    return;
+  }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const code = (j["error-codes"] || []).join(",") || ("HTTP " + r.status);
+    say("领题失败：" + code + (r.status === 503 ? "（题池暂时给不出题，可稍后重试）" : ""), "err");
+    busy(false);
+    return;
+  }
+  if (j.mode !== "pow_question" || !j.question) {
+    say("站点当前模式不是 pow_question（拿到的 mode=" + j.mode + "），本页只演示视觉题。", "err");
+    busy(false);
+    return;
+  }
+  if (j.question.media !== "image") {
+    say("领到的题不是图片题（generator=" + j.question.generator + "）。", "err");
+    busy(false);
+    return;
+  }
+  current = { token: j.token, pow: j.pow, question: j.question, expires_in: j.expires_in };
+  refreshCount++;
+  lastFetchMs = Math.round(performance.now() - t0);
+
+  els.wrap.innerHTML = "";
+  const img = document.createElement("img");
+  img.src = "data:" + j.question.image_mime + ";base64," + j.question.image_base64;
+  img.alt = "人机验证图片：请输入图中显示的 " + j.question.length + " 个字符";
+  img.width = j.question.image_width;
+  img.height = j.question.image_height;
+  els.wrap.appendChild(img);
+  els.charset.textContent = j.question.charset;
+  els.answer.value = "";
+  els.answer.setAttribute("aria-invalid", "false");
+  els.answer.focus();
+  els.meta.textContent = "题目 " + j.question.generator + " " + j.question.generator_version +
+    " · " + j.question.image_width + "×" + j.question.image_height +
+    " · 领取耗时 " + lastFetchMs + "ms · PoW 难度 bits=" + j.pow.bits +
+    " · 有效期 " + j.expires_in + "s";
+  say("题目已就绪。输入答案后提交（一次机会）。", "idle");
+  busy(false);
+}
+
+async function submitAnswer() {
+  if (!current) { say("还没有题目。", "err"); return; }
+  const val = els.answer.value.trim();
+  if (!val) { say("请输入答案。", "err"); els.answer.setAttribute("aria-invalid", "true"); return; }
+  busy(true);
+  solving = true;
+  say("正在本地计算 PoW（服务端不代算）…", "busy");
+  const t0 = performance.now();
+  const nonce = await solvePow(current.pow.seed, current.pow.bits, () => !current);
+  const powMs = Math.round(performance.now() - t0);
+  if (nonce === null) { say("PoW 未在限额内求解完成。", "err"); solving = false; busy(false); return; }
+  say("PoW 完成（" + powMs + "ms），提交答案…", "busy");
+  let r;
+  try {
+    r = await fetch(apiBase() + "/api/redeem?site_key=" + encodeURIComponent(CFG.site_key), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: current.token, pow_nonce: nonce, answer: val }),
+    });
+  } catch (e) {
+    say("提交失败：" + e.message, "err"); solving = false; busy(false); return;
+  }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const code = (j["error-codes"] || []).join(",") || ("HTTP " + r.status);
+    els.answer.setAttribute("aria-invalid", "true");
+    say("验证未通过：" + code + "。这张题已不可再用，请取新题。", "err");
+    current = null; solving = false; busy(false);
+    if (trial.active) trial.record("wrong", powMs);
+    return;
+  }
+  say("已拿到一次性 response，交给演示后端调用 /siteverify…", "busy");
+  let v;
+  try {
+    v = await fetch(CFG.verify_path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ response: j.response }),
+    });
+  } catch (e) {
+    say("演示后端不可达：" + e.message, "err"); solving = false; busy(false); return;
+  }
+  const vj = await v.json().catch(() => ({}));
+  solving = false;
+  if (vj.success) {
+    els.meta.textContent += " · 本次总耗时 " + (powMs + lastFetchMs) + "ms（PoW " + powMs + "ms）";
+    say("成功：演示后端已用 /siteverify 验证通过（success=true）。", "ok");
+    if (trial.active) trial.record("ok", powMs);
+  } else {
+    const code = (vj["error-codes"] || []).join(",") || ("HTTP " + v.status);
+    say("演示后端验证失败：" + code, "err");
+    if (trial.active) trial.record("verify-failed", powMs);
+  }
+  current = null;
+  busy(false);
+}
+
+els.refresh.addEventListener("click", () => { if (trial.active) trial.counts.refresh++; fetchChallenge(); });
+els.submit.addEventListener("click", (e) => { e.preventDefault(); submitAnswer(); });
+document.getElementById("qform").addEventListener("submit", (e) => { e.preventDefault(); submitAnswer(); });
+
+// --- 盲测模式：不显示答案，只记录服务端判分结果 ---
+const trial = {
+  active: false, target: 0, done: 0, powMs: 0,
+  counts: { ok: 0, wrong: 0, verifyFailed: 0, refresh: 0 },
+  start() {
+    this.active = true; this.done = 0; this.powMs = 0;
+    this.counts = { ok: 0, wrong: 0, verifyFailed: 0, refresh: 0 };
+    this.target = Math.min(20, Math.max(1, Number(document.getElementById("trials").value) || 10));
+    document.getElementById("trialtable").hidden = false;
+    document.querySelector("#trialtable tbody").innerHTML = "";
+    document.getElementById("starttrial").disabled = true;
+    document.getElementById("stoptrial").disabled = false;
+    document.getElementById("trialsummary").textContent = "盲测进行中：完成一题后点“取一张新题”继续。";
+    fetchChallenge();
+  },
+  stop() {
+    this.active = false;
+    document.getElementById("starttrial").disabled = false;
+    document.getElementById("stoptrial").disabled = true;
+    this.summary("（提前停止）");
+  },
+  record(outcome, powMs) {
+    if (!this.active) return;
+    this.done++; this.powMs += powMs;
+    if (outcome === "ok") this.counts.ok++;
+    else if (outcome === "wrong") this.counts.wrong++;
+    else this.counts.verifyFailed++;
+    const tr = document.createElement("tr");
+    tr.innerHTML = "<td>" + this.done + "</td><td>" + outcome + "</td><td>" + powMs +
+                   "</td><td>" + this.counts.refresh + "</td>";
+    document.querySelector("#trialtable tbody").appendChild(tr);
+    if (this.done >= this.target) { this.active = false; this.summary(""); }
+    else { document.getElementById("trialsummary").textContent = "第 " + this.done + "/" + this.target +
+             " 题完成，点“取一张新题”继续。"; }
+  },
+  summary(suffix) {
+    const n = this.counts.ok + this.counts.wrong + this.counts.verifyFailed;
+    const rate = n ? (100 * this.counts.ok / n).toFixed(1) : "0.0";
+    const err = n ? (100 * (this.counts.wrong + this.counts.verifyFailed) / n).toFixed(1) : "0.0";
+    const avg = n ? Math.round(this.powMs / n) : 0;
+    document.getElementById("trialsummary").textContent =
+      "完成率 " + rate + "% · 错误率 " + err + "% · 换题 " + this.counts.refresh +
+      " 次 · 平均 PoW " + avg + "ms" + suffix +
+      "（这些数字只描述这一次人工参与，不是「抗 AI」证据）";
+    document.getElementById("starttrial").disabled = false;
+    document.getElementById("stoptrial").disabled = true;
+  },
+};
+document.getElementById("starttrial").addEventListener("click", () => trial.start());
+document.getElementById("stoptrial").addEventListener("click", () => trial.stop());
+busy(false);
+say("就绪：正在自动领取第一题…", "idle");
+// 打开页面就领一题（和真实 widget 的形状一致）。每次都是新的 challenge，
+// 因此照样受服务端限流与题池容量约束；旧题不会回到池里。
+fetchChallenge();
+</script>
+</body>
+</html>

@@ -17,3 +17,9 @@ bin/
 *.log
 coverage.out
 web/widget/dist/
+
+# 阶段 3B 评测产物：含 ground truth（答案表）与样本图片，一律不入库
+eval-out/
+# 预览/验收脚本的临时输出
+/tmp-*/
+*.png.out

@@ -27,6 +27,9 @@ help:
 	@echo "make stage1-check 全流程验收（阶段 1 起生效）"
 	@echo "make stage2-check 管理面 + 来源策略 + 轮换 + 重启语义端到端验收（阶段 2）"
 	@echo "make stage3a-check 题池 + 生成器 + 单次作答端到端验收（阶段 3A）"
+	@echo "make stage3b-check 视觉题 + 图片资产 + 预览 + 评测 端到端验收（阶段 3B，含 check 与前三阶段）"
+	@echo "make eval-samples 生成离线评测样本（dev 调参集 + holdout 验收集，输出 eval-out/ 不入库）"
+	@echo "make ocr-baseline 用本机离线 OCR 跑基线（无工具时以退出码 3 报\"未测\"）"
 	@echo "make run          以临时 DB 启动（仅本地调试）"
 
 .PHONY: build
@@ -83,7 +86,10 @@ secret-scan:
 	go test -count=1 -v -run 'TestPrivateLeakGuardWorks|TestPublicHasNoPrivateFields' ./internal/generator/
 	go test -count=1 -v -run 'TestPoolStatusIsReadOnlyAndLeakFree|TestAuditCoversWritesAndLeaksNothing' ./internal/admin/
 	go test -count=1 -v -run 'TestPowQuestionHappyPath' ./internal/api/
-	@echo "按值扫描通过：哨兵 secret 与 3A 的私有 verifier 都未出现在日志、错误响应、启动输出与管理面响应中"
+	go test -count=1 -v -run 'TestTextImage' ./internal/api/
+	go test -count=1 -v -run 'TestTextImagePrivateFieldsNeverLeave|TestTextImageAssetHasNoTextChunks' ./internal/generator/
+	go test -count=1 -v -run 'TestSecretNeverReachesBrowser|TestVerifyTargetIsNotBrowserControlled' ./cmd/preview/
+	@echo "按值扫描通过：哨兵 secret、3A/3B 的私有 verifier 与图片资产都不出现在日志、错误响应、启动输出与管理面响应中"
 
 .PHONY: stage1-check
 stage1-check:
@@ -96,6 +102,29 @@ stage2-check:
 .PHONY: stage3a-check
 stage3a-check:
 	@bash docs/scripts/stage3a.sh
+
+# 阶段 3B 的验收**包含**前面全部检查：图片资产不能改变既有一次性消费与生命周期语义，
+# 这件事只能靠回归证明，不能靠"我看代码没动"。
+.PHONY: stage3b-check
+stage3b-check: check secret-scan stage1-check stage2-check stage3a-check
+	@bash docs/scripts/stage3b.sh
+
+.PHONY: eval-samples
+eval-samples:
+	@mkdir -p eval-out
+	go run ./cmd/evalgen --set dev --count 60 --difficulty 3 --out eval-out
+	go run ./cmd/evalgen --set dev --count 60 --difficulty 5 --out eval-out
+	go run ./cmd/evalgen --set holdout --count 100 --difficulty 3 --out eval-out
+	@echo "输出在 eval-out/（含 ground truth，已在 .gitignore 里）；holdout 集不要用来调参"
+
+.PHONY: ocr-baseline
+ocr-baseline:
+	@gt=$$(ls eval-out/holdout-*/ground-truth.jsonl 2>/dev/null | head -n1); \
+	  if [ -z "$$gt" ]; then echo "先跑 make eval-samples"; exit 1; fi; \
+	  go run ./cmd/evalocr --groundtruth "$$gt"; \
+	  rc=$$?; \
+	  if [ $$rc -eq 3 ]; then echo "OCR 实测：未执行（本机无离线 OCR 工具，退出码 3 = 未测而非 0%%）"; fi; \
+	  exit $$rc
 
 .PHONY: tidy
 tidy:

@@ -3,9 +3,11 @@
 自托管人机验证服务：单 Go 二进制 + SQLite，调用契约与 reCAPTCHA 的 `POST /siteverify` 兼容。
 核心防线是**生成式题池**（程序化生成、随机变换、一次性使用、用后即焚），外层是 PoW 成本门槛，最内层是风险打分决策。
 
-- 设计与决策：`docs/DESIGN.md`（v2.5）；修订理由与历史错误表述：`docs/DECISIONS.md`
+- 设计与决策：`docs/DESIGN.md`（v2.6）；修订理由与历史错误表述：`docs/DECISIONS.md`
 - 工程约定与安全红线：`AGENTS.md`
 - 阶段 3A 现状（状态转换表、水位默认值、资源实测与未测项）：`docs/STAGE3A.md`
+- 阶段 3B 现状（图片数据流、配置、本地预览步骤、评测方法与未测项）：`docs/STAGE3B.md`
+- 依赖与字体许可：`docs/NOTICE.md`
 - 命令：`make help`
 
 ## 状态
@@ -17,7 +19,8 @@
 | 1 | PoW + token + 持久化防重放 + `/siteverify` 最小闭环 | 完成（tag `stage-1-done`） |
 | 2 | 多站点与 Key 管理 API、来源白名单、站点级配置、审计 | 完成（tag `stage-2-done`） |
 | 3A | 生成器契约 + 有界预生成题池 + 原子领题 + 单次答案提交 + `arithmetic-baseline-v1` | 完成（tag `stage-3a-done`） |
-| 3B | 视觉题型与渲染、题型权重、反自动解题基线测量、风险打分 | 未开始 |
+| 3B | 首个视觉题型 `text-image-v1` + 图片资产入库/内联下发 + 本地预览 + 离线评测脚手架 | 工程闭环完成（tag `stage-3b-done`）；**OCR 与人工可读性未测**，`production_ready:false` |
+| 3C | 题型权重与多生成器选择、风险打分（第三层）、分级淘汰、OCR/人工基线测量 | 未开始 |
 | 4 | 前端 widget（零依赖，gzip <30KB） | 未开始 |
 | 5 | 管理后台、分级淘汰、Docker 与部署文档（CF 边缘为之后评估项） | 未开始 |
 
@@ -34,7 +37,7 @@ TTL 无上界、清理 goroutine 双关），并补齐 PoW 独立验算向量与
 只有显式把站点配成 `pow_question` 才会走题目判定。
 
 ```bash
-make build          # 单二进制（实测 9.19MB）
+make build          # 单二进制（实测 10.31 MiB，阶段 3B 后；预算 35MB）
 make stage1-check   # 端到端验收：真实暴力求解 PoW，10 项检查
 make check          # fmt-check + vet + go test -race -count=1 + 体积预算
 make stage2-check   # 阶段 2 端到端验收
@@ -120,4 +123,36 @@ curl -sX PUT http://127.0.0.1:8081/api/admin/sites/1 \
 curl -s http://127.0.0.1:8081/api/admin/pool -H "Authorization: Bearer $EPOCHA_ADMIN_KEY"   # 只读计数，不含题面与答案
 ```
 
-阶段 3A **仍然没有**：视觉/图形题型与渲染依赖、题型权重与多生成器选择、风险打分判定、自动淘汰、widget 与后台页面。
+阶段 3A 交付时**仍然没有**：视觉/图形题型与渲染依赖、题型权重与多生成器选择、风险打分判定、自动淘汰、widget 与后台页面。
+其中"视觉题型 + 图片链路 + 本地预览 + 评测脚手架"在 3B 落地，其余见下方"仍未实现"。
+
+## 阶段 3B 现状
+
+`text-image-v1`：6 字符、32 字形字符集（大写去易混 + 数字去 `0/1`）、灰度 PNG、内嵌 Go Regular 字体实时栅格化，
+**不依赖任何外部素材或系统二进制**。图片以 BLOB 与题目同库存放（单题上限 65,536 字节 + 全局字节预算，
+两条边界都在 INSERT 的 SQL 里原子判定），签发时**内联**在 `/api/challenge` 的公开 DTO 里（`image_mime` + `image_base64`），
+**没有可枚举的裸媒体端点**。判分沿用 3A 的 `nonce || HMAC(K_qver, 规范化答案)`，图片渲染与判分完全解耦。
+
+**它是实验性题型，不是"抗 OCR/抗 AI"的结论**：字符在图里是给人读的，M4（每次尝试成本）**未测**——
+本机没有离线 OCR，未获授权安装或下载模型；`make ocr-baseline` 在没有工具时以退出码 3 明确报"未测"。
+人工可读性同样**未测**（盲测页面已交付，但没有真实参与者数据）。因此管理面对它报
+`experimental:true` / `production_ready:false`，且未经评测不得翻转。
+
+一条命令起本地预览（需服务已在跑，浏览器里自己算 PoW 并走完签发→作答→`/siteverify`）：
+
+```bash
+go run ./cmd/preview --api http://127.0.0.1:8080 --admin http://127.0.0.1:8081 \
+  --admin-key "$EPOCHA_ADMIN_KEY" --difficulty 2 --pow-bits 12
+# → 用浏览器打开 http://127.0.0.1:8090/
+```
+
+它强制 loopback（`--listen 0.0.0.0:…` 直接拒绝启动）；站点 secret 只在演示后端进程内，不进 HTML/JS/响应；
+浏览器不能指定验证目标（`/demo/verify` 只接受 `response` 一个字段）。**这不是正式 widget**（阶段 4）。
+
+```bash
+make stage3b-check   # 22 项端到端（含 make check 与阶段 1/2/3A 全部验收）
+make eval-samples    # 离线评测样本：dev 调参集 + 固定 seed 的 holdout 验收集（输出 eval-out/，不入库）
+```
+
+**3B 之后仍未实现**：题型权重与多生成器选择、风险打分（第三层）、分级淘汰与统计面、正式 widget（含非视觉等价通道）、
+OCR 与人工基线测量。`make stage3b-check` 全绿只代表工程闭环，不代表效果结论。

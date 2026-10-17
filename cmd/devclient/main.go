@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shijianus/EpoCHA/internal/generator"
 	"github.com/shijianus/EpoCHA/internal/pow"
 )
 
@@ -36,9 +37,12 @@ type challengeResp struct {
 		Bits uint8  `json:"bits"`
 	} `json:"pow"`
 	// 阶段 3A：站点是 pow_question 时服务端会带公开题面。
-	Mode     string         `json:"mode"`
-	Question map[string]any `json:"question"`
+	Mode       string         `json:"mode"`
+	Question   map[string]any `json:"question"`
+	ErrorCodes []string       `json:"error-codes"`
 }
+
+func (c challengeResp) codes() string { return strings.Join(c.ErrorCodes, ",") }
 
 // answer 按题面求值。返回空串表示"这道响应里没有题"（pow_only 路径）。
 // 求值器是 devclient 自己的实现：验收脚本要求"真实求解"，所以既不能读库里的答案，
@@ -101,6 +105,7 @@ func run(args []string, getenv func(string) string) error {
 	hostname := fs.String("hostname", "", "siteverify 自报 hostname（阶段 2 起服务端不采信，仅用于验证它不会被回显）")
 	origin := fs.String("origin", "", "浏览器 Origin 头（阶段 2 来源策略；留空表示无来源的直接调用）")
 	maxIter := fs.Int64("max-iterations", 50_000_000, "PoW 搜索迭代上限")
+	answerFile := fs.String("answer-file", "", "答案文件（图片题专用：devseed 注入的题才有配对的已知答案）")
 	timeout := fs.Duration("timeout", 30*time.Second, "单次 HTTP 超时")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -109,6 +114,17 @@ func run(args []string, getenv func(string) string) error {
 		return errors.New("缺少 --site-key")
 	}
 	c := &client{base: strings.TrimRight(*base, "/"), origin: *origin, http: &http.Client{Timeout: *timeout}}
+	if *answerFile != "" {
+		raw, err := os.ReadFile(*answerFile)
+		if err != nil {
+			return fmt.Errorf("读答案文件: %w", err)
+		}
+		v := strings.TrimSpace(string(raw))
+		if v == "" || len(v) > 64 {
+			return errors.New("答案文件内容为空或过长")
+		}
+		c.answerOverride = v
+	}
 
 	switch *mode {
 	case "full":
@@ -136,13 +152,26 @@ type client struct {
 	base   string
 	origin string // 非空时每个请求都带上该 Origin，用于演示白名单放行路径
 	http   *http.Client
+	// answerOverride 只服务于"图片题的验收"：图片里没有可机读的文本层，
+	// 客户端**不可能**独立求出答案（那需要 OCR）。所以答案来自 devseed 注入时
+	// 写下的本地文件——它配的是自己刚生成的那道题，不是"读出已有题的答案"。
+	// 算术题路径不受它影响：能独立求值的一律独立求值（DESIGN §17 阶段 3A 的要求）。
+	answerOverride string
 }
 
 func (c *client) challenge(siteKey string) (challengeResp, error) {
 	var out challengeResp
 	body, _ := json.Marshal(map[string]string{"site_key": siteKey})
-	err := c.postJSON("/api/challenge", body, &out)
-	return out, err
+	status, err := c.post("/api/challenge", body, "application/json", &out)
+	if err != nil {
+		return out, err
+	}
+	// 不检查状态码就会把"领题失败"变成一句看不懂的"未知 PoW 算法"：
+	// 空字段是失败的结果，不是响应形状。
+	if status != http.StatusOK || out.Token == "" || out.Pow.Algo == "" {
+		return out, fmt.Errorf("领题失败：status=%d codes=%s mode=%s", status, out.codes(), out.Mode)
+	}
+	return out, nil
 }
 
 func (c *client) redeem(tok, nonce, answer string) (redeemResp, int, error) {
@@ -394,12 +423,24 @@ func (c *client) wrongAnswer(siteKey string, maxIter int64) error {
 	return nil
 }
 
+// bump 造一个"文法正确但值不对"的答案。
+//
+// 必须是**文法正确**：畸形答案不消耗作答机会（DESIGN §10.1），拿它去测"答错即终结"
+// 会测到一个假通过。数字答案 +1；视觉题的字符序列换掉首字符（字符集取自生成器，
+// 不在这里另抄一份）。
 func bump(s string) (string, error) {
-	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return "", err
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return strconv.FormatInt(n+1, 10), nil
 	}
-	return strconv.FormatInt(n+1, 10), nil
+	cs := generator.TextImageCharset
+	b := []byte(s)
+	if len(b) > 0 {
+		if i := strings.IndexByte(cs, b[0]); i >= 0 {
+			b[0] = cs[(i+1)%len(cs)]
+			return string(b), nil
+		}
+	}
+	return "", fmt.Errorf("不认识的答案形态 %q", s)
 }
 
 // verifyOnly 用于重启后的重放检查。expect=failure 时，成功返回才是错误。
@@ -465,7 +506,11 @@ func (c *client) solve(siteKey string, maxIter int64) (solved, int64, error) {
 	}
 	answer, err := ch.answer()
 	if err != nil {
-		return solved{}, iterations, err
+		if c.answerOverride == "" {
+			return solved{}, iterations, fmt.Errorf("题面无法独立求值（图片题需要 --answer-file）: %w", err)
+		}
+		answer = c.answerOverride
+		fmt.Println("RESULT step=answer source=injected-file（图片题：答案来自注入侧，PoW 仍由本客户端真实求解）")
 	}
 	return solved{challengeResp: ch, nonce: nonce, answer: answer}, iterations, nil
 }

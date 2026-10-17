@@ -437,3 +437,69 @@ CDN 与图片缓存（一次性资产没有可缓存语义）、为省带宽做�
 `internal/store/migrations/0004_stage3b.sql`、`internal/store/pool.go`（`PoolLimits`、`ImageAssetBytes`、
 `QuestionVerifierForChallenge`）、`internal/pool`（图片桶水位/预算/让步）、`internal/api/handlers.go`、
 `internal/admin`、`internal/config`、`cmd/{preview,evalgen,evalocr,devseed}`、`internal/eval`、`web/preview`。
+
+---
+
+## ADR-013 阶段 4A：widget 的挂载方式、worker 的两条路径、PoW 的跨实现一致性证明
+
+**状态**：已采纳（2026-10-18）
+
+### 背景
+阶段 4 要把"用户在浏览器里完成一次验证"变成真的：组件要能被任意业务页面嵌入、要在页面里算 PoW、
+要与服务端的来源策略/预检/一次性语义严丝合缝，并且**不能**为了"能跑"放宽任何一条安全约束。
+
+### 决策
+
+1. **直接 DOM/Shadow DOM 挂载，不引入 iframe。**
+   Shadow DOM 只隔离样式与命名，**不是安全边界**——同源脚本照样能读它、改它，文档与代码注释都必须这么写。
+   选它的理由是嵌入方样式冲突与多实例隔离，不是安全性。
+   **不用 iframe 是刻意的**：iframe 会换 Origin，之后很容易滑向"让页面自报父域名当作可信来源"，
+   而 §10.3 的来源裁决依赖浏览器强制设置的 `Origin` 头；一旦引入第二套"自报来源"就有两种真相。
+
+2. **PoW 在 Dedicated Worker 里算，两条加载路径都实现。**
+   A) 主脚本内嵌同一份 worker 源码，运行时建 Blob Worker（需要接入页 `worker-src blob:`）；
+   B) 接入方把 `v1.worker.js` 与页面**同源**部署，用 `workerUrl` 指定（只接受同源 URL，否则 `throw`）。
+   两条路径跑的是**逐字节相同**的源码——`web/widget/widget_test.go` 与 Node 侧向量测试各钉一次，
+   因为"两份拷贝分叉"最坏的情况是同源路径跑到一份没测过的代码上。
+   禁止项写进实现与测试：不用 `eval`/`new Function`/动态 `import`，服务端 challenge 不能指定可执行脚本 URL，
+   CSP 挡住 Worker 时给 `worker-blocked` 明确失败——**不**回落到主线程"假装算完"，也**不**假装验证完成。
+
+3. **纯 JS SHA-256，并且用"跨实现共享的固定向量"证明它是对的。**
+   `crypto.subtle.digest` 每次摘要都要跨一次异步边界，实测吞吐只有千级/秒：bits=18（期望 26 万次）要几十秒，
+   唯一"解决"办法是降低服务端难度——那是红线。自写 SHA-256 的代价是"两套实现必须等价"，
+   于是把事实钉成一个文件：`internal/pow/testdata/pow_vectors.json` 由 **Go 实现**生成并断言
+   （实现被改动 → 文件变红），Node 侧用 worker 的**原始字节**在 `vm` 里断言同一份文件
+   （JS 改动 → 断言变红）。两端各自对着同一真值，差异在任一侧都会显形。
+   这条不是形式：本轮它抓到手抄 K 表 10 个常量写错、Σ0 用了 ROTR18 而非 ROTR22 ——
+   两个"两端各自跑自己的测试都能通过"的缺陷。
+
+4. **有效期以服务端为最终依据，客户端倒计时只为体验。**
+   `/api/challenge` 与 `/api/redeem` 本来就返回 `expires_in`（题目 TTL 与 response TTL 是两个不同值），
+   widget 直接用它们；**没给就不设倒计时**，不猜"所有 token 固定两分钟"。过期时**清空 token**
+   （`getResponse()` 返回空串、隐藏字段一起清），不只是改 UI；标签页从后台恢复时立刻复核 deadline。
+
+5. **`site_key` 一致性是新增的公开面约束，方向是收紧。**
+   JSON 请求触发 CORS 预检，而预检看不见请求体 ⇒ 服务端只能从 URL（或 `X-Epocha-Site-Key`）认站点。
+   若实际操作改读请求体，就出现"预检按 A 站授权、落到 B 站"。规则：**URL 与体（redeem 时是 URL 与 token 所属站点）
+   必须一致**，不一致一律 400 `invalid-request`；同一参数出现多个不同值也算冲突。
+   刻意**不**实现"以某一处为准"——选哪一处都会留下一条可被利用的歧义。
+   检查排在任何状态消费之前：被拒的 redeem **不得**消耗受害者唯一的作答机会（有测试钉住判定顺序）。
+   不带 URL 参数的非浏览器客户端行为不变（阶段 1/2/3A/3B 的脚本与 devclient 全部回归通过）。
+
+6. **业务授权只由服务端判定。**
+   `cmd/exampleapp` 故意让"提交留言"按钮一直可点：没有 token 也发得出请求，服务端必然拒绝并零写入；
+   `onSuccess` 只是 UI 信号。同时示例后端固定验证目标（启动时决定，请求体里出现 `target/url/secret` 一律 400），
+   验证服务宕机/超时/5xx 一律 fail closed；**token 已被消费但业务写入失败**时提示重新验证、不缓存那次成功
+   （否则等于绕过一次性语义）。
+
+### 未做（以及为什么）
+- 音频/其他非视觉等价通道：只有视觉通道的 CAPTCHA 对无法看清图片的用户就是不可完成，这是产品缺口，
+  不能用"PoW-only 降级"糊过去（少掉的是"题目"这一层，防线含义不同）。
+- 服务端签发过期时间的**新字段**：两个端点已经返回 `expires_in`，再加字段只是扩大兼容面。
+- SRI/`integrity`：同源自托管不需要；经第三方 CDN 分发时接入方应自托管或自行加 SRI（文档写明）。
+- 用 iframe 的隔离方案：见第 1 条，它带来的不是一个安全边界而是第二个"来源真相"。
+
+### 影响
+- 新增生产路由 `/widget/v1.js`、`/widget/v1.worker.js`（只读、白名单资源名、`nosniff`、可缓存、无 CORS 头）。
+- `web/widget/` 从"目录约定里的占位"变成实际交付；`cmd/exampleapp` 与 `docs/scripts/browser/` 加入目录约定（开发期）。
+- 验收口径变化写进 AGENTS.md：三态（PASS/BLOCKED/NOT_RUN）、退出码分层、门禁不嵌套总门禁。

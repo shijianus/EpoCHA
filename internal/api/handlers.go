@@ -52,6 +52,40 @@ type redeemResponse struct {
 
 // --- 来源与 CORS ---
 
+// clientSiteKey 取"客户端在 URL 上（或预检用的头里）声明的站点标识"。
+//
+// 为什么需要它：JSON 请求会触发 CORS 预检，而**预检看不见请求体**，只能从查询参数或
+// `X-Epocha-Site-Key` 认站点（见 preflightOrigin）。如果实际操作时改读请求体里的 site_key，
+// 就出现"预检按 A 站授权、实际落到 B 站"的歧义。规则：**两处都给出时必须一致**，
+// 不一致一律拒绝；不实现成"以某一处为准"，因为选哪一处都会留下一条可被利用的歧义。
+//
+// 同一个参数出现多个不同值也算冲突：取哪一个取决于解析顺序，那不是语义。
+func clientSiteKey(r *http.Request) (string, bool) {
+	vals, ok := r.URL.Query()["site_key"]
+	if !ok || len(vals) == 0 {
+		if h := r.Header.Get("X-Epocha-Site-Key"); h != "" {
+			return h, false
+		}
+		return "", false
+	}
+	first := vals[0]
+	for _, v := range vals[1:] {
+		if v != first {
+			return "", true
+		}
+	}
+	return first, false
+}
+
+// siteKeyConsistent 判断 URL 声明与权威站点标识（体里的 / token 里的）是否可接受。
+// 未声明（空）时放行：非浏览器客户端本来就没有预检，这条规则不该拦住它们。
+func siteKeyConsistent(declared string, conflict bool, authoritative string) bool {
+	if conflict {
+		return false
+	}
+	return declared == "" || declared == authoritative
+}
+
 // originCheck 是浏览器来源裁决的结果。
 type originCheck struct {
 	// Canonical 是规范化后的 Origin（无 Origin 头时为 ""），会写进 challenge 行并被签名绑定。
@@ -164,6 +198,14 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !fieldOK(req.SiteKey, maxFieldLen) || len(req.Lang) > 35 {
+		s.reject(w, CodeInvalidRequest)
+		return
+	}
+	// 站点标识一致性检查排在**限流与任何库操作之前**：它只是字符串比较，
+	// 既不该给歧义请求建限流条目，更不该在库里留下半行痕迹。
+	declared, conflict := clientSiteKey(r)
+	if !siteKeyConsistent(declared, conflict, req.SiteKey) {
+		s.log.Info("site_key 声明与请求体不一致", "reason", "site-key-conflict")
 		s.reject(w, CodeInvalidRequest)
 		return
 	}
@@ -371,6 +413,14 @@ func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 	if !site.Enabled || site.Version != claims.Svid {
 		s.log.Info("站点状态使 token 失效", "site_id", site.ID, "cid8", shortCID(claims.CID))
 		s.rejectChallenge(w, claims.CID)
+		return
+	}
+	// redeem 的权威站点标识来自**token**（签名覆盖），所以这里的规则是：
+	// 客户端在 URL 上声明的 site_key 必须与 token 属于同一个站点。
+	// 检查放在任何消费之前：被这条挡下的请求**不得**消耗唯一一次作答机会（有测试钉住）。
+	if declared, conflict := clientSiteKey(r); !siteKeyConsistent(declared, conflict, site.SiteKey) {
+		s.log.Info("site_key 与 token 站点不一致", "site_id", site.ID, "cid8", shortCID(claims.CID))
+		s.reject(w, CodeInvalidRequest)
 		return
 	}
 	if !s.allowSiteDims(r, site, w) {

@@ -21,6 +21,7 @@ import (
 	"github.com/shijianus/EpoCHA/internal/risk"
 	"github.com/shijianus/EpoCHA/internal/store"
 	"github.com/shijianus/EpoCHA/internal/token"
+	"github.com/shijianus/EpoCHA/web/widget"
 )
 
 // 请求体上限：公开端点小，siteverify 略大（表单可能带 hostname/remoteip）。
@@ -113,6 +114,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("OPTIONS /api/redeem", s.handlePreflight)
 	mux.HandleFunc("POST /siteverify", s.handleSiteverify)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	// widget 静态资源挂在**公共**监听器上（DESIGN §10.1、D10）：浏览器要在业务页面上
+	// 用 `<script src>` 跨域取它，且它不含任何按身份变化的内容。
+	// 只有这两条固定版本化路径，没有目录、没有按参数拼路径。
+	widgetAssets := widget.Handler()
+	mux.Handle("GET "+widget.URLJS, widgetAssets)
+	mux.Handle("GET "+widget.URLWorker, widgetAssets)
 	return s.recoverMiddleware(s.headerMiddleware(s.accessLogMiddleware(mux)))
 }
 

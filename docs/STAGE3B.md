@@ -107,9 +107,9 @@ crypto/rand ─── 6 次均匀抽样 → 答案串    pool.payload_json  ← 
 ```bash
 make build            # bin/epocha（含字体，实测 10,813,732 字节）
 make check            # fmt-check + vet + race + size
-make stage3b-check    # = check + secret-scan + stage1/2/3a-check + docs/scripts/stage3b.sh（22 项）
+make stage3b-check    # = check + secret-scan + stage1/2/3a-check + docs/scripts/stage3b.sh（21 项 PASS + 1 BLOCKED + 1 NOT_RUN）
 make eval-samples     # 生成 dev 与 holdout 样本集到 eval-out/（含 ground truth，已 gitignore）
-make ocr-baseline     # 跑离线 OCR 基线；本机无工具时以退出码 3 报"未测"
+make ocr-baseline     # 跑离线 OCR 基线；无工具时二进制/脚本退出码 3 = BLOCKED（make 自身只给 0 或 2，见 §5.3）
 ```
 
 ## 4. 本地预览（不能只靠 curl 的那部分）
@@ -185,28 +185,42 @@ go run ./cmd/evalgen --set holdout --count 100 --difficulty 3 --out eval-out
 - **字符组合数不是抗 OCR 的论据**（ADR-002）：M3 量的是"不看任何求解能力的下限"，
   对多模态模型与 OCR 的通过率只能由 M4 的实测回答，而 M4 本轮未测。
 
-### 5.3 OCR 基线：**未执行（阻塞）**
+### 5.3 OCR 基线：**BLOCKED**（外部条件不足）
 
 - 环境探测结果：`tesseract` / `gocr` / `cuneiform` 均不存在，Python 无 PIL/pytesseract/easyocr。
   按约定**没有**擅自安装系统包或下载模型。
 - 已交付的是适配器与格式，不是结论：
   ```bash
+  make ocr-baseline            # 走 docs/scripts/ocr-baseline.sh（先 build 再执行，避免退出码被折叠）
   go run ./cmd/evalocr --groundtruth eval-out/holdout-…/ground-truth.jsonl \
     --ocr-cmd tesseract --ocr-arg '{image}' --ocr-arg - --ocr-arg stdout
   ```
   输入 = 样本目录 + ground truth；输出 = `predictions.jsonl`
   （`{file, text, ms, error}`）+ 指标报告。执行方式是 `exec.Command` 直接 argv（不经 shell），
   每张一个超时；`--ocr-cmd` 不存在时打印阻塞原因并以**退出码 3** 退出。
+- **退出码分层**（本机 go1.24.5 / linux-arm64 实测，2026-10-18）——包装层**不会**原样透传：
+
+  | 调用层 | 实测退出码 | 真实码从哪读 |
+  |---|---|---|
+  | `bin/evalocr`（直接跑二进制） | **3** | 就是它自己 |
+  | `go run ./cmd/evalocr` | **1** | `go run` 把任何非 0 折叠成 1，真实码只在 stderr 的 `exit status 3` |
+  | `bash docs/scripts/ocr-baseline.sh` | **3** | 脚本先 build 再跑二进制 |
+  | `make ocr-baseline` | **2** | make 把任何配方失败折叠成 2；结论要读它打印的 `OCR 实测：BLOCKED` |
+
+  ⇒ 只有"直接跑二进制/跑脚本"这条路径给出机器可读的 3。把 make 的 2 读成"通过"、
+  或把 go run 的 1 读成"评测失败"都是误读，所以 `stage3b.sh` 按**各层真实形状**断言，
+  而不是要求三层都等于 3。
 - 指标至少包含：整串正确率（**两个分母**：`StrictAccuracy = 正确/全部样本`、
   `ScoredAccuracy = 正确/成功跑完的样本`）、样本量、工具与参数、缺测数、工具失败数、
   单张耗时 min/median/mean/max、字符级正确率。
   两个分母同时报是刻意的：只报后者会把"大面积 OCR 崩溃"包装成"题目很难"。
 - 评分器与"工具失败 ≠ 答错"这条用假 OCR 脚本做过测试（`cmd/evalocr/main_test.go`），
   覆盖答对/答错/非零退出/空输出/超时/缺文件/越界文件名/重复预测。
+  测试通过的是**阻塞检测与评分逻辑**，不是 OCR 效果；两件事在验收里分列。
   **没有**用伪造的预测数据声称 OCR 通过，也**没有**把同一生成器的私有答案喂给"OCR"当输入。
 - 未做（需另行授权）：上传样本到任何外部多模态 API。
 
-### 5.4 人工可读性：**未测**
+### 5.4 人工可读性：**NOT_RUN**（本轮未执行）
 
 预览页的盲测模式已交付（不显示答案、统计完成率/错误率/换题次数/耗时）。
 本轮**没有真实参与者数据**，agent 不代填冒充用户。要拿到数据：跑起预览 → 找若干参与者各做 10 题
@@ -234,7 +248,7 @@ go run ./cmd/evalgen --set holdout --count 100 --difficulty 3 --out eval-out
 - 不能拿 3A 的 15.1 MB 冒充图片题实测，也不能拿本表的 18.5 MB 宣布 §13 的 `<100MB` "已达标"。
 - 每行图片题的**净**磁盘开销本轮没有单独隔离出来测（需要同一库的 checkpoint 前后差值 × 固定条数），
   表里给的是"填满视觉桶后的总体积"。
-- 表格之后用完全相同的形状复跑了两次 `make stage3b-check`（22 项仍全绿、退出码 0）：
+- 表格之后用完全相同的形状复跑了两次 `make stage3b-check`（工程项仍全 PASS、退出码 0）：
   第一次 **VmRSS 18,892 kB / VmHWM 18,892 kB / Threads 9**、20 条视觉题 132 ms、`-wal` 2,855,192 B；
   第二次 **VmRSS 18,712 kB / VmHWM 19,108 kB / Threads 9**、134 ms、`-wal` 2,851,072 B。
   与上表差在 0.1–0.4 MB 量级、线程数差 1（取决于闭环结束时后台 goroutine 的存活时刻）⇒
@@ -245,10 +259,10 @@ go run ./cmd/evalgen --set holdout --count 100 --difficulty 3 --out eval-out
 
 | # | 结论 | 状态 | 证据 |
 |---|---|---|---|
-| 1 | **工程闭环已验证** | ✅ 通过 | `make check`（fmt/vet/race/size）+ `make secret-scan` + `stage1/2/3a-check` 各 10 项 + `stage3b-check` 22 项，全部真实跑绿（退出码 0） |
-| 2 | **OCR 实测** | ❌ **未执行（阻塞）** | 本机无离线 OCR 工具且未获授权安装；已交付适配器 + 格式 + 有测试的评分器；`--ocr-cmd` 缺失时退出码 3 = 未测，不是 0% |
-| 3 | **人工可读性** | ❌ **未测** | 盲测页面已交付，无真实参与者数据。agent 目视检查过 d1/d5 样图与浏览器截图（可读），但这**不是**人工实测 |
-| 4 | **生产适用性** | ❌ **未证明** | 管理面 `production_ready:false` + `experimental:true`；M4（每次尝试成本）完全未测，M3 只是下限不是能力 |
+| 1 | **工程闭环已验证** | **PASS** | `make check`（fmt/vet/race/size）+ `make secret-scan` + `stage1/2/3a-check` 各 10 项 + `docs/scripts/stage3b.sh` 的 21 项 PASS（退出码 0）。工程项只有 PASS/FAIL 两种状态 |
+| 2 | **OCR 实测** | **BLOCKED** | 外部条件不足：本机无离线 OCR 工具且未获授权安装/下载模型 ⇒ M4 未知。可验证的部分单列为 PASS：缺工具时 evalocr **二进制退出码 3**、`go run` 折叠成 **1**、`make` 折叠成 **2**（分层见 §5.3）；"阻塞检测"通过 ≠ OCR 评测通过 |
+| 3 | **人工可读性** | **NOT_RUN** | 本轮没有执行：盲测页面与统计口径已交付，但没有真实参与者数据。agent 目视检查过 d1/d5 样图与浏览器截图（可读），这**不是**人工实测，也不能替代 |
+| 4 | **生产适用性** | **未论证** | 管理面 `production_ready:false` + `experimental:true`；M4（每次尝试成本）完全未测，M3（单次 `9.31e-10`、3 次独立新挑战累计 `2.79e-9`）只是猜测下限，不是能力 |
 
 真实浏览器验证做到哪一步（以及没做到哪一步）：
 
@@ -261,6 +275,10 @@ go run ./cmd/evalgen --set holdout --count 100 --difficulty 3 --out eval-out
 - ❌ **未**在浏览器里完成"输入答案 → 提交 → 成功"这一击：本环境没有浏览器驱动
   （无 geckodriver/playwright），`--screenshot` 不能点击或输入。
   这一段是**人工验证项**，请按 §4 的步骤 1–7 亲自走一遍，不要声称它已自动化通过。
+  **4A 更正（2026-10-18）**：这条"没有驱动"的结论下得太早——本机 Firefox 147 自带
+  `--remote-debugging-port` 的 WebDriver BiDi 端点，配合 Node 内置 WebSocket 即可真实驱动
+  点击与输入，无需 geckodriver/playwright。4A 已用这条路补上完整交互验收（`docs/STAGE4A.md` §5），
+  因此本条在 3B 时点是 NOT_RUN、在 4A 之后由 4A 的证据接管；3B 的人工可读性仍是 NOT_RUN。
 
 ## 8. 已知安全与无障碍限制（诚实清单）
 
@@ -300,7 +318,7 @@ response 一次性消费、`pow_only` 与 `arithmetic-baseline-v1` 两条旧路�
 ## 10. 命令索引
 
 ```bash
-make stage3b-check                      # 端到端 22 项（含 check / secret-scan / stage1/2/3a）
+make stage3b-check                      # 端到端 21 PASS + 1 BLOCKED + 1 NOT_RUN（含 check / secret-scan / stage1/2/3a）
 go test -count=1 ./...                  # 单元与集成
 go test -race -count=1 ./...
 go test -run XXX -bench BenchmarkTextImageGenerate -benchtime 60x ./internal/generator/   # §6 的生成耗时与 PNG 分布

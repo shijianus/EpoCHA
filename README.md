@@ -7,7 +7,10 @@
 - 工程约定与安全红线：`AGENTS.md`
 - 阶段 3A 现状（状态转换表、水位默认值、资源实测与未测项）：`docs/STAGE3A.md`
 - 阶段 3B 现状（图片数据流、配置、本地预览步骤、评测方法与未测项）：`docs/STAGE3B.md`
+- widget 接入契约（API、状态机、CSP 清单、无障碍边界）：`docs/WIDGET.md`
+- 阶段 4A 现状（浏览器交互验收、实测数字、BLOCKED/NOT_RUN 清单）：`docs/STAGE4A.md`
 - 依赖与字体许可：`docs/NOTICE.md`
+- 前端 widget：中英双语、键盘可完成（`docs/WIDGET.md`）
 - 命令：`make help`
 
 ## 状态
@@ -21,7 +24,8 @@
 | 3A | 生成器契约 + 有界预生成题池 + 原子领题 + 单次答案提交 + `arithmetic-baseline-v1` | 完成（tag `stage-3a-done`） |
 | 3B | 首个视觉题型 `text-image-v1` + 图片资产入库/内联下发 + 本地预览 + 离线评测脚手架 | 工程闭环完成（tag `stage-3b-done`）；**OCR 与人工可读性未测**，`production_ready:false` |
 | 3C | 题型权重与多生成器选择、风险打分（第三层）、分级淘汰、OCR/人工基线测量 | 未开始 |
-| 4 | 前端 widget（零依赖，gzip <30KB） | 未开始 |
+| 4A | 生产 widget（零依赖原生 JS）+ 示例业务后端 + 真实浏览器闭环验收 | 工程与浏览器闭环完成（tag `stage-4a-done`）；375px 视口检查 BLOCKED、人工项 NOT_RUN |
+| 4B | 非视觉等价通道、`fallback_base`、人工验收项（题型人工各过 5 次等） | 未开始 |
 | 5 | 管理后台、分级淘汰、Docker 与部署文档（CF 边缘为之后评估项） | 未开始 |
 
 ## 阶段 1 复核（2026-10-17）
@@ -134,7 +138,8 @@ curl -s http://127.0.0.1:8081/api/admin/pool -H "Authorization: Bearer $EPOCHA_A
 **没有可枚举的裸媒体端点**。判分沿用 3A 的 `nonce || HMAC(K_qver, 规范化答案)`，图片渲染与判分完全解耦。
 
 **它是实验性题型，不是"抗 OCR/抗 AI"的结论**：字符在图里是给人读的，M4（每次尝试成本）**未测**——
-本机没有离线 OCR，未获授权安装或下载模型；`make ocr-baseline` 在没有工具时以退出码 3 明确报"未测"。
+本机没有离线 OCR，未获授权安装或下载模型；`make ocr-baseline` 在没有工具时**打印 BLOCKED**，
+真实退出码 3 只有直接跑二进制/跑脚本才拿得到（`go run` 折叠成 1、`make` 折叠成 2）。
 人工可读性同样**未测**（盲测页面已交付，但没有真实参与者数据）。因此管理面对它报
 `experimental:true` / `production_ready:false`，且未经评测不得翻转。
 
@@ -150,9 +155,37 @@ go run ./cmd/preview --api http://127.0.0.1:8080 --admin http://127.0.0.1:8081 \
 浏览器不能指定验证目标（`/demo/verify` 只接受 `response` 一个字段）。**这不是正式 widget**（阶段 4）。
 
 ```bash
-make stage3b-check   # 22 项端到端（含 make check 与阶段 1/2/3A 全部验收）
+make stage3b-check   # 21 项工程检查 + 1 BLOCKED + 1 NOT_RUN（含 make check 与阶段 1/2/3A 全部验收）
 make eval-samples    # 离线评测样本：dev 调参集 + 固定 seed 的 holdout 验收集（输出 eval-out/，不入库）
 ```
 
-**3B 之后仍未实现**：题型权重与多生成器选择、风险打分（第三层）、分级淘汰与统计面、正式 widget（含非视觉等价通道）、
-OCR 与人工基线测量。`make stage3b-check` 全绿只代表工程闭环，不代表效果结论。
+**3B 之后仍未实现**：题型权重与多生成器选择、风险打分（第三层）、分级淘汰与统计面、OCR 与人工基线测量。
+`make stage3b-check` 全绿只代表工程闭环，不代表效果结论。
+
+## 阶段 4A 现状（widget + 业务接入示例）
+
+`web/widget/v1.js` 是零依赖原生 JS 组件（`EpoCHA.render/getResponse/reset/refresh/destroy`，中英双语，
+Shadow DOM 直挂**不用 iframe**）。PoW 在 **Dedicated Worker** 里算：默认用内嵌的同一份源码建 Blob Worker
+（需要 `worker-src blob:`），也支持接入方同源部署 `v1.worker.js` 并用 `workerUrl` 指定；
+CSP 挡住 Worker 时给明确错误，**不**回落到主线程假装算完，也**不**假装验证完成。
+服务端脚本 `GET /widget/v1.js` 由 `cmd/server` 内嵌提供（实测 gzip 16,687 B，预算 30KB）。
+
+```bash
+make stage4a-check   # 13 项工程 PASS + 1 BLOCKED + 2 NOT_RUN（含真实浏览器交互与全部阶段回归）
+make widget-checks   # JS 语法 + JS↔Go 共享 PoW 固定向量（零第三方依赖）
+```
+
+一条命令起一个**真实业务形状**的示例（widget 跨域加载、后端持 secret、只有 `/siteverify` 成功才写留言）：
+
+```bash
+go run ./cmd/exampleapp --listen 127.0.0.1:8091 --api http://127.0.0.1:8080   --site-key pk_demo4a --site-secret '<建站时返回一次的 secret>' --csp blob
+# → 浏览器打开 http://127.0.0.1:8091/
+```
+
+它故意让「提交留言」按钮一直可点：不带 token 也能提交，服务端必然拒绝且零写入 ——
+**前端的 `onSuccess` 不是授权**。同一 token 再提交一次必然被拒（一次性消费）；
+验证服务宕机/超时/5xx 一律 fail closed；页面里没有任何字段能指定验证目标。
+接入契约、CSP 清单与无障碍边界写在 `docs/WIDGET.md`；浏览器侧到底测了什么、哪些是 BLOCKED/NOT_RUN 写在 `docs/STAGE4A.md`。
+
+**4A 之后仍未实现**：非视觉等价通道（音频等）、`fallback_base`、多题型权重与风险打分、
+阶段 4 的人工验收项（题型人工各过 5 次、辅助技术实测）。因此**不打** `stage-4-done`。

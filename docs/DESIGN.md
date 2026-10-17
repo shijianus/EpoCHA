@@ -639,6 +639,19 @@ worker         = 单个后台 goroutine，priority=让出 CPU（每补 10 题 sl
   回读题面。`SELECT` 候选与 `UPDATE` 之间的竞争由条件更新的**影响行数**裁决（不是靠"先抢到行锁"），
   输了就换下一个候选，最多 `claimAttempts=5` 次；5 次都输 ⇒ `ErrPoolEmpty`（可重试，不是错误升级）。
 
+### 8.6 阶段 4A：widget 与业务接入（工程闭环完成，效果仍未测）
+
+生产 widget 是零依赖原生 JS（`web/widget/v1.js`），直接 Shadow DOM 挂载，**不用 iframe**：
+
+- Shadow DOM 只是样式与命名隔离，**不是安全边界**（同源脚本照样能读它）。文档与代码注释都这么写。
+- 不用 iframe 就不存在"换 Origin 之后再拿客户端自报的父域名冒充可信来源"这条路；
+  Origin 语义与 §10.3 完全不变。
+- PoW 在 **Dedicated Worker** 里算，两种加载方式都实现了：A) 内嵌同一份源码建 Blob Worker
+  （需要 `worker-src blob:`）；B) 接入方同源部署 `v1.worker.js` 并用 `workerUrl` 指定（只接受同源 URL）。
+  两条路径的字节由防漂移测试钉住必须相同。没有 `eval` / `new Function` / 动态 import / 远程代码地址。
+- 生命周期与并发语义见 §11；接入面与 CSP 见 `docs/WIDGET.md`；实测与验收见 `docs/STAGE4A.md`。
+- **仍然只有视觉通道**：非视觉等价通道（音频等）未实现，PoW-only 降级不是等效替代（§8.5 的结论不变）。
+
 ## 9. 风险打分层（第三层，阶段 3+ 实现）
 
 `score ∈ [0,1]`，加权求和。**下表权重全部是 `[目标]` 初值，无任何一条经过测量**；阈值与权重的定稿必须依赖 `[实测]` 的
@@ -680,7 +693,8 @@ TTL 有 `[1s, 1h]` 上下界——有效期长度直接决定防重放账本必�
 | POST | `/siteverify` | `secret` | 1 | reCAPTCHA 风格，服务端调用 |
 | GET | `/healthz` | 无 | 1 | 存活探针，只返回 `{"status":"ok"}`，不含版本/路径/计数/依赖信息，不做健康即放行的语义 |
 | ~~GET~~ | ~~`/asset/<pool_id>/<sig>`~~ | — | **未采用（3B）** | 草稿里的签名媒体端点没有实现：它会凭空造出一个需要防枚举、防跨 challenge 引用的面，而题目是一次性的。图片改为**内联在 `/api/challenge` 的公开 DTO 里**（§10.1 下方、ADR-012） |
-| GET | `/widget/v1.js` | 公开 | 4 | widget 静态资源（gzip） |
+| GET | `/widget/v1.js` | 公开 | **4A** | widget 主脚本（go:embed）。实测 gzip **16,687 B** [实测]（预算 30KB [目标]） |
+| GET | `/widget/v1.worker.js` | 公开 | **4A** | PoW worker 的**同源副本**（接入方选方案 B 时用）。内容与 v1.js 内嵌那份逐字节相同，由测试钉住 |
 
 阶段 1 的公开端点**只有 PoW**：响应里不存在 `challenge` 对象，也不接受 `answer`/`behavior`。文档与实现都必须如实反映这一点，
 不得用空字段伪装成完整三层（ADR-005）。**3A 之后这段话只适用于 `pow_only` 站点**：`mode` 由站点配置决定，
@@ -810,7 +824,18 @@ token 验签 → 站点存在且启用且 `svid` 一致 → 站点/IP 限流 →
 | GET | `/api/admin/generators` | **3A**：本进程登记的题型（`id`/`version`/`media`/`note`）+ `max_difficulty`；**3B** 追加 `experimental` 与 `production_ready`（两个题型现在都是 `true`/`false`） |
 | GET | `/api/admin/pool` | **3A**：按 `(generator, version, difficulty)` 分桶的 `ready`/`assigned`/`terminal`/`total` 计数 + worker 观测；**3B** 每桶追加 `ready_asset_bytes`/`total_asset_bytes`，顶层追加 `image.{asset_bytes,budget_bytes,per_question_max_bytes}` |
 
-尚未实现（阶段 3B/5）：`/api/admin/sites/{id}/generators`（多题型权重）、`/api/admin/stats`、master key 的 `kid` 轮换登记接口。
+尚未实现（阶段 5）：`/api/admin/sites/{id}/generators`（多题型权重）、`/api/admin/stats`、master key 的 `kid` 轮换登记接口。
+
+**4A 给公开面加了三条收紧/新增**（都有测试）：
+
+- 两条只读静态路由（`/widget/v1.js`、`/widget/v1.worker.js`）：资源名走**白名单常量**，
+  没有目录、没有按参数拼路径；`Content-Type` 由我们自己写（**不用** `http.ServeContent`，
+  它在缺 `/etc/mime.types` 的机器上会嗅探成 `text/plain`，配 `nosniff` 直接让脚本无法执行）。
+- **`site_key` 一致性**：CORS 预检看不见请求体，只能从 URL（或 `X-Epocha-Site-Key`）认站点。
+  于是规定 `/api/challenge` 的 URL 与请求体、`/api/redeem` 的 URL 与 **token 绑定的站点**必须一致，
+  不一致一律 400 `invalid-request`；同一参数出现多个不同值也算冲突。
+  检查排在**任何状态消费之前**：被拒的 redeem 不会消耗唯一一次作答机会（有测试钉住）。
+  不带 URL 参数的老客户端（curl / devclient / 各阶段脚本）行为不变。
 
 **阶段 3A 的模式与生成器配置**（写在这三个字段上：`verify_mode`/`generator_id`/`difficulty`，创建与部分更新都走同一校验）：
 - `pow_only` 必须不带 `generator_id`；`pow_question` 必须带**本进程已登记**的 `generator_id` 与 1..`max_difficulty` 的难度档。
@@ -918,6 +943,8 @@ swap: 512M + vm.swappiness=10；GOMEMLIMIT=56MiB GOMAXPROCS=1
 | 单题数据体积 | `[目标]` payload ≤4096B / verifier ≤512B（库内 CHECK 强制） | `[实测]` `arithmetic-baseline-v1` 较大块 **62–63 字节**（verifier 恒为 16B nonce + 32B HMAC = 48B）；库内**净增 ≈432 字节/题**（1000 题与 100 题两次 checkpoint 后大小之差 ÷ 900 行；SQLite 4KB 页填充率决定了它远大于裸字段和） | `store.MaxPayloadBytes`/`MaxVerifierBytes` + 有测试 |
 | 有限批次生成耗时 | — | `[实测]` 补 100 题：纯生成+写入 **29ms**（0.29ms/题）；补 1000 题：**339–391ms**（0.34–0.39ms/题）。总墙钟 1.03s / 10.3s 里**主动让出 CPU 占 1s / 10s**（`YieldEvery=10`/`YieldPause=100ms`，是设计意图不是开销）。测量条件：本机 4 核可见但 `BatchPerTick=n` 单轮补满、`t.TempDir()` 独立库、2026-10-17 | `BenchmarkPoolFill`（需显式 `-bench`） |
 | 题池磁盘占用 | `[目标]` 20000 行上限 | `[估算]` 按上行的 432 B/题 ⇒ 上限约 **8.4MB**（**外推值，未实测到 20000 行**；50GB 磁盘下不构成约束）。WAL 在写入进行中额外占 ~4.7MB（自动 checkpoint 阈值 1000 页） | `MaxRows` 同语句判定 |
+| widget 体积 | `gzip [目标]` <30KB（`make widget-size`） | `[实测]` **v1.js 原文 48,412 B / gzip 16,687 B**；与 `v1.worker.js` 合计 gzip 21,121 B（2026-10-18，同一构建口径） | 浏览器只下载 v1.js（worker 源码内嵌其中）；方案 B 另取 worker 文件 |
+| 浏览器 PoW 吞吐 | 未设线（先测再说） | `[实测]` **422,833 次/秒**（Firefox 147 headless、linux/arm64、Dedicated Worker 内纯 JS SHA-256） | bits=12 求解 4–6ms；bits=20 提交→verified **309–1,862ms**（同一难度的抽样抖动很大，别当常量） |
 | 内嵌字体 | `[估算]` Latin 1–3MB；CJK 子集 4–6MB | `[实测]` **Go Regular 单档 148,672 字节**（`goregular.TTF`，3B 只用这一档，不子集化：字符集只有 32 个字形，收益远小于复杂度）；二进制因此从 9,896,228 → **10,813,732 字节** | `docs/NOTICE.md` + `make size` |
 | 单题图片资产 | `[目标]` PNG ≤65,536B（库内 CHECK 强制） | `[实测]` d1 **1,126–2,557B**（均值 1,911）；d5 **5,648–6,902B**（均值 6,315）；base64 后 d5 一张约 8KB 响应（2026-10-18，60 样本） | `0004` CHECK + `store.MaxAssetBytes` + `TestAssetColumnChecksAreReal` |
 | 视觉题生成成本 | `[目标]` 平均 CPU ≤15% | `[实测]` 纯生成 **1.81ms(d1) → 3.91ms(d5)/题**；生成+写库+落盘约 **6ms/题**（含进程启动）。视觉桶独立水位 8/24 + 独立让步 200ms + 全局 4MiB 字节预算，**不继承**算术桶的 50/100/20000 | `EPOCHA_POOL_IMAGE_*` + `TestImageBucketUsesOwnWatermarks` + `TestImageByteBudgetStopsGenerationWithoutWastingRender` |
@@ -927,7 +954,7 @@ swap: 512M + vm.swappiness=10；GOMEMLIMIT=56MiB GOMAXPROCS=1
 | `/siteverify` p99 | `[目标]` <60ms | 待填（阶段 1 未做性能测量） | 基准测试 `TestBenchmarkSiteVerify` |
 | `/api/challenge` p99 | `[目标]` <120ms | 待填 | 同上 |
 | 混合吞吐 | `[目标]` ≥150 req/s 且无 `SQLITE_BUSY` | 待填 | `make loadtest`（阶段 5） |
-| PoW 求解时延 | `[估算]` bits=18 浏览器 300–900ms | 待填（阶段 4，需真实设备） | widget 上报 `impl` 与耗时 |
+| PoW 求解时延 | 未设线（先测再说） | `[实测]` 纯 JS SHA-256 在 worker 里 **422,833 次/秒**（Firefox 147 headless、linux/arm64、2026-10-18）：bits=12 求解 **4–6ms**、提交→verified 墙钟 **103–148ms**；bits=20 提交→verified **309–1,862ms**（同难度抽样抖动大，不是常量） | 难度不能为了"看着快"往下降；`cmd/exampleapp` 的 8394 端口专测生产难度 |
 
 **未测项与原因（3A 明确列出，不编造数值）**：
 **稳态**服务进程 RSS 与库体积（已测的是"200 题 + 20 次闭环"的功能形状采样，见上表；
@@ -991,7 +1018,9 @@ internal/config/     配置装载（flag + env + 站点文件，无 YAML 依赖�
 internal/version/    构建信息（ldflags 注入）
 cmd/devclient/       开发/验收客户端：真实暴力求解 PoW（阶段 1）、站点策略闭环与**独立求值**基线题答案（阶段 3A），
                      驱动 stage1.sh / stage2.sh / stage3a.sh
-web/widget/          v1.js + i18n + 样式（阶段 4）
+web/widget/          阶段 4A：**生产 widget**（v1.js + v1.worker.js + widget.go 内嵌与只读 handler）
+cmd/exampleapp/      阶段 4A：**开发专用**示例业务后端（真实 /siteverify 闭环；默认 loopback；不链进 cmd/server）
+docs/scripts/browser/ 阶段 4A：WebDriver BiDi 客户端与浏览器/向量测试（Node 内置能力，零第三方依赖）
 deploy/docker/       Dockerfile + compose（阶段 5）
 deploy/cloudflare/   Worker + wrangler.toml（阶段 5 之后评估）
 internal/store/migrations/  NNNN_*.sql（阶段 1 起）——偏离"顶层 migrations/"是有意的：
@@ -1102,7 +1131,7 @@ api 侧 `TestWrongAnswerTerminatesChallenge`、`TestAnswerIsBoundToItsOwnChallen
 `golang.org/x/image` 经用户批准后引入并锁在 v0.36.0。素材方面**没有任何外部素材**——图片全部实时生成。
 
 范围边界（与"下一步"分界）：3B 做**工程链路**，不做正式 widget、不做完整后台/容器/边缘、
-**不做生产可用的结论**。`make stage3b-check` 的 22 项全部真实跑绿（退出码 0）：
+**不做生产可用的结论**。`docs/scripts/stage3b.sh` 的 21 项工程检查全部真实跑绿（退出码 0；口径见下方**验收状态三态**：工程项只写 PASS/FAIL，外部条件不足写 BLOCKED，本轮没做写 NOT_RUN）：
 依赖隔离（服务二进制不链接 `internal/eval` 与任何开发命令）、管理面题型登记与未知题型拒绝、
 池空 503 不降级、注入受控图片题后 DTO 字段集合、base64 解码为合法灰度 PNG 且块类型仅 IHDR/IDAT/IEND、
 客户端真实求解 PoW 的完整闭环、错误答案终结、畸形答案不消耗机会（与上一条构成对照）、
@@ -1112,9 +1141,13 @@ api 侧 `TestWrongAnswerTerminatesChallenge`、`TestAnswerIsBoundToItsOwnChallen
 secret 不进浏览器 / 演示后端真实验证成功、资源实测（PNG 分布、生成耗时、库与 WAL 体积、服务进程 RSS）。
 
 **未达成项（如实记录，不算通过）**：
-- **M4 每次尝试成本未测**：本机无离线 OCR（未获授权安装或下载模型），OCR 基线**未执行**；
-  已交付适配器 + 有测试的评分器 + 固定输入输出格式。缺测**不得**被读成"题目抗机器能力强"。
-- **人工可读性未测**：盲测页面与统计口径已交付，但没有真实参与者数据；agent 不代填。
+- **M4 每次尝试成本未测（BLOCKED）**：本机无离线 OCR（未获授权安装或下载模型），OCR 基线**未执行**；
+  已交付适配器 + 有测试的评分器 + 固定输入输出格式。缺测**不得**被读成"题目抗机器能力强"；
+  "缺工具时二进制退出码 3"验证的是**阻塞检测逻辑**，不是 OCR 效果（分层见 `docs/STAGE3B.md` §5.3：
+  二进制 3 / `go run` 折叠成 1 / `make` 折叠成 2）。
+- **人工可读性 NOT_RUN**：盲测页面与统计口径已交付，但没有真实参与者数据；agent 不代填。
+- 3B 当时把"浏览器里输入→提交→成功"记为不可自动化（理由是没有 geckodriver/playwright），
+  **这条结论是错的**：本机 Firefox 147 自带 WebDriver BiDi 端点，4A 已用真实交互补上（§17 阶段 4A）。
 - 浏览器内"输入答案 → 提交 → 成功"这一击**未自动化**（无 geckodriver/playwright）：
   Firefox headless 已验证页面加载、脚本执行、预检 204 + 领题 200、以及真实 `image_base64` 可被浏览器
   渲染成可读图（这一步抓到一个 `?site_key=` 缺失导致预检 403 的真 bug），但截图不能点击/输入。
@@ -1125,7 +1158,25 @@ secret 不进浏览器 / 演示后端真实验证成功、资源实测（PNG 分
 分级淘汰与统计面、正式 widget（含非视觉等价通道）、OCR 与人工基线测量。
 `rotate-v1` 的"144"这类数字在完成 M1–M4 测量前仍不得写成安全性论据。
 
-**阶段 4 — Widget + 示例页**
+**阶段 4A — Widget 初版 + 业务接入示例 + 浏览器闭环（已实现，2026-10-18）**
+已交付并跑绿：`EpoCHA.render/getResponse/reset/refresh/destroy`、中英文、Shadow DOM 直挂（不用 iframe）、
+状态机与并发语义（单实例单任务、换代丢弃晚到响应、重复点击不二次兑换、过期清空 token、
+后台恢复复核 deadline、destroy 释放监听/计时器/worker/Blob URL、多实例隔离）、
+Dedicated Worker 内的可取消 PoW（Blob 与同源文件两条路径都实现）、隐藏字段（light DOM，含 Shadow DOM
+不参与表单提交这个坑）、`credentials:'omit'`、URL 上保留 `?site_key=`、服务端新增 site_key 一致性规则。
+`make stage4a-check` 的 13 项工程检查退出码 0，其中**真实浏览器交互**（Firefox BiDi，零第三方驱动）覆盖：
+显示图片→键盘输入→页面内 PoW→redeem→业务表单→后端写入、答错终结与换题、token 重放被拒、
+多实例与隐藏字段互不覆盖、晚到响应不覆盖新题、reset/destroy、计算超时预算、高难度站点取消、
+CSP 禁 Worker 明确失败、键盘-only 完成一题、请求面与凭据面扫描。
+
+**未达成项（如实记录，不算通过）**：
+- **BLOCKED** 375px 无横向溢出：Firefox BiDi 不提供视口设置命令（node:test 记为 skip，不是通过）⇒ 需人工确认。
+- **NOT_RUN** 人工可读性、以及"题型人工各过 5 次"（DESIGN §17 阶段 4 的原验收项）：无真实参与者数据。
+- **未实现** 非视觉等价通道（音频等）：本阶段只有视觉通道；PoW-only 降级不是等效替代。
+- **未实现** `fallback_base` 与多站点配置面、`aria-live` 的辅助技术实测、中英切换的真机验证。
+- 因此本阶段只打 `stage-4a-done`，**不打** `stage-4-done`。
+
+**阶段 4B — Widget 剩余验收项**
 验收：题型人工各过 5 次；`make widget-size` 断言 gzip `<30KB [目标]`；键盘-only 完成一题；`aria-live` 播报经 DOM 断言；
 移动端 375px 无横向溢出；中英切换；PoW 高难度无障碍通道可用；失败重试与 fallback endpoint 生效；
 并首次给出浏览器侧 PoW 时延的 `[实测]` 数据（设备、日期）。无法自动化的项必须标注"人工验证"，**不得声称自动化通过**。
@@ -1142,6 +1193,7 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
 |---|---|---|---|
 | R1 | SHA-256 前缀 PoW 对 GPU 友好，成本上限有限 | 默认 `bits=18 [估算]` | 动态难度 + memory-hard 协议位（启用前需 `[实测]` 验证侧成本，§7） |
 | R2 | 多模态模型可解字符图（`[估算]` 60–90%，**非本专案测量**） | 接受，且此数字待阶段 3 基线替换 | 一次性 + 尝试次数封顶 + 成本层叠加；不指望题目本身 |
+| R15 | widget 的可达性受页面 CSP 约束：`worker-src` 既不给 `blob:` 也不同源部署 worker 文件时，**验证无法完成**（组件给 `worker-blocked` 明确失败，不假装通过） | 两条 worker 路径都实现，接入文档给出 CSP 清单；不做"降级到主线程假装算完" | 接入方按 `docs/WIDGET.md` §6 配置；示例后端提供 blob / 'self' / 'none' 三种档位各自有测试 |
 | R3 | `cjk-v1` 成语语料与 `rotate-v1` 底图的再分发许可 | **未确认**，现在是 **阶段 3B 的开工前置条件**（3A 是纯文本，不需要素材） | 自建/CC0/OFL；`docs/NOTICE.md` 清单 |
 | R4 | 选择题答案空间仅 4（猜测通过率 25%，3 次尝试累计 ≤58%） | 这是题型的**主要弱点**，不能靠渲染混淆掩盖 | 阶段 3 用 M2/M3 正式量化；必要时改题型结构而非加噪声 |
 | R5 | 边缘（Worker/DO）持状态会改变故障域与一致性模型 | 本版不在边缘放权威状态（工程选择，非平台限制，ADR-001） | 阶段 5 之后按 §12 的重新评估条件决定 |
@@ -1156,6 +1208,25 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
 | R12 | 池容量不足时公共请求直接吃 503（不降级是正确的，但对调用方表现为"暂时不可用"） | 默认水位 50/100 与 20000 行上限都是 `[目标]`，**未经真实流量校准** | 3B/阶段 5 按 `[实测]` 到达率重设水位；运维侧先用 `/api/admin/pool` 观测 |
 
 ## 19. 变更日志
+
+- 2026-10-18 **v2.7（阶段 4A 实现完成）**：新增 §8.6（widget 与业务接入的工程事实：Shadow DOM 直挂不用 iframe、
+  Blob 与同源文件两条 worker 路径、状态机与并发语义、隐藏字段必须落在 light DOM）；§10.1 的两条
+  `/widget/*` 路由从"阶段 4 计划"变成 `[实测]` 事实，并写入 **site_key 一致性规则**（URL 与请求体、
+  URL 与 token 所属站点必须一致，冲突即拒且**不消耗**作答机会；不带 URL 参数的老客户端不变）；
+  §13 填入 widget gzip **16,687 B**、浏览器 SHA-256 **422,833 次/秒**、bits=12/20 的墙钟区间；
+  §15 增加 `web/widget/`、`cmd/exampleapp/`、`docs/scripts/browser/`；§17 把阶段 4 拆成
+  **4A（已完成）/4B（未开始）**，未达成项含 **BLOCKED** 的 375px 视口检查与 **NOT_RUN** 的人工项；
+  §18 新增 R15（CSP 禁 Worker 时验证无法完成，组件明确失败而不假装通过）。新增 ADR-013、
+  `docs/WIDGET.md`、`docs/STAGE4A.md`、`make stage4a-check`、`docs/scripts/ocr-baseline.sh`。
+  **口径纠正（写进 AGENTS.md 成为长期约定）**：验收状态一律 PASS / BLOCKED / NOT_RUN 三态，禁止
+  "PASS：某项未测"这种混合表达；退出码按 `二进制 / go run / make` 三层分别实测并记录
+  （`go run` 把任何非 0 折叠成 1，`make` 折叠成 2 ⇒ 只有直接跑二进制/跑脚本才拿得到 3）；
+  3B 的 M3 明确区分**单次** `9.31e-10` 与 **3 次独立新挑战累计** `2.79e-9`（此前一处把后者写成了单次数值）。
+  本轮由**真实浏览器**抓到、curl 层永远看不到的缺陷：`http.ServeContent` 在缺 `/etc/mime.types` 的机器上把
+  脚本 `Content-Type` 覆盖成 `text/plain`（配 `nosniff` 直接拒绝执行）、严格 CSP 挡下示例页面的内联
+  `<style>/<script>`（页面"就是不动"且无 HTTP 症状）、worker 的 `started` 被误当终态导致组件卡在
+  `solving` 直到超时、BiDi 对视口外坐标报 `move target out of bounds`、示例应用端口冲突会让测试
+  **因为错误的原因通过**（门禁现在开头就检查固定端口空闲）。
 
 - 2026-10-18 **v2.6（阶段 3B 实现完成）**：新增 §5.5（`0004` 图片资产列与两条独立资源边界的原子判定、
   统计不加载 BLOB、判分与资产解耦、资产随 `pool` 行同生同死）、§8.5（`text-image-v1` 的取值定义、

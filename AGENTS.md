@@ -8,7 +8,7 @@
 `/siteverify` 采用 reCAPTCHA **风格**的契约（`secret`/`response`/`remoteip` → `success`/`challenge_ts`/`hostname`/`error-codes`），
 **不声称无条件兼容所有现成 SDK**（v2/v3 的额外参数未实现）。
 
-## 当前实现进度（阶段 1、2、3A、3B 已完成，2026-10-18）
+## 当前实现进度（阶段 1、2、3A、3B、4A 已完成，2026-10-18）
 已实现：`config`、`store`（三条增量迁移 0001/0002/0003 + 原子条件消费 + 题池绑定）、`pow`、`token`
 （`chal`/`resp`/`qver` 三把域分隔密钥）、`risk`（有界令牌桶 + 代理信任裁决）、`api`（`/api/challenge`、`/api/redeem`、
 `/siteverify`、`/healthz`）、`admin`（站点与凭据生命周期、来源策略、模式/生成器配置、`/api/admin/generators` 与
@@ -21,12 +21,29 @@
 图片经公开 DTO 以 base64 内联下发（**没有**裸媒体端点）、图片桶独立水位与让步节奏、
 `EPOCHA_GENERATORS` 生成器白名单、`cmd/preview`（本地预览 + 演示后端）、`cmd/evalgen`+`cmd/evalocr`+`internal/eval`
 （离线样本与评分器）、`cmd/devseed`（验收用受控注入）、`docs/{STAGE3B,NOTICE}.md`、`docs/scripts/stage3b.sh`。
-**尚未实现**：题型权重与多生成器选择、风险打分、自动淘汰、正式 widget 与非视觉等价通道（阶段 4）、后台页面/容器/边缘（阶段 5 及之后）。
+**4A 新增**：`web/widget/v1.js`（生产 widget：零依赖原生 JS、`EpoCHA.render/getResponse/reset/refresh/destroy`、
+中英双语、Shadow DOM 直挂**不用 iframe**、状态机 idle/loading/ready/solving/submitting/verified/expired/error/destroyed、
+单实例单任务 + 换代丢弃晚到响应 + 重复点击不二次兑换 + 过期清空 token + `destroy` 释放监听/计时器/worker/Blob URL、
+多实例隔离、隐藏字段落在 **light DOM**（Shadow DOM 里的 input 不参与表单提交））、
+`web/widget/v1.worker.js`（PoW worker，纯 JS SHA-256；Blob 与同源文件两条路径跑**逐字节相同**的源码，由测试钉住）、
+`web/widget/widget.go` + 公共端口 `GET /widget/v1.js`、`/widget/v1.worker.js`、
+`cmd/exampleapp`（开发专用示例业务后端：只有服务端 `/siteverify` 返回 `success:true` 才写留言；固定验证目标；
+CSP 四档 blob/worker-file/no-worker/none；默认 loopback 强制）、
+`internal/pow/testdata/pow_vectors.json`（**JS 与 Go 共享**的固定向量：Go 侧断言"实现==文件"，Node 侧用 worker 原始字节断言同一文件）、
+`docs/scripts/browser/`（Firefox 自带 WebDriver BiDi + Node 内置 WebSocket，**零第三方依赖**的真实浏览器交互测试）、
+`docs/{WIDGET,STAGE4A}.md`、`docs/scripts/stage4a.sh`、`make stage4a-check / widget-checks / browser-check`、
+`docs/scripts/ocr-baseline.sh`（把退出码分层变成可执行事实）。
+后端新增一条**收紧**规则：`site_key` 在 URL 与请求体（redeem 时是 URL 与 token 所属站点）同时出现时必须一致，
+冲突一律 400 `invalid-request`，且**排在任何状态消费之前**（被拒的 redeem 不消耗唯一作答机会）。
+**尚未实现**：题型权重与多生成器选择、风险打分、自动淘汰、非视觉等价通道（音频等）、
+widget 的 `fallback_base` 与多站点配置面、阶段 4B 的人工验收项（"题型人工各过 5 次"等）、
+后台页面/容器/边缘（阶段 5 及之后）。
 **阶段 3A 只有"文本基线题型 + 题池工程骨架"两层（PoW + 一次性题目）**：第三层风险打分不存在，
 且 `arithmetic-baseline-v1` 的答案**可由公开 payload 程序化推出**——不得在响应或文档里把它说成抗 AI/抗 OCR 题型，
 也不得用"随机实例多"论证安全性（DESIGN §8.4、ADR-011、红线 14）。
 阶段边界与验收：`make stage1-check` / `stage2-check` / `stage3a-check` / `stage3b-check`；
-标签只打 `stage-3a-done`、`stage-3b-done`，**不打 `stage-3-done`**（第三层风险打分不存在，题型也未做效果评测）。
+标签只打 `stage-3a-done`、`stage-3b-done`、`stage-4a-done`，**不打 `stage-3-done`、`stage-4-done`**
+（第三层风险打分不存在；阶段 4 的人工验收项与非视觉通道仍未做）。
 
 ## 硬性技术约束
 - **只用 Go，纯 Go 依赖，禁止 cgo**。禁止引入 JVM、MongoDB、Postgres、Redis、外部二进制（ImageMagick/fontconfig/headless chrome）。
@@ -43,6 +60,9 @@
 - 权威状态（防重放账本、题池、统计）在 VPS 源站 SQLite。**这是工程选择，不是平台限制**——Cloudflare 免费计划**可以**使用
   SQLite-backed Durable Objects（ADR-001 已更正旧的错误断言）。CF 边缘是阶段 5 之后的评估项，不在阶段 1。
 - 前端 widget：原生 JS 零依赖，gzip `[目标]` <30KB，中英双语，键盘可完成、`aria-live` 播报、移动端适配。
+  4A 的 `[实测]`：`v1.js` 原文 48,412 B / **gzip 16,687 B**（预算内，由 `make widget-size` 守护）。
+  **移动端 375px 无横向溢出尚未实测**（Firefox BiDi 不给视口设置命令 ⇒ 该项 BLOCKED，需人工确认），
+  不得把它写成"已验证"。
 
 ## 安全红线（违反即视为 bug，不接受"以后再说"）
 1. token 必须 HMAC-SHA256 签名，含过期与站点绑定；签名密钥用**带域分隔的 HMAC 派生**（按 purpose + kid，DESIGN §6）。
@@ -75,26 +95,47 @@
 15. 不得仅凭通过率判定题型被机器破解并自动下线；淘汰必须分级（候选告警 + 人工确认，多信号同时成立才自动降权，ADR-006）。
 
 ## 目录约定
-`cmd/{server,devclient,devseed,preview,evalgen,evalocr}`、`internal/{api,pow,token,store,pool,generator,risk,admin,config,version,eval}`、
-`internal/store/migrations`、`web/{widget,preview}`、`deploy/{docker,cloudflare}`、`docs/{,scripts}`。
-`internal/eval` 与 `cmd/{preview,devseed,evalgen,evalocr}` 是**开发期**代码：`cmd/server` 不得链接它们
-（`stage3b.sh` 用 `go list -deps` 钉住），生产 HTTP API 不得有任何答案出口。
+`cmd/{server,devclient,devseed,preview,evalgen,evalocr,exampleapp}`、
+`internal/{api,pow,token,store,pool,generator,risk,admin,config,version,eval}`、
+`internal/store/migrations`、`web/{widget,preview}`、`web/widget/`（生产 widget 与 worker + 内嵌 handler）、
+`deploy/{docker,cloudflare}`、`docs/{,scripts,scripts/browser}`。
+`internal/eval` 与 `cmd/{preview,devseed,evalgen,evalocr,exampleapp}` 是**开发期**代码：`cmd/server` 不得链接它们
+（`stage3b.sh`、`stage4a.sh` 各用 `go list -deps` 钉住，4A 还要求它**必须**链接 `web/widget`），
+生产 HTTP API 不得有任何答案出口。`docs/scripts/browser/` 是 Node ESM 测试代码：只用 Node 内置能力
+（`node:test`、全局 `WebSocket`、`vm`）与本机 Firefox 的 BiDi 端点，**不得引入 npm 包**。
 偏离此结构要在 DESIGN §15 写理由。测试与被测文件同包同目录；集成测试用 `t.TempDir()` 建独立 DB，禁止依赖外部环境或本机已有文件。
 
 ## 每阶段工作流（固定顺序）
 1. 读 `docs/DESIGN.md` §17 对应验收标准 + `docs/DECISIONS.md` 相关 ADR。
 2. **先写测试**（此时应红）。阶段内测试**不得用 `t.Skip` 占位**；未来阶段的占位测试要单独列明、不计入验收。
+   因外部条件不可用而必须跳过时，用 `t.Skip`/`skip` 表达并在门禁里换算成 **BLOCKED**，
+   **不许**用"直接 return"把它记成通过。
 3. 实现到绿。
 4. `make fmt-check vet race`（`-count=1` 不吃缓存）全通过；阶段 1 验收跑 `make stage1-check`。
 5. 更新 DESIGN（§19 加一行索引）与 DECISIONS（若产生新决策）。
 6. commit → **只有真实验收全部通过**才 `git tag stage-N-done`。失败就报告失败，不打完成标签。
    标签一旦打上**不移动、不删除**；之后发现问题就追加修复 commit（3A 标签的规则同样适用于 `stage-3b-done`）。
 
+### 验收状态三态（写报告与脚本都适用，不许混用）
+- 工程测试：**PASS / FAIL**。
+- 外部条件不足（缺工具、缺授权、缺素材）：**BLOCKED**。
+- 本轮没执行：**NOT_RUN**。
+- **禁止**"PASS：某项未测"这类混合表达。可以（也应该）单独测"阻塞检测逻辑本身"并把它记为 PASS，
+  但那**不是**效果评测通过，报告里必须分列。
+- **退出码分层**：`二进制` / `go run` / `make` 三层各测一次并记录真实值——
+  实测 `go run` 把任何非 0 折叠成 **1**（真实码只在 stderr 的 `exit status N`），
+  `make` 把任何配方失败折叠成 **2**。所以"包装层会透传 3"是错的假设，需要机器可读结论时
+  **先 build 再直接跑二进制**（见 `docs/scripts/ocr-baseline.sh`）。
+- shell 里**不得用 `cmd | head`/`| tail` 掩盖上游退出码**（`ls glob | head -n1` 就是这一类）；
+  用 bash glob 数组 + `-f` 检查，或 `|| rc=$?` 显式捕获。
+
 命令见 `Makefile`，`make help`。关键项：`make build` / `make test` / `make race` / `make vet` / `make fmt-check` /
 `make check`（fmt-check+vet+race+size）/ `make stage1-check`（端到端，真实暴力求解 PoW）/ `make secret-scan` /
-`make stage3b-check`（= check + secret-scan + stage1/2/3a-check + 3B 的 22 项端到端）/
-`make eval-samples`（离线样本集，输出 `eval-out/` 不入库）/ `make ocr-baseline`（无工具时退出码 3 = 未测）/
-`make widget-size`。
+`make stage3b-check`（= check + secret-scan + stage1/2/3a-check + 3B 的 21 项端到端）/
+`make eval-samples`（离线样本集，输出 `eval-out/` 不入库）/ `make ocr-baseline`（真实码只在脚本/二进制层，见下）/
+`make widget-size` / `make widget-checks`（JS 语法 + JS↔Go 共享 PoW 向量）/
+`make stage4a-check`（**只跑 `docs/scripts/stage4a.sh`**：脚本内部把 fmt-check/vet/race/size/secret-scan/widget-size/
+stage1/2/3a/3b 各跑一次并逐条记录退出码）/ `make browser-check`（只跑浏览器交互，需外部已起好服务与 exampleapp）。
 **shell 必须保留退出码**：脚本用 `set -euo pipefail`，禁止用 `cmd | tail` 让下游成功掩盖上游失败。
 
 ## 仓库与推送
@@ -126,4 +167,17 @@
 - 不要跳过 hook、不要 `--no-verify`、不要 force push。
 - 不要在未运行 `go test -race -count=1 ./...` 的情况下声称测试通过；UI/widget（阶段 4）无法浏览器实测时**必须明说"人工验证项未完成"**。
 - 不要把未实测的数字写成事实；遵守 `[目标]` / `[估算]` / `[实测]` 标注约定（ADR-006）。
+- 不要用"PASS：某项未测"这类混合表达。工程项只有 **PASS/FAIL**；外部条件不足是 **BLOCKED**；本轮没做是 **NOT_RUN**。
+  测"阻塞检测逻辑"通过 ≠ 效果评测通过，两者必须在报告与脚本里分列。
+- 不要假定包装层原样透传退出码：实测 `go run` 把任何非 0 折叠成 **1**（真实码只留在 stderr 的 `exit status N`），
+  `make` 把任何配方失败折叠成 **2**。需要机器可读的退出码时**先 build 再直接跑二进制/跑脚本**
+  （见 `docs/scripts/ocr-baseline.sh`），并且 shell 里不得用 `cmd | head`/`| tail` 掩盖上游失败。
+- 不要用截图代替交互测试。本机可用的零安装路径是：Firefox 自带 WebDriver BiDi 端点
+  （`--remote-debugging-port`，ws://127.0.0.1:PORT/session，先 `session.new` 再用同一条连接）
+  + Node 内置 `WebSocket` + `node --test`（见 `docs/scripts/browser/`）。装了驱动就用真交互，没装就标 BLOCKED，
+  **不得**声称"已在浏览器完成验证"。
+- 不要让验收脚本连到**遗留进程**：使用固定端口前必须检查端口空闲（`stage4a.sh` 开头就 fail）。
+  端口被上一轮进程占着时，测试会"因为错误的原因通过"，比直接失败更危险。
+- 不要在生产的 widget/脚本里留"开发模式跳过验证"的分支，也不要把 worker 源码的第二份拷贝
+  改成与内嵌那份不同步的内容（两份拷贝由 `widget_test.go` 与 Node 测试逐字节比对）。
 - 参考 `tiagozip/cap`（Apache-2.0）的协议与 `siteverify` 语义：**读思路，自己实现，禁止整段拷贝**。AGPL 项目（mCaptcha）不得作为代码基座。

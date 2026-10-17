@@ -12,8 +12,8 @@
 #   7. 本地预览：secret 不进浏览器、验证目标不可由浏览器指定、拒绝非 loopback 绑定；
 #   8. 资源实测数字（PNG 字节分布、生成耗时、库与 WAL 体积、真实服务进程 RSS）。
 #
-# OCR 与人工可读性**不在**通过条件里：环境无离线 OCR 时如实打印"未测（阻塞）"。
-# 工程验收与效果验收不能混成一个"全部通过"（ADR-002、DESIGN §8.5）。
+# OCR 与人工可读性**不在**通过条件里，且**不写成 PASS**：环境无离线 OCR ⇒ BLOCKED；
+# 本轮没有真人参与 ⇒ NOT_RUN。工程验收与效果验收不能混成一个"全部通过"（ADR-002、DESIGN §8.5）。
 #
 # 没有读库里的答案当判分依据、没有硬编码固定解、没有绕过验证的分支。
 # devseed 注入的是它自己新生成的题（答案由注入侧持有）；这与"读出已有题的答案"是两件事，
@@ -28,9 +28,16 @@ WORK="$(mktemp -d)"
 SERVER_PID=""
 PREVIEW_PID=""
 STEP=0
+N_PASS=0
+N_BLOCKED=0
+N_NOTRUN=0
 
 log()  { printf '[stage3b] %s\n' "$*"; }
-pass() { STEP=$((STEP+1)); printf '[stage3b] PASS %d: %s\n' "$STEP" "$*"; }
+# 三态口径（DESIGN §17、ADR-002）：工程测试只有 PASS/FAIL；
+# 外部条件不足是 BLOCKED；本轮没做是 NOT_RUN。禁止"PASS：某项未测"这种混合表达。
+pass()    { STEP=$((STEP+1)); N_PASS=$((N_PASS+1)); printf '[stage3b] PASS %d: %s\n' "$STEP" "$*"; }
+blocked() { STEP=$((STEP+1)); N_BLOCKED=$((N_BLOCKED+1)); printf '[stage3b] BLOCKED %d: %s\n' "$STEP" "$*"; }
+notrun()  { STEP=$((STEP+1)); N_NOTRUN=$((N_NOTRUN+1)); printf '[stage3b] NOT_RUN %d: %s\n' "$STEP" "$*"; }
 fail() {
   printf '[stage3b] FAIL: %s\n' "$*" >&2
   if [[ -f "${SERVER_LOG:-}" ]]; then
@@ -618,24 +625,42 @@ print("  20 条视觉题注入总耗时 %dms" % gen)
 PYRSS
 pass "资源实测已记录（PNG 分布、生成耗时、填满视觉桶后的库与 WAL 体积、真实服务进程 RSS/VmHWM/Threads + 20 次混合闭环零失败）"
 
-log "第十四步：OCR 基线（环境无离线工具时如实报阻塞，不影响工程验收）"
+log "第十四步：OCR 基线（阻塞检测属于工程测试；效果实测按外部条件单列）"
+GT_CANDIDATES=("$WORK"/eval/dev-*/ground-truth.jsonl)
+GT="${GT_CANDIDATES[0]}"
+[[ -f "$GT" ]] || fail "没有 ground-truth.jsonl（evalgen 步骤没产出样本）"
 OCR_BIN=""
 for cand in tesseract gocr cuneiform; do
   if command -v "$cand" >/dev/null 2>&1; then OCR_BIN="$cand"; break; fi
 done
-GT="$(ls "$WORK"/eval/dev-*/ground-truth.jsonl | head -n1)"
-if [[ -n "$OCR_BIN" ]]; then
-  "$EVALOCR" --groundtruth "$GT" --ocr-cmd "$OCR_BIN" --limit 60 || fail "OCR 评测执行失败"
-  pass "OCR 基线已执行（通过率见上）"
+
+# **退出码逐层核实**（本机 go1.24.5/linux-arm64 实测，2026-10-18）：
+#   evalocr 二进制 = 3；`go run` 把任何非 0 折叠成 **1**（只在 stderr 打 "exit status 3"）；
+#   `make` 把任何配方失败折叠成 **2**。所以"包装层会透传 3"是错的假设，
+#   这里按各层真实形状断言，而不是要求三层都等于 3。
+rc_bin=0
+"$EVALOCR" --groundtruth "$GT" --ocr-cmd tesseract --limit 60 >/dev/null 2>&1 || rc_bin=$?
+rc_gorun=0
+gorun_err="$(go run ./cmd/evalocr --groundtruth "$GT" --ocr-cmd tesseract --limit 60 2>&1 >/dev/null)" || rc_gorun=$?
+rc_present=0
+if command -v tesseract >/dev/null 2>&1 || command -v gocr >/dev/null 2>&1 || command -v cuneiform >/dev/null 2>&1; then
+  rc_present=1
+fi
+if [[ $rc_present -eq 0 ]]; then
+  [[ $rc_bin -eq 3 ]]    || fail "缺工具时 evalocr 二进制应退出码 3（未测），实得 $rc_bin"
+  [[ $rc_gorun -eq 1 ]]  || fail "缺工具时 go run 包装应折叠成 1，实得 $rc_gorun"
+  [[ "$gorun_err" == *"exit status 3"* ]] || fail "go run 的 stderr 应带真实退出码 3（否则无法区分折叠原因）：$gorun_err"
+  pass "阻塞检测可验证：缺离线 OCR 时退出码分层为 二进制=$rc_bin / go run=$rc_gorun（stderr 含 exit status 3）/ make=2"
+  blocked "OCR 效果实测：未执行——本机没有 tesseract/gocr/cuneiform，且未获授权安装工具或下载模型（M4 每次尝试成本因此未知）"
 else
-  "$EVALOCR" --groundtruth "$GT" --ocr-cmd tesseract --limit 60 || true
-  log "OCR 实测：未执行（阻塞）—— 本机没有 tesseract/gocr/cuneiform，且未获授权安装或下载模型"
-  pass "OCR 适配器与评分器已交付；OCR 实测**未执行**（阻塞项，不计入通过）"
+  "$EVALOCR" --groundtruth "$GT" --ocr-cmd "${OCR_BIN:-tesseract}" --limit 60 || fail "OCR 评测执行失败"
+  pass "OCR 基线已执行（通过率与工具版本见上）"
 fi
 
 log "第十五步：人工可读性（不得由 agent 代填）"
 log "  盲测入口：浏览器打开 $PBASE/ → 展开「盲测模式」→ 开始盲测"
-log "  本轮**没有**人工参与数据 ⇒ 报告里写「未测」，不能由 agent 代填冒充用户"
-pass "人工可读性：未测（已交付盲测页面与统计口径，需真实参与者）"
+log "  本轮**没有**人工参与数据 ⇒ 报告里写 NOT_RUN，不能由 agent 代填冒充用户"
+notrun "人工可读性：本轮未执行（盲测页面与统计口径已交付，需真实参与者数据）"
 
-log "全部 $STEP 项通过（工程闭环；OCR 与人工可读性按上面标注单独计）"
+log "工程项 $N_PASS 项 PASS（退出码 0 才走到这里）；BLOCKED $N_BLOCKED；NOT_RUN $N_NOTRUN"
+log "结论口径：工程闭环 PASS；OCR 效果 BLOCKED；人工可读性 NOT_RUN；抗 AI/生产可用 **未论证**。"

@@ -1,0 +1,170 @@
+{
+  "algorithm": "sha256-prefix",
+  "canonical_form": "digest = SHA256(seed || ascii_decimal_nonce)，通过条件为 digest 的前导零比特数（按字节序、高位优先）\u003e= bits",
+  "nonce_format": "nonce 是十进制字符串，长度 1..16，数值 \u003c= 1000000000000；哈希输入用的是它的 ASCII 数字节，不是数值本身",
+  "notes": "seed 由固定常量给出（可复现）。attempts 是从 0 起算到命中为止尝试的候选个数。",
+  "digest_vectors": [
+    {
+      "input_b64url": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ",
+      "sha256_hex": "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318",
+      "why": "55 字节：填充正好落在 64 字节边界前"
+    },
+    {
+      "input_b64url": "YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI",
+      "sha256_hex": "a5fc6e203a4c2b657d0d153885932414b2ffc6a93f0f8bf8b3183315e5a7212c",
+      "why": "56 字节：长度字段必须挤到第二块"
+    },
+    {
+      "input_b64url": "Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjYw",
+      "sha256_hex": "52b6419d27bd7f547cee3b92f8c17a908b8a49601ecbec161e5030de1dfe9e0a",
+      "why": "64 字节：正好一块，仍需追加填充块"
+    },
+    {
+      "input_b64url": "ZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQ",
+      "sha256_hex": "899987f295364060c6abd752a7e895124b467fd7cf56b52ce22f4a684a5723f4",
+      "why": "65 字节：两块 + 填充"
+    },
+    {
+      "input_b64url": "AAECAwQFBgcICQoLDA0ODzA",
+      "sha256_hex": "c36aaf64bda378c2e5a20c722e3cfea412b9b77c95b87a153ce7583e8fc56563",
+      "why": "PoW 预图像 seed||\"0\""
+    },
+    {
+      "input_b64url": "L9GKA3y7QZ5dbhGgw5R7KDEyMzQ1Njc",
+      "sha256_hex": "3383898cadeb3bc7d34032dc62a842f6a2ab1d371d09ae3b2e3f6619648772d9",
+      "why": "PoW 预图像 seed||\"1234567\""
+    },
+    {
+      "input_b64url": "YWJj",
+      "sha256_hex": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "why": "abc（标准对照）"
+    },
+    {
+      "input_b64url": "",
+      "sha256_hex": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "why": "空输入（SHA-256 的标准对照）"
+    }
+  ],
+  "leading_zero_bit_vectors": [
+    {
+      "bytes_b64url": "",
+      "leading_zero_bits": 0,
+      "why": "LeadingZeroBits()"
+    },
+    {
+      "bytes_b64url": "AA",
+      "leading_zero_bits": 8,
+      "why": "LeadingZeroBits(00)"
+    },
+    {
+      "bytes_b64url": "AACA",
+      "leading_zero_bits": 16,
+      "why": "LeadingZeroBits(000080)"
+    },
+    {
+      "bytes_b64url": "Dw",
+      "leading_zero_bits": 4,
+      "why": "LeadingZeroBits(0f)"
+    },
+    {
+      "bytes_b64url": "AAE",
+      "leading_zero_bits": 15,
+      "why": "LeadingZeroBits(0001)"
+    },
+    {
+      "bytes_b64url": "AAAAABA",
+      "leading_zero_bits": 35,
+      "why": "LeadingZeroBits(0000000010)"
+    },
+    {
+      "bytes_b64url": "_w",
+      "leading_zero_bits": 0,
+      "why": "LeadingZeroBits(ff)"
+    },
+    {
+      "bytes_b64url": "AAAAAAAAAAAAAAAAAAAAAAE",
+      "leading_zero_bits": 135,
+      "why": "LeadingZeroBits(0000000000000000000000000000000001)"
+    }
+  ],
+  "pow_vectors": [
+    {
+      "seed_b64url": "AAECAwQFBgcICQoLDA0ODw",
+      "bits": 12,
+      "first_solution_nonce": "450",
+      "attempts": 451,
+      "leading_zero_bits": 13
+    },
+    {
+      "seed_b64url": "__79_Pv6-fj39vX08_Lx8A",
+      "bits": 12,
+      "first_solution_nonce": "1942",
+      "attempts": 1943,
+      "leading_zero_bits": 12
+    },
+    {
+      "seed_b64url": "L9GKA3y7QZ5dbhGgw5R7KA",
+      "bits": 12,
+      "first_solution_nonce": "3126",
+      "attempts": 3127,
+      "leading_zero_bits": 13
+    },
+    {
+      "seed_b64url": "AAAAAAAAAAAAAAAAAAAAAQ",
+      "bits": 12,
+      "first_solution_nonce": "6095",
+      "attempts": 6096,
+      "leading_zero_bits": 12
+    }
+  ],
+  "rejected_nonces": [
+    {
+      "seed_b64url": "AAECAwQFBgcICQoLDA0ODw",
+      "bits": 12,
+      "nonce": "",
+      "reason": "empty"
+    },
+    {
+      "seed_b64url": "AAECAwQFBgcICQoLDA0ODw",
+      "bits": 12,
+      "nonce": "abc",
+      "reason": "non-decimal"
+    },
+    {
+      "seed_b64url": "AAECAwQFBgcICQoLDA0ODw",
+      "bits": 12,
+      "nonce": "12.5",
+      "reason": "non-decimal"
+    },
+    {
+      "seed_b64url": "AAECAwQFBgcICQoLDA0ODw",
+      "bits": 12,
+      "nonce": "-1",
+      "reason": "non-decimal"
+    },
+    {
+      "seed_b64url": "AAECAwQFBgcICQoLDA0ODw",
+      "bits": 12,
+      "nonce": "10000000000000000",
+      "reason": "too-long"
+    },
+    {
+      "seed_b64url": "AAECAwQFBgcICQoLDA0ODw",
+      "bits": 12,
+      "nonce": "1000000000001",
+      "reason": "over-max-value"
+    },
+    {
+      "seed_b64url": "AAECAwQFBgcICQoLDA0ODw",
+      "bits": 12,
+      "nonce": "999999",
+      "reason": "below-difficulty"
+    },
+    {
+      "seed_b64url": "AAAAAAAAAAAAAAAAAAAAAQ",
+      "bits": 12,
+      "nonce": "0000012",
+      "reason": "leading-zeros-still-hashes"
+    }
+  ]
+}

@@ -1,23 +1,600 @@
 package store
 
-import "testing"
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
 
-func TestOpenSetsWALAndPragmas(t *testing.T) {
-	t.Skip("待阶段 1：t.TempDir() 建库，断言 journal_mode=WAL、busy_timeout=5000、foreign_keys=ON")
+func testPepper() []byte { return []byte(strings.Repeat("p", 32)) }
+
+// newDB 在 t.TempDir() 里开一个独立库；t.Cleanup 负责关闭。
+func newDB(t *testing.T) *DB {
+	t.Helper()
+	d, _ := newDBAt(t, filepath.Join(t.TempDir(), "epocha.db"))
+	return d
 }
 
-func TestMigrationIdempotent(t *testing.T) {
-	t.Skip("待阶段 2（DESIGN §17 阶段 2）：同一迁移重复执行后 schema_version 不变且无错误")
+func newDBAt(t *testing.T, path string) (*DB, string) {
+	t.Helper()
+	d, err := Open(t.Context(), path, testPepper())
+	if err != nil {
+		t.Fatalf("Open(%s): %v", path, err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	return d, path
 }
 
-func TestAtomicClaimSingleWinner(t *testing.T) {
-	t.Skip("待阶段 1（DESIGN §17 ⑦）：100 goroutine 并发消费同一 nonce → 恰好 1 个成功")
+func mustSite(t *testing.T, d *DB, name string) *Site {
+	t.Helper()
+	s, err := d.PutSite(t.Context(), name, "sk-"+name, "secret-"+name+"-SENTINEL", 14)
+	if err != nil {
+		t.Fatalf("PutSite: %v", err)
+	}
+	return s
 }
 
-func TestConsumeUsesRowsAffected(t *testing.T) {
-	t.Skip("待阶段 3：UPDATE ... WHERE status='ready' 返回 0 行时调用方必须放弃，不得读-判-写回")
+func newChallenge(t *testing.T, d *DB, siteID int64, ttl time.Duration) *Challenge {
+	t.Helper()
+	id, err := NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	c := &Challenge{ID: id, SiteID: siteID, PowSeed: []byte("0123456789abcdef"), PowBits: 12,
+		CreatedAt: now, ExpiresAt: now.Add(ttl)}
+	if err := d.InsertChallenge(t.Context(), c); err != nil {
+		t.Fatalf("InsertChallenge: %v", err)
+	}
+	return c
 }
 
-func TestSecretStoredAsMacOnly(t *testing.T) {
-	t.Skip("待阶段 2（DESIGN §17 阶段 2）：建站点后直接读 DB 文件，明文 secret 不得出现")
+func TestOpenAppliesPragmas(t *testing.T) {
+	d := newDB(t)
+	for q, want := range map[string]string{
+		"journal_mode": "wal",
+		"busy_timeout": "5000",
+		"foreign_keys": "1",
+		"synchronous":  "1",
+		"user_version": "0",
+	} {
+		var got string
+		if err := d.h.QueryRowContext(t.Context(), "PRAGMA "+q).Scan(&got); err != nil {
+			t.Fatalf("PRAGMA %s: %v", q, err)
+		}
+		if got != want {
+			t.Errorf("PRAGMA %s = %q, want %q", q, got, want)
+		}
+	}
+	v, err := d.SchemaVersion(t.Context())
+	if err != nil || v != schemaVersion {
+		t.Fatalf("schema 版本 = %d, err %v", v, err)
+	}
 }
+
+func TestOpenRejectsBadConfig(t *testing.T) {
+	if _, err := Open(t.Context(), "", testPepper()); !errors.Is(err, ErrBadConfig) {
+		t.Errorf("空路径应拒绝，got %v", err)
+	}
+	if _, err := Open(t.Context(), filepath.Join(t.TempDir(), "x.db"), []byte("short")); !errors.Is(err, ErrBadConfig) {
+		t.Errorf("pepper 过短应拒绝，got %v", err)
+	}
+}
+
+// 迁移必须幂等：重复 Open 不得报错、不得丢数据、版本不变。
+func TestMigrationIdempotentAndDataSurvives(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "epocha.db")
+	d1, _ := newDBAt(t, path)
+	s := mustSite(t, d1, "alpha")
+	c := newChallenge(t, d1, s.ID, time.Minute)
+	if err := d1.Close(); err != nil {
+		t.Fatal(err)
+	}
+	d2, err := Open(t.Context(), path, testPepper())
+	if err != nil {
+		t.Fatalf("二次 Open: %v", err)
+	}
+	if v, _ := d2.SchemaVersion(t.Context()); v != schemaVersion {
+		t.Fatalf("重开后版本 = %d", v)
+	}
+	if _, err := d2.Challenge(t.Context(), c.ID); err != nil {
+		t.Fatalf("重开后 challenge 丢失: %v", err)
+	}
+	got, err := d2.SiteByKey(t.Context(), "sk-alpha")
+	if err != nil || got.ID != s.ID {
+		t.Fatalf("重开后站点丢失: %v %+v", err, got)
+	}
+	for i := 1; i <= 3; i++ {
+		dn, err := Open(t.Context(), path, testPepper())
+		if err != nil {
+			t.Fatalf("第 %d 次重复 Open: %v", i, err)
+		}
+		_ = dn.Close()
+	}
+}
+
+func TestPutSiteValidates(t *testing.T) {
+	d := newDB(t)
+	if _, err := d.PutSite(t.Context(), "x", "k", "", 14); !errors.Is(err, ErrBadConfig) {
+		t.Error("空 secret 应拒绝")
+	}
+	if _, err := d.PutSite(t.Context(), "x", "k", "s", 11); !errors.Is(err, ErrBadConfig) {
+		t.Error("bits 下界外应拒绝")
+	}
+	if _, err := d.PutSite(t.Context(), "x", "k", "s", 25); !errors.Is(err, ErrBadConfig) {
+		t.Error("bits 上界外应拒绝")
+	}
+	s1, err := d.PutSite(t.Context(), "x", "k", "secret-one", 14)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := d.PutSite(t.Context(), "x", "k", "secret-two", 15)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s1.ID != s2.ID {
+		t.Error("同 site_key 重复登记应复用 id")
+	}
+	if s2.PowBits != 15 {
+		t.Error("重复登记应更新配置")
+	}
+}
+
+func TestSecretHandling(t *testing.T) {
+	d := newDB(t)
+	s, err := d.PutSite(t.Context(), "demo", "key-demo", "top-secret-value", 14)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.MatchSecret(s, "top-secret-value") {
+		t.Error("正确 secret 应匹配")
+	}
+	if d.MatchSecret(s, "Top-Secret-Value") {
+		t.Error("大小写不同不应匹配")
+	}
+	if got, err := d.FindSiteBySecret(t.Context(), "top-secret-value"); err != nil || got.ID != s.ID {
+		t.Fatalf("按 secret 定位站点失败: %v %+v", err, got)
+	}
+	if _, err := d.FindSiteBySecret(t.Context(), "nope"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("未知 secret 应 ErrNotFound，got %v", err)
+	}
+	// 库文件里不得出现 secret 明文
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSecretNotStoredInPlaintext(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "epocha.db")
+	d, _ := newDBAt(t, path)
+	const sentinel = "SENTINEL-SECRET-9f3c8a1e7b"
+	if _, err := d.PutSite(t.Context(), "s1", "key-1", sentinel, 14); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.PutSite(t.Context(), "s2", "key-2", "other-secret", 14); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := readFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), sentinel) {
+		t.Fatal("DB 文件里出现 secret 明文")
+	}
+}
+
+func TestNewIDUnique(t *testing.T) {
+	seen := map[string]bool{}
+	for range 500 {
+		id, err := NewID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(id) != 32 {
+			t.Fatalf("id 长度 %d", len(id))
+		}
+		if seen[id] {
+			t.Fatal("id 重复")
+		}
+		seen[id] = true
+	}
+}
+
+func TestChallengeValidationAndNotFound(t *testing.T) {
+	d := newDB(t)
+	s := mustSite(t, d, "alpha")
+	if err := d.InsertChallenge(t.Context(), &Challenge{ID: "x"}); !errors.Is(err, ErrBadConfig) {
+		t.Error("字段不完整应拒绝")
+	}
+	if _, err := d.Challenge(t.Context(), "missing"); !errors.Is(err, ErrNotFound) {
+		t.Error("不存在应 ErrNotFound")
+	}
+	if _, err := d.SiteByKey(t.Context(), "missing"); !errors.Is(err, ErrNotFound) {
+		t.Error("站点不存在应 ErrNotFound")
+	}
+	c := newChallenge(t, d, s.ID, time.Minute)
+	got, err := d.Challenge(t.Context(), c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != statusIssued || got.Attempts != 0 || got.PowBits != 12 || string(got.PowSeed) != string(c.PowSeed) {
+		t.Fatalf("回读不符 %+v", got)
+	}
+}
+
+// 并发兑换：同一 challenge 只能有一个成功（DESIGN §17 阶段 1 ③）。
+func TestConcurrentRedeemExactlyOneWins(t *testing.T) {
+	for _, concurrency := range []int{2, 50, 100} {
+		t.Run(fmt.Sprint(concurrency), func(t *testing.T) {
+			d := newDB(t)
+			s := mustSite(t, d, "alpha")
+			c := newChallenge(t, d, s.ID, time.Minute)
+			ok := redeemRace(t, d, c.ID, concurrency)
+			if ok != 1 {
+				t.Fatalf("%d 路并发成功 %d 次，应为 1", concurrency, ok)
+			}
+			if n, _ := d.CountChallenges(t.Context(), statusRedeemed); n != 1 {
+				t.Fatalf("redeemed 行 = %d", n)
+			}
+		})
+	}
+}
+
+func redeemRace(t *testing.T, d *DB, cid string, n int) int {
+	t.Helper()
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	wins := 0
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, err := d.Redeem(t.Context(), cid, time.Now(), time.Minute); err == nil {
+				mu.Lock()
+				wins++
+				mu.Unlock()
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	return wins
+}
+
+// 两个独立 *sql.DB 句柄争抢同一文件：连接池形态不是安全边界，必须由库层条件更新兜住。
+func TestTwoIndependentHandlesSameFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "epocha.db")
+	a, _ := newDBAt(t, path)
+	s := mustSite(t, a, "alpha")
+	c := newChallenge(t, a, s.ID, time.Minute)
+
+	b, err := Open(t.Context(), path, testPepper())
+	if err != nil {
+		t.Fatalf("第二个句柄: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	wins := 0
+	race := func(d *DB) {
+		defer wg.Done()
+		if _, err := d.Redeem(t.Context(), c.ID, time.Now(), time.Minute); err == nil {
+			mu.Lock()
+			wins++
+			mu.Unlock()
+		}
+	}
+	wg.Add(2)
+	go race(a)
+	go race(b)
+	wg.Wait()
+	if wins != 1 {
+		t.Fatalf("两个独立句柄并发成功 %d 次，应为 1", wins)
+	}
+	// 交叉复核：另一个句柄读到的状态一致
+	got, err := b.Challenge(t.Context(), c.ID)
+	if err != nil || got.Status != statusRedeemed {
+		t.Fatalf("跨句柄状态不一致: %v %+v", err, got)
+	}
+}
+
+func TestRedeemRejectsExpiredAndNonIssued(t *testing.T) {
+	d := newDB(t)
+	s := mustSite(t, d, "alpha")
+
+	expired := newChallenge(t, d, s.ID, -time.Minute)
+	if _, err := d.Redeem(t.Context(), expired.ID, time.Now(), time.Minute); !errors.Is(err, ErrNotRedeemable) {
+		t.Errorf("过期 challenge 应不可兑换，got %v", err)
+	}
+	c := newChallenge(t, d, s.ID, time.Hour)
+	r, err := d.Redeem(t.Context(), c.ID, time.Now(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.SiteID != s.ID || r.ChallengeID != c.ID || !r.ExpiresAt.After(r.CreatedAt) {
+		t.Fatalf("response 记录不符 %+v", r)
+	}
+	if _, err := d.Redeem(t.Context(), c.ID, time.Now(), time.Minute); !errors.Is(err, ErrNotRedeemable) {
+		t.Errorf("重复兑换应失败，got %v", err)
+	}
+	if _, err := d.Redeem(t.Context(), "does-not-exist", time.Now(), time.Minute); !errors.Is(err, ErrNotRedeemable) {
+		t.Errorf("不存在的 id 应统一失败，got %v", err)
+	}
+	if _, err := d.Redeem(t.Context(), c.ID, time.Now(), 0); !errors.Is(err, ErrBadConfig) {
+		t.Errorf("TTL<=0 应拒绝，got %v", err)
+	}
+}
+
+func TestFailAttemptExhaustsChallenge(t *testing.T) {
+	d := newDB(t)
+	s := mustSite(t, d, "alpha")
+	c := newChallenge(t, d, s.ID, time.Minute)
+	for i := 1; i <= MaxFailedAttempts; i++ {
+		attempts, status, err := d.FailAttempt(t.Context(), c.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if attempts != i {
+			t.Fatalf("attempts = %d, want %d", attempts, i)
+		}
+		want := statusIssued
+		if i == MaxFailedAttempts {
+			want = statusInvalid
+		}
+		if status != want {
+			t.Fatalf("第 %d 次失败后 status = %s, want %s", i, status, want)
+		}
+	}
+	if _, err := d.Redeem(t.Context(), c.ID, time.Now(), time.Minute); !errors.Is(err, ErrNotRedeemable) {
+		t.Fatal("作废后的 challenge 不得再兑换")
+	}
+	if _, _, err := d.FailAttempt(t.Context(), "missing"); !errors.Is(err, ErrNotFound) {
+		t.Error("不存在的 id 应 ErrNotFound")
+	}
+}
+
+func TestConsumeResponseAtomicity(t *testing.T) {
+	d := newDB(t)
+	s := mustSite(t, d, "alpha")
+	c := newChallenge(t, d, s.ID, time.Minute)
+	r, err := d.Redeem(t.Context(), c.ID, time.Now(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := d.ConsumeResponse(t.Context(), r.ID, s.ID, time.Now())
+	if err != nil {
+		t.Fatalf("首次消费: %v", err)
+	}
+	if v.ChallengeID != c.ID || !v.ChallengeCreatedAt.Equal(c.CreatedAt.Truncate(time.Nanosecond)) {
+		t.Fatalf("回读事实不符 %+v vs %+v", v, c)
+	}
+	if _, err := d.ConsumeResponse(t.Context(), r.ID, s.ID, time.Now()); !errors.Is(err, ErrConsumed) {
+		t.Fatalf("二次消费应失败，got %v", err)
+	}
+}
+
+// 错误 secret 定位到的站点不得消费别的站点的 token，也不得改变其状态。
+func TestConsumeResponseSiteBinding(t *testing.T) {
+	d := newDB(t)
+	a := mustSite(t, d, "alpha")
+	b := mustSite(t, d, "bravo")
+	c := newChallenge(t, d, a.ID, time.Minute)
+	r, err := d.Redeem(t.Context(), c.ID, time.Now(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ConsumeResponse(t.Context(), r.ID, b.ID, time.Now()); !errors.Is(err, ErrConsumed) {
+		t.Fatalf("跨站点消费必须失败，got %v", err)
+	}
+	// 站点 a 仍可正常消费：证明失败的尝试没有改动状态
+	if _, err := d.ConsumeResponse(t.Context(), r.ID, a.ID, time.Now()); err != nil {
+		t.Fatalf("原站点消费失败：%v", err)
+	}
+	if _, err := d.ConsumeResponse(t.Context(), r.ID, a.ID, time.Now()); !errors.Is(err, ErrConsumed) {
+		t.Fatal("第三次消费应失败")
+	}
+}
+
+func TestConsumeResponseExpiry(t *testing.T) {
+	d := newDB(t)
+	s := mustSite(t, d, "alpha")
+	c := newChallenge(t, d, s.ID, time.Minute)
+	r, err := d.Redeem(t.Context(), c.ID, time.Now(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ConsumeResponse(t.Context(), r.ID, s.ID, time.Now().Add(2*time.Second)); !errors.Is(err, ErrConsumed) {
+		t.Fatalf("过期 response 应失败，got %v", err)
+	}
+	if _, err := d.ConsumeResponse(t.Context(), "missing", s.ID, time.Now()); !errors.Is(err, ErrConsumed) {
+		t.Fatalf("未知 rid 应统一 ErrConsumed，got %v", err)
+	}
+}
+
+// 重启后不可重放：这是"状态在 SQLite 而非内存"的证明（DESIGN §17 阶段 1）。
+func TestReplayAfterReopenFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "epocha.db")
+	d, _ := newDBAt(t, path)
+	s := mustSite(t, d, "alpha")
+	c := newChallenge(t, d, s.ID, time.Hour)
+	r, err := d.Redeem(t.Context(), c.ID, time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ConsumeResponse(t.Context(), r.ID, s.ID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	d2, err := Open(t.Context(), path, testPepper())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d2.Close()
+	if _, err := d2.ConsumeResponse(t.Context(), r.ID, s.ID, time.Now()); !errors.Is(err, ErrConsumed) {
+		t.Fatalf("重启后重放应失败，got %v", err)
+	}
+	if _, err := d2.Redeem(t.Context(), c.ID, time.Now(), time.Minute); !errors.Is(err, ErrNotRedeemable) {
+		t.Fatalf("重启后重复兑换应失败，got %v", err)
+	}
+	// 未消费的 challenge 重开后仍可兑换（不是"全部拒绝"式的假安全）
+	c2 := newChallenge(t, d2, s.ID, time.Hour)
+	if _, err := d2.Redeem(t.Context(), c2.ID, time.Now(), time.Minute); err != nil {
+		t.Fatalf("重开后未消费的 challenge 应可兑换: %v", err)
+	}
+}
+
+// 两个独立句柄并发验证同一 response：恰好一个成功。
+func TestTwoHandlesConsumeSameResponse(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "epocha.db")
+	a, _ := newDBAt(t, path)
+	s := mustSite(t, a, "alpha")
+	c := newChallenge(t, a, s.ID, time.Hour)
+	r, err := a.Redeem(t.Context(), c.ID, time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Open(t.Context(), path, testPepper())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	wins := 0
+	run := func(d *DB) {
+		defer wg.Done()
+		if _, err := d.ConsumeResponse(t.Context(), r.ID, s.ID, time.Now()); err == nil {
+			mu.Lock()
+			wins++
+			mu.Unlock()
+		}
+	}
+	wg.Add(2)
+	go run(a)
+	go run(b)
+	wg.Wait()
+	if wins != 1 {
+		t.Fatalf("两个句柄并发消费成功 %d 次，应为 1", wins)
+	}
+}
+
+func TestOneResponsePerChallenge(t *testing.T) {
+	d := newDB(t)
+	s := mustSite(t, d, "alpha")
+	c := newChallenge(t, d, s.ID, time.Hour)
+	if _, err := d.Redeem(t.Context(), c.ID, time.Now(), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	// 手工再插一条同一 challenge 的 response，应被 UNIQUE 约束拒绝
+	_, err := d.h.ExecContext(t.Context(), `
+INSERT INTO responses(id, challenge_id, site_id, created_at, expires_at, used) VALUES(?,?,?,?,?,0)`,
+		"dup-id", c.ID, s.ID, formatTime(time.Now().UTC()), formatTime(time.Now().Add(time.Minute).UTC()))
+	if err == nil {
+		t.Fatal("一个 challenge 不得签发两条 response")
+	}
+	if n, _ := d.CountChallenges(t.Context(), statusRedeemed); n != 1 {
+		t.Fatalf("redeemed 计数 = %d", n)
+	}
+}
+
+func TestPurgeBoundsLedgerSize(t *testing.T) {
+	d := newDB(t)
+	s := mustSite(t, d, "alpha")
+
+	// 一条已被消费的账本：redeem → consume，Purge 应清掉
+	used := newChallenge(t, d, s.ID, time.Hour)
+	r, err := d.Redeem(t.Context(), used.ID, time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ConsumeResponse(t.Context(), r.ID, s.ID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// 一条尝试次数耗尽而作废、且已过期的 challenge
+	dead := newChallenge(t, d, s.ID, time.Hour)
+	for range MaxFailedAttempts {
+		if _, _, err := d.FailAttempt(t.Context(), dead.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := d.h.ExecContext(t.Context(), `UPDATE challenges SET expires_at=? WHERE id=?`,
+		formatTime(time.Now().Add(-time.Hour).UTC()), dead.ID); err != nil {
+		t.Fatal(err)
+	}
+	live := newChallenge(t, d, s.ID, time.Hour)
+
+	nr, nc, err := d.Purge(t.Context(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nr < 1 || nc < 1 {
+		t.Fatalf("清理行数 responses=%d challenges=%d", nr, nc)
+	}
+	if _, err := d.Challenge(t.Context(), live.ID); err != nil {
+		t.Fatalf("未过期的 issued challenge 不该被清理: %v", err)
+	}
+	if _, err := d.Challenge(t.Context(), dead.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("作废且过期的 challenge 应被清理，got %v", err)
+	}
+	if _, err := d.ConsumeResponse(t.Context(), r.ID, s.ID, time.Now()); !errors.Is(err, ErrConsumed) {
+		t.Fatal("清理后重放必须失败")
+	}
+}
+
+func TestForeignKeysEnforced(t *testing.T) {
+	d := newDB(t)
+	_, err := d.h.ExecContext(t.Context(), `
+INSERT INTO challenges(id, site_id, pow_seed, pow_bits, status, attempts, created_at, expires_at)
+VALUES('orphan', 99999, x'00', 12, 'issued', 0, '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z')`)
+	if err == nil {
+		t.Fatal("foreign_keys 未生效：悬挂引用被接受")
+	}
+}
+
+func TestCheckConstraints(t *testing.T) {
+	d := newDB(t)
+	site := mustSite(t, d, "alpha")
+	const (
+		created = "2026-01-01T00:00:00Z"
+		expires = "2026-01-02T00:00:00Z"
+	)
+	insertChallenge := `INSERT INTO challenges(id, site_id, pow_seed, pow_bits, status, attempts, created_at, expires_at)
+		VALUES(?,?,?,?,?,?,?,?)`
+	cases := []struct {
+		name string
+		args []any
+	}{
+		{"bits 越界", []any{"c1", site.ID, []byte{0}, 99, statusIssued, 0, created, expires}},
+		{"未知状态", []any{"c2", site.ID, []byte{0}, 12, "bogus", 0, created, expires}},
+		{"attempts 越界", []any{"c3", site.ID, []byte{0}, 12, statusIssued, 99, created, expires}},
+	}
+	for _, c := range cases {
+		if _, err := d.h.ExecContext(t.Context(), insertChallenge, c.args...); err == nil {
+			t.Errorf("CHECK 约束未拦住：%s", c.name)
+		}
+	}
+	if _, err := d.h.ExecContext(t.Context(),
+		`INSERT INTO responses(id, challenge_id, site_id, created_at, expires_at, used) VALUES(?,?,?,?,?,?)`,
+		"r1", "no-such-challenge", site.ID, created, expires, 7); err == nil {
+		t.Error("responses.used 非法值或悬挂引用应被拒绝")
+	}
+}
+
+// readFile 用于按值扫描 DB 文件（路径始终来自 t.TempDir()，不含外部输入）。
+func readFile(path string) ([]byte, error) { return os.ReadFile(path) }

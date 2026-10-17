@@ -1,4 +1,9 @@
 bin/
+# 仓库根可能意外产生的二进制
+/devclient
+/server
+/epocha
+*.test
 *.db
 *.db-wal
 *.db-shm

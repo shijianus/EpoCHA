@@ -73,12 +73,16 @@ widget-size:
 	@echo "阶段 4 交付物：web/widget/v1.js 尚未生成（DESIGN §17 阶段 4）"; exit 1
 
 .PHONY: secret-scan
+# 按值扫描：测试内部注入哨兵值并断言其不出现在日志/响应/启动输出里（DESIGN §14-7）。
+# 真实服务进程的按值扫描在 docs/scripts/stage1.sh 里做（两者互补）。
 secret-scan:
-	@echo "阶段 2 交付物：按值扫描脚本 docs/scripts/secret-scan.sh 尚未创建（DESIGN §14-7）"; exit 1
+	go test -count=1 -v -run 'TestNothingLeaksSecretsOrKeys' ./internal/api/
+	go test -count=1 -v -run 'TestRunRefusesWithoutSecrets|TestServeHealthzAndGracefulShutdown' ./cmd/server/
+	@echo "按值扫描通过：哨兵 secret 未出现在日志、错误响应与启动输出中"
 
 .PHONY: stage1-check
 stage1-check:
-	@echo "阶段 1 交付物：docs/scripts/stage1.sh（curl 全流程）尚未创建（DESIGN §17 阶段 1）"; exit 1
+	@bash docs/scripts/stage1.sh
 
 .PHONY: tidy
 tidy:

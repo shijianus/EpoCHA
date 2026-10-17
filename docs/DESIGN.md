@@ -395,6 +395,8 @@ worker         = 单个后台 goroutine，priority=让出 CPU（每补 10 题 sl
 ```
 错误码只用 reCAPTCHA 已定义的族：`missing-input-secret` / `invalid-input-secret` / `missing-input-response` /
 `invalid-input-response` / `bad-request` / `timeout-or-duplicate`；内部失败原因只进日志（§14-7）。
+**唯一的扩展是 `internal-error`**：仅在服务端自身故障（库不可用等）时随 **HTTP 5xx** 返回，业务方必须按"验证未完成"处理，
+不得当作"验证失败"放行。`/siteverify` 的判定类失败一律 HTTP 200（reCAPTCHA 语义），包含请求体超限这类形态错误。
 字段语义与限制，**不声称无条件兼容所有现成 SDK**（v2/v3 的额外参数如 `response` 长度、`origin`、`token` 校验均未实现）：
 - `secret`：先做摘要比对再碰任何状态；**secret 不匹配时不得消费该站点外的合法 token**（先鉴站点、再消费，测试覆盖）。
 - `response`：必须是本 `secret` 所属站点签发的 token（`sid` 一致性）。
@@ -462,10 +464,10 @@ swap: 512M + vm.swappiness=10；GOMEMLIMIT=56MiB GOMAXPROCS=1
 | 项 | 目标/估算 | 实测 | 守护方式 |
 |---|---|---|---|
 | 常驻 RSS | `[目标]` <100MB（Go 基线 + 字体光栅 + SQLite page cache + 池缓冲，阶段 3 后才有光栅项） | 待填 | `GOMEMLIMIT`；测试读 `/proc/self/status` 断言峰值 |
-| 二进制体积 | `[目标]` ≤35MB（含 modernc/sqlite） | 1MB（阶段 1 尚无 sqlite 与字体进主二进制路径时测得，会随阶段 3 上升） | `make size` |
+| 二进制体积 | `[目标]` ≤35MB（含 modernc/sqlite） | `[实测]` 9.19MB（9,634,084 字节；2026-10-17，linux/arm64，go1.24.5，`-trimpath -ldflags "-s -w"`，含 modernc SQLite 驱动与内嵌迁移） | `make size` |
 | 内嵌字体 | `[估算]` Latin 1–3MB；CJK 子集 4–6MB | 待填（阶段 3） | 子集脚本 + NOTICE |
 | 池预生成 CPU | `[目标]` 平均 ≤15%（补 10 题睡 100ms） | 待填（阶段 3） | metric `pool_gen_ms` 直方图 |
-| `/siteverify` p99 | `[目标]` <60ms | 待填 | 基准测试 `TestBenchmarkSiteVerify` |
+| `/siteverify` p99 | `[目标]` <60ms | 待填（阶段 1 未做性能测量） | 基准测试 `TestBenchmarkSiteVerify` |
 | `/api/challenge` p99 | `[目标]` <120ms | 待填 | 同上 |
 | 混合吞吐 | `[目标]` ≥150 req/s 且无 `SQLITE_BUSY` | 待填 | `make loadtest`（阶段 5） |
 | PoW 求解时延 | `[估算]` bits=18 浏览器 300–900ms | 待填（阶段 4，需真实设备） | widget 上报 `pow_impl` 与耗时 |
@@ -509,7 +511,8 @@ cmd/devclient/       开发/验收客户端：真实暴力求解 PoW，驱动 st
 web/widget/          v1.js + i18n + 样式（阶段 4）
 deploy/docker/       Dockerfile + compose（阶段 5）
 deploy/cloudflare/   Worker + wrangler.toml（阶段 5 之后评估）
-migrations/          NNNN_*.sql（阶段 1 起，go:embed）
+internal/store/migrations/  NNNN_*.sql（阶段 1 起）——偏离"顶层 migrations/"是有意的：
+                     go:embed 只能嵌入本包子树，放在仓库根就无法编进单二进制
 docs/                DESIGN.md、DECISIONS.md、scripts/（验收脚本）
 ```
 调整需说明理由；测试与被测文件同包同目录（`*_test.go`），集成测试用 `t.TempDir()` 建独立 DB，禁止依赖外部环境。
@@ -585,4 +588,9 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
 
 - 2026-10-17 v1：阶段 0 定稿（目录骨架、三层防线、API 契约、SQLite schema、密钥体系、CF 折衷、四题型反枚举设计、威胁模型与残余风险 R1–R8）。
 - 2026-10-17 v1.1：模块路径改为 `github.com/shijianus/EpoCHA`（远端 private 仓库已确定）。§6 新增管理密钥引导与**密钥材料不入仓库**硬约束；真实密钥走 `/etc/epocha/env`（0600）与 DB 分离存放。理由见 DECISIONS。
+- 2026-10-17 **v2.1（阶段 1 实现完成）**：按 v2 落地 `config/store/pow/token/risk/api/cmd`；实测二进制 9.19MB（回填 §13）；
+  §10.1 明确 `internal-error` 是唯一超出 reCAPTCHA 族的扩展码且只随 5xx 出现；§15 记录 `migrations/` 实际位于
+  `internal/store/migrations/`（`go:embed` 只能嵌入本包子树）。验收期间修掉四个真实缺陷：token tag 比较误将 base64 文本与解码字节相比；
+  限流 `RetryAfter` 使用真实时钟而非注入时钟；devclient 随机起点可能为负导致提交非法 nonce（改为复用 `internal/pow` 判定）；
+  `serve()` 用 `fmt.Fprintf` 与 slog 并发写同一 writer 触发数据竞争（启动信息统一走 slog）。
 - 2026-10-17 **v2（阶段 1 前的设计校正）**：ADR-001 Cloudflare 事实更正与边缘定位改述；ADR-002 题库安全论证拆为 M1–M4 四指标并撤回"随机性 ⇒ 抗 AI"的推论；ADR-003 payload/verifier 分离、取消强制 HMAC 精确匹配；ADR-004 一次性消费的四条保证与实现手段分离（删除"单连接/`BEGIN IMMEDIATE` 是唯一合法实现"，纠正 `sql.Tx` 嵌套 BEGIN 错误）；ADR-005 防重放持久化提前到阶段 1（含新增 §5.1 实际 schema）；ADR-006 数字标注 `[目标]/[估算]/[实测]`、淘汰改分级、安全状态提交后才返回成功；ADR-007 `modernc.org/sqlite` 锁 v1.46.1 与 `GOTOOLCHAIN=local`；ADR-008 两处措辞收紧。**原始错误表述只在 `docs/DECISIONS.md` 留存。**

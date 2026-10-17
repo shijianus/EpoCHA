@@ -1,6 +1,294 @@
+// Package config 把 flag 与环境变量装配成运行时配置（DESIGN §12、ADR-005）。
+//
+// 密钥只从环境变量或密钥文件读取，不走命令行参数：argv 在同机 `ps` 与容器 inspect 里是可见的。
 package config
 
-// Package config 负责把 flag 与环境变量装配成运行时配置（DESIGN §12、§14）。
-//
-// 不使用 YAML/TOML 依赖：字段少且需要与 flag 一一对应。
-// 主密钥与 pepper 缺失时必须拒绝启动，不得静默降级。装载逻辑在阶段 1 实现。
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	minKeyBytes       = 32
+	minSecretLen      = 16
+	maxSites          = 64
+	sitesFileMaxBytes = 1 << 16
+
+	envMasterKey     = "EPOCHA_MASTER_KEY"
+	envPrevMasterKey = "EPOCHA_MASTER_KEY_PREVIOUS"
+	envPepper        = "EPOCHA_PEPPER"
+	envListen        = "EPOCHA_LISTEN"
+	envDB            = "EPOCHA_DB"
+	envSites         = "EPOCHA_SITES_FILE"
+	envChalTTL       = "EPOCHA_CHALLENGE_TTL_SEC"
+	envRespTTL       = "EPOCHA_RESPONSE_TTL_SEC"
+	envTrustProxy    = "EPOCHA_TRUST_PROXY"
+	envTrustedNets   = "EPOCHA_TRUSTED_PROXIES"
+	envRateIP        = "EPOCHA_RATE_IP_RPM"
+	envRateSite      = "EPOCHA_RATE_SITE_RPM"
+	envRateStates    = "EPOCHA_RATE_MAX_STATES"
+)
+
+var (
+	ErrInvalid = errors.New("config: 配置不合法")
+
+	// 缺密钥时的错误文案：绝不包含任何密钥材料。
+	ErrMissingMasterKey = fmt.Errorf("%w: 缺少 %s", ErrInvalid, envMasterKey)
+	ErrMissingPepper    = fmt.Errorf("%w: 缺少 %s", ErrInvalid, envPepper)
+)
+
+// Site 是阶段 1 由配置装载的一个站点（完整站点管理属阶段 2）。
+type Site struct {
+	Name    string `json:"name"`
+	SiteKey string `json:"site_key"`
+	Secret  string `json:"secret"`
+	PowBits uint8  `json:"pow_bits"`
+}
+
+// Config 是服务运行参数。
+type Config struct {
+	// ShowVersion 由 --version 置位。版本查询不要求密钥与数据库，Load 在该情况下提前返回。
+	ShowVersion bool
+
+	Listen       string
+	DBPath       string
+	MasterKey    []byte
+	PrevMaster   []byte
+	Pepper       []byte
+	Sites        []Site
+	ChallengeTTL time.Duration
+	ResponseTTL  time.Duration
+
+	TrustProxy     bool
+	TrustedProxies []string
+
+	RateIPRPM    int
+	RateSiteRPM  int
+	RateMaxState int
+}
+
+// Load 解析命令行参数与环境变量。getenv 为 os.Getenv，测试里可注入。
+func Load(args []string, getenv func(string) string) (*Config, error) {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	fs := flag.NewFlagSet("server", flag.ContinueOnError)
+	fs.SetOutput(io.Discard) // 参数错误由我们包装，不打印用法（避免把内部参数名暴露给外部）
+	showVersion := fs.Bool("version", false, "打印版本信息后退出")
+	listen := fs.String("listen", "", "监听地址（覆盖 "+envListen+"）")
+	db := fs.String("db", "", "SQLite 文件路径（覆盖 "+envDB+"）")
+	sites := fs.String("sites", "", "站点配置 JSON 文件（覆盖 "+envSites+"）")
+	if err := fs.Parse(args); err != nil {
+		return nil, fmt.Errorf("%w: 命令行参数", ErrInvalid)
+	}
+	// 版本查询不需要密钥与数据库，提前返回，避免"缺密钥拒绝启动"波及 --version。
+	if *showVersion {
+		return &Config{ShowVersion: true}, nil
+	}
+
+	c := &Config{
+		Listen:       firstNonEmpty(*listen, getenv(envListen), "127.0.0.1:8080"),
+		DBPath:       firstNonEmpty(*db, getenv(envDB)),
+		ChallengeTTL: 180 * time.Second,
+		ResponseTTL:  120 * time.Second,
+		RateIPRPM:    60,
+		RateSiteRPM:  300,
+		RateMaxState: 8192,
+	}
+	var err error
+	if c.MasterKey, err = readKey(getenv, envMasterKey); err != nil {
+		return nil, err
+	}
+	if c.Pepper, err = readKey(getenv, envPepper); err != nil {
+		return nil, err
+	}
+	if v := getenv(envPrevMasterKey); v != "" {
+		if c.PrevMaster, err = readKey(getenv, envPrevMasterKey); err != nil {
+			return nil, err
+		}
+	}
+	if c.DBPath == "" {
+		return nil, fmt.Errorf("%w: 缺少数据库路径（--db 或 %s）", ErrInvalid, envDB)
+	}
+	// 显式设置值与"未设置"必须区分：把 EPOCHA_*_TTL_SEC=0 悄悄回落到默认值，
+	// 会让运维以为改了配置而实际没改。
+	if d, ok, err := parseDuration(getenv(envChalTTL)); err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrInvalid, envChalTTL)
+	} else if ok {
+		c.ChallengeTTL = d
+	}
+	if d, ok, err := parseDuration(getenv(envRespTTL)); err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrInvalid, envRespTTL)
+	} else if ok {
+		c.ResponseTTL = d
+	}
+	if c.ChallengeTTL < time.Second || c.ResponseTTL < time.Second {
+		return nil, fmt.Errorf("%w: TTL 必须 ≥1s", ErrInvalid)
+	}
+
+	switch strings.ToLower(getenv(envTrustProxy)) {
+	case "", "false", "0":
+	case "true", "1":
+		c.TrustProxy = true
+	default:
+		return nil, fmt.Errorf("%w: %s 必须是 true/false", ErrInvalid, envTrustProxy)
+	}
+	for _, net := range strings.Split(getenv(envTrustedNets), ",") {
+		if net = strings.TrimSpace(net); net != "" {
+			c.TrustedProxies = append(c.TrustedProxies, net)
+		}
+	}
+
+	if n, ok, err := parseInt(getenv(envRateIP)); err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrInvalid, envRateIP)
+	} else if ok {
+		c.RateIPRPM = n
+	}
+	if n, ok, err := parseInt(getenv(envRateSite)); err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrInvalid, envRateSite)
+	} else if ok {
+		c.RateSiteRPM = n
+	}
+	if n, ok, err := parseInt(getenv(envRateStates)); err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrInvalid, envRateStates)
+	} else if ok {
+		c.RateMaxState = n
+	}
+	if c.RateIPRPM <= 0 || c.RateSiteRPM <= 0 || c.RateMaxState <= 0 {
+		return nil, fmt.Errorf("%w: 限流参数必须为正", ErrInvalid)
+	}
+
+	sitesPath := firstNonEmpty(*sites, getenv(envSites))
+	if sitesPath == "" {
+		return nil, fmt.Errorf("%w: 缺少站点配置（--sites 或 %s）", ErrInvalid, envSites)
+	}
+	if c.Sites, err = loadSites(sitesPath); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// loadSites 读取站点 JSON。secret 字段是明文密钥材料，只在本函数内短暂存在。
+func loadSites(path string) ([]Site, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: 无法读取站点文件", ErrInvalid)
+	}
+	defer f.Close()
+
+	body, err := io.ReadAll(io.LimitReader(f, sitesFileMaxBytes+1))
+	if err != nil || len(body) > sitesFileMaxBytes {
+		return nil, fmt.Errorf("%w: 站点文件过大或不可读", ErrInvalid)
+	}
+	var raw []struct {
+		Name    string `json:"name"`
+		SiteKey string `json:"site_key"`
+		Secret  string `json:"secret"`
+		PowBits *int   `json:"pow_bits"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&raw); err != nil {
+		return nil, fmt.Errorf("%w: 站点文件不是合法的 JSON 数组", ErrInvalid)
+	}
+	if len(raw) == 0 || len(raw) > maxSites {
+		return nil, fmt.Errorf("%w: 站点数量须在 1..%d", ErrInvalid, maxSites)
+	}
+	out := make([]Site, 0, len(raw))
+	seenKey := map[string]bool{}
+	seenName := map[string]bool{}
+	for _, r := range raw {
+		s := Site{Name: strings.TrimSpace(r.Name), SiteKey: strings.TrimSpace(r.SiteKey), Secret: r.Secret}
+		switch {
+		case s.Name == "" || s.SiteKey == "" || s.Secret == "":
+			return nil, fmt.Errorf("%w: 站点 name/site_key/secret 不可为空", ErrInvalid)
+		case len(s.Secret) < minSecretLen:
+			// 文案里不回显 secret 本身
+			return nil, fmt.Errorf("%w: 站点 %q 的 secret 短于 %d 字符", ErrInvalid, s.Name, minSecretLen)
+		case seenKey[s.SiteKey]:
+			return nil, fmt.Errorf("%w: site_key 重复", ErrInvalid)
+		case seenName[s.Name]:
+			return nil, fmt.Errorf("%w: 站点名重复", ErrInvalid)
+		}
+		// 未指定时给一个保守默认值，而不是让 0 穿过 DB 的 CHECK 约束。
+		bits := 18
+		if r.PowBits != nil {
+			bits = *r.PowBits
+		}
+		if bits < 12 || bits > 24 {
+			return nil, fmt.Errorf("%w: 站点 %q 的 pow_bits=%d 越界", ErrInvalid, s.Name, bits)
+		}
+		s.PowBits = uint8(bits)
+		seenKey[s.SiteKey], seenName[s.Name] = true, true
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+// readKey 读取 base64 编码的密钥材料，要求解码后 ≥32 字节。
+func readKey(getenv func(string) string, name string) ([]byte, error) {
+	v := strings.TrimSpace(getenv(name))
+	if v == "" {
+		if name == envPepper {
+			return nil, ErrMissingPepper
+		}
+		return nil, ErrMissingMasterKey
+	}
+	k, err := base64.StdEncoding.DecodeString(v)
+	if err != nil {
+		// 不回显原值，也不回显解码错误细节
+		return nil, fmt.Errorf("%w: %s 不是合法 base64", ErrInvalid, name)
+	}
+	if len(k) < minKeyBytes {
+		return nil, fmt.Errorf("%w: %s 解码后短于 %d 字节", ErrInvalid, name, minKeyBytes)
+	}
+	return k, nil
+}
+
+// SafeSummary 是可安全写入启动输出与日志的一行摘要。
+func (c *Config) SafeSummary() string {
+	return fmt.Sprintf("listen=%s db=%s sites=%d challenge_ttl=%s response_ttl=%s trust_proxy=%t ip_rpm=%d site_rpm=%d",
+		c.Listen, c.DBPath, len(c.Sites), c.ChallengeTTL, c.ResponseTTL, c.TrustProxy, c.RateIPRPM, c.RateSiteRPM)
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// parseDuration 返回 (值, 是否显式设置, 错误)。空串表示未设置。
+func parseDuration(v string) (time.Duration, bool, error) {
+	if strings.TrimSpace(v) == "" {
+		return 0, false, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0, true, errors.New("invalid")
+	}
+	return time.Duration(n) * time.Second, true, nil
+}
+
+// parseInt 同 parseDuration，用于计数型配置。
+func parseInt(v string) (int, bool, error) {
+	if strings.TrimSpace(v) == "" {
+		return 0, false, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, true, errors.New("invalid")
+	}
+	return n, true, nil
+}

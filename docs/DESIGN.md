@@ -1043,7 +1043,11 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
   ⑥ 故障注入回归的红名单从 4 条更正为实跑的 **7 条**（store 3 + api 4，见 §17）；
   ⑦ 补上一条验收要求却缺失的测试：`pow_question` 答错终结的 challenge **经进程重启后**拿正确答案仍必须被拒、
   其绑定题不得回到 `ready`（`TestFailedChallengeStaysFailedAfterRestart`；此前只测了"站点停用导致的版本失效"那条路径，
-  没有测"答案错误导致的终态"这条路径的重启语义）。
+  没有测"答案错误导致的终态"这条路径的重启语义）；
+  ⑧ `TestAnswerIsBoundToItsOwnChallenge` 原来在两道随机题面恰好相同时 `t.Skip()`，与本节"3A 无 `t.Skip`"的声明
+  和 AGENTS 的禁令直接冲突（跳过会把这条安全性质的覆盖率交给概率，且 CI 永远绿）。改为**有界重抽**到答案不同为止，
+  6 次仍撞同一个答案就 `t.Fatalf`——那时该报错的是"池多样性塌了"。3A 测试文件里现在没有任何 `t.Skip`；
+  仓库剩余的 2 处都是阶段 5 的显式占位（排序白名单、分级淘汰），按约定不计入本阶段验收。
   另外：`burnQuestionTx` 的 `terminal_at` 原用 `time.Now()`（与注入时钟两套时间源）改为传入的 `now`；
   池 worker 的迟滞撤防原用**跨桶累计**的 `made` 判定（第二个桶会被第一个桶的产量提前撤防）改为按桶计数；
   删除两个无人使用的契约字段/常量（`generator.Params.Binding`、`MaxInputLen`）与管理面一处 `_ = g` 死赋值。

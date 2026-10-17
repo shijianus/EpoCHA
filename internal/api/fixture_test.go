@@ -16,11 +16,17 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
+	_ "modernc.org/sqlite"
+
+	"github.com/shijianus/EpoCHA/internal/eval"
 	"github.com/shijianus/EpoCHA/internal/generator"
 	"github.com/shijianus/EpoCHA/internal/store"
 	"github.com/shijianus/EpoCHA/internal/token"
@@ -61,7 +67,7 @@ func answerVerifier(t *testing.T, master, nonce []byte, canonicalAnswer string) 
 func (h *harness) seedQuestions(t *testing.T, difficulty int, qs ...seededQuestion) []string {
 	t.Helper()
 	ids := make([]string, 0, len(qs))
-	for i, q := range qs {
+	for _, q := range qs {
 		genID := q.GeneratorID
 		if genID == "" {
 			genID = generator.ArithID
@@ -78,12 +84,14 @@ func (h *harness) seedQuestions(t *testing.T, difficulty int, qs ...seededQuesti
 		if _, err := g.SanitizePublic(payload); err != nil {
 			t.Fatalf("夹具题面不合法: %v", err)
 		}
+		idx := h.seedCount
+		h.seedCount++
 		nonce := make([]byte, 16)
 		copy(nonce, []byte("epocha-fixture-q"))
-		nonce[15] = byte(i + 1)
-		created := h.clock.Add(time.Duration(i) * time.Second)
+		nonce[15] = byte(idx + 1)
+		created := h.clock.Add(time.Duration(idx) * time.Second)
 		row := &store.PoolQuestion{
-			ID:          "fixture" + hex.EncodeToString([]byte{byte(i), byte(len(qs))}),
+			ID:          "fixture" + hex.EncodeToString([]byte{byte(idx >> 8), byte(idx), byte(len(qs))}),
 			GeneratorID: genID,
 			Version:     g.Version(),
 			Difficulty:  difficulty,
@@ -92,8 +100,9 @@ func (h *harness) seedQuestions(t *testing.T, difficulty int, qs ...seededQuesti
 			Verifier:    answerVerifier(t, h.cfg.MasterKey, nonce, q.Answer),
 			CreatedAt:   created,
 			// 过期时间按序号递增：领取查询按 expires_at 升序取题，于是发出顺序 = 给定顺序。
-			ExpiresAt: h.clock.Add(30*time.Minute + time.Duration(i)*time.Minute),
+			ExpiresAt: h.clock.Add(30*time.Minute + time.Duration(idx)*time.Minute),
 			Asset:     q.Asset,
+			AssetMime: assetMimeFor(q.Asset),
 		}
 		if err := h.db.InsertQuestion(context.Background(), row,
 			store.PoolLimits{MaxRows: 500, MaxImageBytes: 64 << 20}); err != nil {
@@ -102,6 +111,100 @@ func (h *harness) seedQuestions(t *testing.T, difficulty int, qs ...seededQuesti
 		ids = append(ids, row.ID)
 	}
 	return ids
+}
+
+// hasSuccess 读 /siteverify 的 success 字段（缺省即 false）。
+func (r reply) hasSuccess() bool {
+	v, ok := r.got["success"].(bool)
+	return ok && v
+}
+
+// tokenQuestionKey 取与生产同一条派生路径的题目判分密钥（K(qver)）。
+func tokenQuestionKey(t *testing.T) []byte {
+	t.Helper()
+	return token.DerivePurpose(testMasterKey, "qver")
+}
+
+// imageSiteWithSecret 建一个用视觉题型的站点并返回它的验证凭据（演示后端持有的那把 secret）。
+func (h *harness) imageSiteWithSecret(t *testing.T, name, siteKey string, difficulty int) (*store.Site, string) {
+	t.Helper()
+	site, secret, err := h.db.CreateSite(context.Background(), name, siteKey, store.SitePolicy{
+		PowBits: 12, VerifyMode: store.ModePowQuestion,
+		GeneratorID: generator.TextImageID, Difficulty: difficulty,
+		AllowMissingOrigin: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateSite: %v", err)
+	}
+	return site, secret
+}
+
+// restartWithRegistry 模拟"改过生成器白名单之后重启"：
+// 库与主密钥不变（token 与账本仍然有效），只有**可判分的题型集合**变了。
+// 这就是运维用 EPOCHA_GENERATORS 关掉某个题型后的真实形状。
+func (h *harness) restartWithRegistry(t *testing.T, gens *generator.Registry) {
+	t.Helper()
+	for _, f := range h.cleanup {
+		f()
+	}
+	h.cleanup = nil
+	reopened, err := store.Open(context.Background(), h.dbPath, testPepper)
+	if err != nil {
+		t.Fatalf("重开库: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	h.db = reopened
+	signer, err := token.NewSigner(testMasterKey, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(h.cfg, reopened, signer, gens, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.now = func() time.Time { return h.clock }
+	h.srv, h.gens = srv, gens
+}
+
+// rawSQLite 用**第二个独立句柄**打开同一个库文件跑维护性 SQL（测试里改资产列用）。
+// 不给 store.DB 开"任意 SQL 出口"：那等于在生产对象上挂一个后门。
+func rawSQLite(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	h, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	return h
+}
+
+// evalStream 是测试/评测用的确定性熵流。**只**在测试里出现：
+// 服务的生成路径由 pool 传 crypto/rand，没有任何固定种子回落。
+func evalStream(t *testing.T, seed string) io.Reader {
+	t.Helper()
+	r, err := eval.NewDeterministic([]byte(seed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// imageAnswerFromSeed 取"某个 seed 下生产路径会用的答案"（与 imageFixture 同源）。
+func imageAnswerFromSeed(t *testing.T, seed string) string {
+	t.Helper()
+	a, err := generator.TextImageAnswerFrom(evalStream(t, "epocha-api-"+seed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+// assetMimeFor 与生成器的声明一致：有资产就是 PNG，没有就是空串（store 侧要求成对）。
+func assetMimeFor(asset []byte) string {
+	if len(asset) == 0 {
+		return ""
+	}
+	return store.MimeTypePNG
 }
 
 // arithQuestion 构造一条算术题夹具。

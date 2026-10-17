@@ -264,6 +264,10 @@ func errClass(err error) string {
 		return "generate-exhausted"
 	case errors.Is(err, generator.ErrBadParams):
 		return "bad-params"
+	case errors.Is(err, store.ErrBadConfig):
+		// 媒体声明与资产不配对、题面超限这类"实现/配置错误"必须与瞬时故障分得开：
+		// 前者重试多少次都一样，运维看到的类别不该是 unspecified
+		return "bad-config"
 	case errors.Is(err, generator.ErrUnknownGenerator):
 		return "unknown-generator"
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):

@@ -47,9 +47,12 @@ type harness struct {
 	bodies  []string
 	bodiesM sync.Mutex // 并发测试里多路 goroutine 共用同一个 harness 记录响应体
 	clock   time.Time
-	siteA   *store.Site
-	siteB   *store.Site
-	cleanup []func()
+	// seedCount 给受控夹具的池行一个单调序号：既保证 id 不重复，
+	// 也让"按 expires_at 升序领取"的顺序在多次 seed 之间仍然可复现。
+	seedCount int
+	siteA     *store.Site
+	siteB     *store.Site
+	cleanup   []func()
 }
 
 // allBodies 是并发安全地取回全部响应体（按值扫描哨兵用）。
@@ -77,6 +80,7 @@ func newHarness(t *testing.T, tune func(*config.Config)) *harness {
 		tune(cfg)
 	}
 	h := &harness{t: t, logs: &bytes.Buffer{}, clock: time.Now().UTC().Truncate(time.Second), cfg: cfg}
+	_ = testMasterKey
 
 	db, err := store.Open(context.Background(), cfg.DBPath, cfg.Pepper)
 	if err != nil {
@@ -124,7 +128,11 @@ func newHarness(t *testing.T, tune func(*config.Config)) *harness {
 	return h
 }
 
-// testRegistry 只登记阶段 3A 的基线题型；verifier 密钥走与生产同一条派生路径。
+// testMasterKey 与 newHarness 用的是同一把主密钥：restart 之后签发的 token 仍可验签。
+var testMasterKey = bytes.Repeat([]byte{0x5a}, 32)
+
+// testRegistry 登记本程序**全部**生成器（3A 的算术基线 + 3B 的视觉题型）；
+// verifier 密钥走与生产同一条派生路径（token.DerivePurpose(master, "qver")）。
 func testRegistry(t *testing.T, master []byte) *generator.Registry {
 	t.Helper()
 	r := generator.NewRegistry()
@@ -134,6 +142,13 @@ func testRegistry(t *testing.T, master []byte) *generator.Registry {
 		t.Fatal(err)
 	}
 	if err := r.Register(g); err != nil {
+		t.Fatal(err)
+	}
+	img, err := generator.NewTextImage(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Register(img); err != nil {
 		t.Fatal(err)
 	}
 	return r

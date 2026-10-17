@@ -197,6 +197,63 @@ CREATE TABLE audit (ts TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
 
 **查询安全**：一律 `db.Query(sql, args...)` 参数化；动态列名/排序（统计接口）必须白名单映射，禁止字符串拼接。
 
+### 5.3 阶段 2 实际实现（多站点、密钥生命周期、来源策略、审计）
+
+迁移是**增量**的（`0002_stage2.sql` + Go 侧数据步骤），阶段 1 的库升级后账本数据全部保留；
+实测（本机 modernc 内置 SQLite 3.51.2）**删不掉带 UNIQUE 约束的列**（`cannot drop UNIQUE column`），
+所以 `sites.secret_mac` 留在 schema 里但被**中和**成 `HMAC(pepper, "epocha/v1|retired|" + 旧摘要)`——
+任何真实 secret 都匹配不上它，凭据的权威位置变成 `site_secrets`。有测试同时钉住"旧列不可用于认证"
+与"旧 secret 升级后仍可用"两件事。
+
+```sql
+-- 0002_stage2.sql（阶段 2 实现）
+ALTER TABLE sites ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1));
+ALTER TABLE sites ADD COLUMN version INTEGER NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 2147483647);
+ALTER TABLE sites ADD COLUMN challenge_ttl_sec INTEGER NOT NULL DEFAULT 180 CHECK (challenge_ttl_sec BETWEEN 1 AND 3600);
+ALTER TABLE sites ADD COLUMN response_ttl_sec INTEGER NOT NULL DEFAULT 120 CHECK (response_ttl_sec BETWEEN 1 AND 3600);
+ALTER TABLE sites ADD COLUMN rate_ip_rpm INTEGER NOT NULL DEFAULT 60 CHECK (rate_ip_rpm BETWEEN 1 AND 100000);
+ALTER TABLE sites ADD COLUMN rate_site_rpm INTEGER NOT NULL DEFAULT 300 CHECK (rate_site_rpm BETWEEN 1 AND 100000);
+ALTER TABLE sites ADD COLUMN allow_missing_origin INTEGER NOT NULL DEFAULT 0 CHECK (allow_missing_origin IN (0,1));
+ALTER TABLE challenges ADD COLUMN origin TEXT NOT NULL DEFAULT '';   -- 签发时绑定的规范化来源
+CREATE TABLE site_secrets (key_id TEXT PRIMARY KEY, site_id INTEGER NOT NULL REFERENCES sites(id),
+  secret_mac TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT);
+CREATE TABLE site_origins (site_id INTEGER NOT NULL REFERENCES sites(id), origin TEXT NOT NULL,
+  created_at TEXT NOT NULL, PRIMARY KEY(site_id, origin));
+CREATE TABLE admin_keys (key_id TEXT PRIMARY KEY, label TEXT NOT NULL UNIQUE, key_mac TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL, revoked_at TEXT);
+CREATE TABLE audit (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, actor TEXT NOT NULL,
+  action TEXT NOT NULL, target TEXT NOT NULL, success INTEGER NOT NULL CHECK (success IN (0,1)));
+```
+
+三个概念必须分开，否则"轮换密钥"会被误写成"换站点"：稳定的内部 `id`（账本外键指向它，永不复用）、
+公开的 `site_key`、以及可多把并存的验证凭据（`site_secrets`，公开 `key_id` 与随机 secret 彼此独立）。
+**撤销用时间戳表达**：`revoked_at IS NULL OR revoked_at > now` 即有效。
+"立即撤销"= 写入当前时刻，"过渡期"= 写入 `now + grace`（上限 86400 秒）。判定只读库，不需要后台任务，重启后同样成立。
+
+**站点版本 `version` 是签名覆盖的一部分**（token claims 的 `svid`，见 §6）。启停站点各提升一次版本，
+于是"停用前签发的未消费 token 不会因为重新启用而复活"这条性质由签名保证，而不是依赖库里恰好还留着那行状态。
+重复启停同一状态不再提升（启停是状态动作，不是计数器）。
+
+**配置生效语义分两类**（阶段 2 定稿，测试逐条覆盖）：
+- *参数类*改动（`pow_bits`、两个 TTL、两个 rpm）沿用**签发快照**：已签发的 challenge 仍按它入库时的难度与
+  过期时间判定，因为权威是账本行 + 签名，不是"当前站点配置"。这类改动**不**提升 `version`。
+- *安全类*动作（停用站点、提升版本、撤销凭据、来源白名单）**立即生效**，不取快照、不缓存：
+  第一版没有分布式缓存，也不引入；`site_secrets`/`sites.enabled` 每次请求都读库。
+  撤销不回滚：一旦写入 `revoked_at`，重新启用站点或重启都不会让它复活。
+
+**清理任务的边界**（阶段 1 复核后修正）：challenge 行只在**没有任何 response 行再引用它**时删除
+（`responses.challenge_id` 有外键，而被兑换过但尚未验证的 response 可以活过所属 challenge）；
+每批 500 行、两条删除同事务。`DELETE` 只归还空闲页，**文件不会自动缩小**（有测试记录实测字节数），
+收缩需要 `VACUUM`，本版不做。审计行保留 90 天后按批清理。
+
+**`hostname` 的来源与保证范围**（阶段 2 起，取代 §10.1 里"仅回显自报值"的旧语义）：
+`/api/challenge` 把请求的规范化 Origin 写进 `challenges.origin` 并被签名绑定；
+`/siteverify` 返回的 `hostname` **取自这一列**，调用方自报的 `hostname` 一律不采信也不回显；
+无来源（站点放行直接调用）时该字段整体缺省。
+保证范围必须说清楚：它表示"这个 challenge 在这个允许来源上签发"。Origin 头由浏览器强制设置、页面脚本改不了，
+但**非浏览器客户端可以任意伪造**，所以它不是机器人身份证明，也没有任何硬件级/浏览器证明/可信远程证明的含义；
+只有签名绑定还不够——被绑定的数据本身对浏览器来源可信，对手工构造的请求不可信。
+
 ## 6. 密钥体系与 token
 
 **主密钥**：`EPOCHA_MASTER_KEY`（32B，env 或 `--master-key-file`，权限 0600）；**pepper**：`EPOCHA_PEPPER`（32B，与 DB 文件分离存放，独立挂载）。两者缺一服务拒绝启动（不静默降级）。
@@ -218,8 +275,19 @@ payload 字段（阶段 1 实现）：`typ`(`chal`|`resp`)、`kid`、`sid`(站�
 `typ`/purpose 匹配 → `exp`/`iat` 时钟窗口 → `sid` 与请求站点一致 → 业务层原子消费。任何一步失败对外都是同一族错误码，不区分原因。
 轮换：`kid` 允许同时存在 current + previous（`--master-key-previous`），旧 token 在 TTL 内自然过期。
 
-`secret_key` 校验：`want = HMAC(pepper, provided_secret)`，`subtle.ConstantTimeCompare(want, site.secret_mac)`。admin_key 同法（存摘要，不存明文）。
-**管理密钥引导**：库中无 admin 记录时，用 `EPOCHA_ADMIN_KEY` 登记其摘要（只此一次，之后靠 `/api/admin/keys/rotate` 与审计管理）；有记录后该环境变量忽略。
+`secret_key` 校验：`want = HMAC(pepper, provided_secret)`，`subtle.ConstantTimeCompare(want, site.secret_mac)`。
+遍历该表全部行、不因命中而提前返回，避免用响应时序定位"命中第几条记录"。
+**阶段 2 保持站点 secret 的摘要算法不变**（不加域分隔串）：`0002` 迁移要把 `sites.secret_mac` 原样搬进
+`site_secrets`，改算法会让升级后的旧密钥全部失效（ADR-010）。管理凭据是新东西，因此单独域分隔：
+`admin_mac = HMAC(pepper, sha256hex("epocha/v1|admin|" + key))`，所以同一个明文当作站点 secret 和当作管理凭据
+时摘要不同，两类用途不可互换。
+生成的 secret 形如 `sk_<64 hex>`（256 bit 来自 `crypto/rand`），管理凭据形如 `ak_<64 hex>`；
+`sk_`/`ak_` 只是可读标识，熵全部来自随机部分，公开 `key_id` 形如 `k<12 hex>` 与 secret 彼此独立。
+
+**管理密钥引导**（阶段 2 实现）：库中**没有任何 `admin_keys` 记录**时，用 `EPOCHA_ADMIN_KEY` 登记其摘要（label=`bootstrap`）；
+有记录后该环境变量**完全忽略**——否则运维在管理 API 里的撤销会被下一次重启推翻。
+`EPOCHA_ADMIN_KEY` 的值与运维实际发出的 Bearer 值**逐字节相同**（不做 base64 变换），
+否则"登记的形式"与"发送的形式"会变成两套真相。库里没有可用管理凭据时管理 API 一律 401：**缺凭据不等于放开管理功能**。
 日志红线：禁止输出 `secret`、`response`/`token` 全文、`answer`、payload 完整 JSON、未掩码 IP。允许输出：nonce 前 8 字符、site_key、耗时、错误码。
 
 **密钥材料的存放（硬约束）**：`EPOCHA_MASTER_KEY` / `EPOCHA_PEPPER` / 站点 `secret_key` / `admin_key` **一律不进仓库**，即使仓库是 private。
@@ -411,23 +479,62 @@ TTL 有 `[1s, 1h]` 上下界——有效期长度直接决定防重放账本必�
 - `secret`：先做摘要比对再碰任何状态；**secret 不匹配时不得消费该站点外的合法 token**（先鉴站点、再消费，测试覆盖）。
 - `response`：必须是本 `secret` 所属站点签发的 token（`sid` 一致性）。
 - `remoteip`：**阶段 1 忽略**（不参与判定、不写日志）。只有显式开启 trust-proxy 且连接来自受信代理网段时才采信，见 §12。
-- `hostname`：**阶段 1 仅回显调用方自报值**，服务端无域名白名单可裁决，因此它不是安全依据；阶段 2 引入 `site_domains` 后由服务端裁决并可为空。
+- `hostname`：阶段 1 曾"仅回显调用方自报值"；**阶段 2 起改为服务端裁决**——取自签发时绑定的规范化来源（§5.3、§10.3），
+  调用方自报值不采信也不回显，无绑定来源时该字段整体缺省。
 - `challenge_ts`：challenge 创建时间（来自 `challenges.created_at`，非客户端上报）。
 - 不返回 `scores` 等扩展字段以维持兼容；业务方需分数须走内部 `/api/admin/verdicts`（阶段 5，可选）。
 
-### 10.2 管理 API（`Authorization: Bearer <admin_key>`）
+### 10.2 管理 API（阶段 2 实现，`Authorization: Bearer <admin_key>`）
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| POST/GET | `/api/admin/sites` | 站点列表 / 创建（响应含一次性 `secret_key`） |
-| GET/PUT/DELETE | `/api/admin/sites/{id}` | 详情 / 改难度、TTL、限流、阈值 / 吊销 |
-| PUT | `/api/admin/sites/{id}/domains` | 域名白名单全量替换 |
-| PUT | `/api/admin/sites/{id}/generators` | 题型 enabled/weight/difficulty（权重含自动降权） |
-| GET | `/api/admin/pool` | 水位、各生成器 ready 数、pool_miss 计数 |
-| GET | `/api/admin/stats?from=&to=&generator_id=&site_id=` | 通过率、可疑率、平均耗时 |
-| POST | `/api/admin/keys/rotate` | master key kid 轮换登记（previous 生效） |
+| GET | `/api/admin/whoami` | 当前管理凭据的公开 `key_id` |
+| GET/POST | `/api/admin/sites` | 列表（`?after_id=&limit=`，上限 500）/ 创建（**仅此响应**返回一次性 `secret`） |
+| GET/PUT/DELETE | `/api/admin/sites/{id}` | 详情 / 部分更新（指针字段，缺省=不改）/ **软吊销** |
+| POST | `/api/admin/sites/{id}/enable` \| `/disable` | 启停（各提升一次站点版本） |
+| GET/PUT | `/api/admin/sites/{id}/origins` | 允许来源列表 / 全量替换（非法条目整批拒绝） |
+| GET/POST | `/api/admin/sites/{id}/secrets` | 列出凭据元数据 / 新增一把（返回一次性明文） |
+| POST | `/api/admin/sites/{id}/secrets/rotate` | 建新 + 撤旧：`transition_sec=0` 立即撤销，`>0` 为过渡期（≤86400） |
+| POST | `/api/admin/sites/{id}/secrets/{key_id}/revoke` | 撤销指定凭据（同样可带过渡期） |
+| GET/POST | `/api/admin/admin-keys` | 列出管理凭据元数据 / 新增一把 |
+| POST | `/api/admin/admin-keys/{key_id}/revoke` | 撤销管理凭据（自撤销时返回 `warning:"self-revoked"`） |
+| GET | `/api/admin/audit?before_id=&limit=` | 审计倒序游标分页（上限 500） |
 
-管理端全部写 `audit`。输入校验：分页上限 500、字段长度上限、枚举白名单。
+尚未实现（阶段 3/5）：`/api/admin/sites/{id}/generators`、`/api/admin/pool`、`/api/admin/stats`、master key 的 `kid` 轮换登记接口。
+`DELETE /sites/{id}` 是**软吊销**（停用 + 提升版本），不删任何账本行——已消费的 response 行正是"重放必失败"的证据。
+
+管理面的结构隔离与错误族：
+- 管理路由**只挂在独立的 admin 监听器**上（`--admin-listen` / `EPOCHA_ADMIN_LISTEN`，默认 `127.0.0.1:8081`）。
+  公共监听器的路由表里根本没有这些路径，所以从公网打过来得到的是 **404 而不是 401**——不是"有路由但鉴权失败"。
+- 管理 API 有自己的有限码集：`unauthorized` / `forbidden` / `bad-request` / `not-found` / `rate-limited` / `internal-error`，
+  与公开 `/api/*` 码集和 `/siteverify` 的 reCAPTCHA 族都不同族。鉴权失败按来源地址计数，窗口内超限转 429 + `Retry-After`。
+- 管理响应一律 `Cache-Control: no-store`，且**不带任何 CORS 头**（本阶段不做 Cookie 会话，跨源脚本拿不到 Bearer 头）。
+- 每个**写**操作落一条 `audit`（actor = 管理凭据的公开 `key_id`，action，target，success）；只读接口不落审计。
+  审计写失败就不对外声称操作成功。`detail` 列本阶段不写入任何请求体内容；不记 secret、不记 Bearer 值、不记答案。
+- 输入校验：请求体 `http.MaxBytesReader` 64KB、字段长度上限、枚举与数值范围上限、分页上限；未知字段拒绝。
+
+### 10.3 浏览器来源策略与 CORS（阶段 2）
+
+允许来源存放在 `site_origins`，比较前一律规范化为 `scheme://host[:非默认端口]`：
+scheme 只允许 `http`/`https`，host 小写化、IPv6 保留方括号形式、默认端口写入时被剥掉，
+拒绝路径/查询/片段/用户信息/空标签/裸单标签主机名（`localhost` 例外，供开发环境显式放行）。
+**第一版不支持通配符，不自动放行子域，绝不做字符串后缀匹配**：`example.com` 不涵盖 `app.example.com`，
+`evil-example.com` 与 `example.com.evil.net` 都不算 `example.com` 的来源。
+
+| 情形 | 行为 |
+|---|---|
+| Origin 在列表内 | 放行；响应挂 `Access-Control-Allow-Origin: <该来源>` + `Vary: Origin` + `Access-Control-Allow-Credentials: false` |
+| Origin 不在列表内 / 畸形 / `null` | `/api/challenge`、`/api/redeem` 一律 400 `invalid-request`，且**不出现任何** `Access-Control-*` 头 |
+| 无 Origin 头 | 只有 `allow_missing_origin=1` 的站点放行（演示客户端路径）；默认拒绝 |
+| `OPTIONS` 预检 | 只应答预检（204 + `Allow`/`Allow-Methods`/`Allow-Headers`/`Max-Age`），**不签发、不消费、不落库**；未知或停用站点、非法方法或头 → 403 |
+| `/siteverify` | 服务端接口，**不挂 CORS 头**，不允许任意页面在浏览器里读验证结果 |
+
+必须写清楚的定位：**CORS 与来源白名单都不是机器人身份认证**。它们约束的是"哪个浏览器来源可以调用/读到这个站点的产物"，
+前提是调用方是真实浏览器；非浏览器客户端绕过 CORS 直接构造请求，Origin 想写什么写什么。
+因此本层的价值是站点隔离与来源可审计（配合 §5.3 的 `hostname` 语义），不是"证明对端是人"。
+
+阶段 2 起 `/siteverify` 的 `hostname` 不再采信调用方自报值，改为服务端裁决（来源与保证范围见 §5.3）。
+`remoteip` 仍然只在 trust-proxy 显式开启且连接来自受信网段时才有意义（§12）。
 
 ## 11. Widget（阶段 4）
 
@@ -445,8 +552,9 @@ TTL 有 `[1s, 1h]` 上下界——有效期长度直接决定防重放账本必�
 
 **主节点（必需，VPS 1C1G）**
 ```
-systemd 单元 → epocha server --listen :8080 --db /var/lib/epocha/epocha.db ...
-nginx/caddy: TLS 终止 + client_max_body_size 8k + X-Forwarded-For 处理 + /api/admin 仅内网
+systemd 单元 → epocha server --listen :8080 --admin-listen 127.0.0.1:8081 --db /var/lib/epocha/epocha.db ...
+                   （管理监听器与公共监听器分离；管理路由只存在于前者）
+nginx/caddy: TLS 终止 + client_max_body_size 8k + X-Forwarded-For 处理 + 8081 绝不对外暴露（/api/admin 仅内网）
 ufw: 仅放行 443（+ CF IP 段），8080 不对外
 swap: 512M + vm.swappiness=10；GOMEMLIMIT=56MiB GOMAXPROCS=1
 ```
@@ -474,7 +582,7 @@ swap: 512M + vm.swappiness=10；GOMEMLIMIT=56MiB GOMAXPROCS=1
 | 项 | 目标/估算 | 实测 | 守护方式 |
 |---|---|---|---|
 | 常驻 RSS | `[目标]` <100MB（Go 基线 + 字体光栅 + SQLite page cache + 池缓冲，阶段 3 后才有光栅项） | 待填 | `GOMEMLIMIT`；测试读 `/proc/self/status` 断言峰值 |
-| 二进制体积 | `[目标]` ≤35MB（含 modernc/sqlite） | `[实测]` 9.19MB（9,634,084 字节；2026-10-17，linux/arm64，go1.24.5，`-trimpath -ldflags "-s -w"`，含 modernc SQLite 驱动与内嵌迁移） | `make size` |
+| 二进制体积 | `[目标]` ≤35MB（含 modernc/sqlite） | `[实测]` 9.44MB（9,896,228 字节；2026-10-17，linux/arm64，go1.24.5，`-trimpath -ldflags "-s -w"`，含 modernc SQLite 驱动与两条内嵌迁移） | `make size` |
 | 内嵌字体 | `[估算]` Latin 1–3MB；CJK 子集 4–6MB | 待填（阶段 3） | 子集脚本 + NOTICE |
 | 池预生成 CPU | `[目标]` 平均 ≤15%（补 10 题睡 100ms） | 待填（阶段 3） | metric `pool_gen_ms` 直方图 |
 | `/siteverify` p99 | `[目标]` <60ms | 待填（阶段 1 未做性能测量） | 基准测试 `TestBenchmarkSiteVerify` |
@@ -510,11 +618,12 @@ cmd/server/          单二进制入口（flag→config→store→http）
 internal/api/        HTTP 层：路由、校验、限流中间件、错误码
 internal/pow/        PoW 签发与验证、难度校准
 internal/token/      域分隔密钥派生、签名/验签、kid 轮换
-internal/store/      SQLite 打开、PRAGMA、迁移、原子条件消费（阶段 1 实现）
+internal/store/      SQLite 打开、PRAGMA、迁移（0001/0002）、原子条件消费（阶段 1）；
+                     站点与凭据生命周期 sites.go/secrets.go、来源规范化 origins.go、审计 audit.go（阶段 2）
 internal/pool/       题池水位、预生成、claim 事务（阶段 3）
 internal/generator/  Generator 契约（阶段 3 定稿并实现）
 internal/risk/       有界令牌桶与来源地址裁决（阶段 1）；打分（阶段 3+）
-internal/admin/      管理 API 与页面（阶段 2/5）
+internal/admin/      管理 API：鉴权/审计/站点与凭据生命周期（阶段 2，admin.go + handlers.go）；页面属阶段 5
 internal/config/     配置装载（flag + env + 站点文件，无 YAML 依赖）
 internal/version/    构建信息（ldflags 注入）
 cmd/devclient/       开发/验收客户端：真实暴力求解 PoW，驱动 stage1.sh（阶段 1）
@@ -523,7 +632,7 @@ deploy/docker/       Dockerfile + compose（阶段 5）
 deploy/cloudflare/   Worker + wrangler.toml（阶段 5 之后评估）
 internal/store/migrations/  NNNN_*.sql（阶段 1 起）——偏离"顶层 migrations/"是有意的：
                      go:embed 只能嵌入本包子树，放在仓库根就无法编进单二进制
-docs/                DESIGN.md、DECISIONS.md、scripts/（验收脚本）
+docs/                DESIGN.md、DECISIONS.md、scripts/（stage1.sh、stage2.sh）、reviews/（阶段自检报告）
 ```
 调整需说明理由；测试与被测文件同包同目录（`*_test.go`），集成测试用 `t.TempDir()` 建独立 DB，禁止依赖外部环境。
 
@@ -536,6 +645,7 @@ docs/                DESIGN.md、DECISIONS.md、scripts/（验收脚本）
 | 标准库 `crypto/*` | — | HMAC-SHA256 签名与派生、`crypto/rand`、`crypto/subtle` | — | `golang.org/x/crypto/hkdf`（本设计每用途一把固定长度密钥，域分隔 HMAC 即可，见 §6） |
 | 无 ORM | — | 手写 SQL 保证原子条件更新与可读性 | — | `gorm`/`sqlc` |
 
+**阶段 2 没有引入任何新依赖**（仍是只有 `modernc.org/sqlite` + 标准库）。
 阶段 3 才可能需要 `golang.org/x/image`（`font/opentype` 等），**现在不引入**。传递依赖清单与许可记录在 ADR-007，我们只直接 import `modernc.org/sqlite`。
 `Makefile` 设 `GOTOOLCHAIN=local`：构建过程不得下载或切换 Go 工具链；不擅自升级 Go。
 
@@ -557,10 +667,21 @@ docs/                DESIGN.md、DECISIONS.md、scripts/（验收脚本）
 ⑦ 请求体超限、畸形 JSON、伪造 `X-Forwarded-For`/`CF-Connecting-IP`（默认不采信，trust-proxy 开启且来源受信才采信）；
 ⑧ 缺主密钥/pepper 拒绝启动；⑨ 日志与错误响应不含本次注入的哨兵密钥值（按值扫描）；⑩ 响应 JSON key 集合与 §10.1 一致（含 `error-codes` 连字符）。
 
-**阶段 2 — 站点与 Key 管理、域名白名单、限流配置、审计**（SQLite 与迁移已提前到阶段 1）
-验收：迁移幂等；创建站点仅一次性返回明文 secret，库中只有 `secret_mac`；域名白名单生效（Origin 不符 → `bad-request`）；
-限流可按站点配置并触发 `429 + Retry-After`；`make secret-scan` 按值扫描通过。
-测试覆盖：admin Bearer 鉴权矩阵、IP 掩码哈希稳定性（同 /24 同日同值、跨日不同值）、限流状态上限与内存不涨、审计覆盖所有写操作。
+**阶段 2 — 多站点管理、密钥生命周期、来源策略、站点级配置与审计（已实现，2026-10-17）**
+验收（`make stage2-check` 自动化，10 项）：增量迁移幂等且阶段 1 账本状态保留；创建站点仅一次性返回明文 secret，
+之后详情/列表/凭据/审计/错误响应都不再返回，日志与库文件按值扫描也不含它；来源精确匹配（后缀/子域/端口/协议/`null` 全拒）；
+`429 + Retry-After` 可按站点触发；停用站点使未消费 token 立即失效且重新启用不复活；两类轮换（立即撤销 / 有上限过渡期）都生效，
+且**被撤销的凭据不消费合法 response**；重启后已撤销凭据仍失效、已消费状态仍不可重放、配置文件不得把旧值覆盖回库。
+
+> 本文原先写的"Origin 不符 → `bad-request`"与 §10.1 自相矛盾（`/api/*` 只用自有码集）。
+> 阶段 2 按 §10.1 实现：来源不符返回 **400 `invalid-request`**，`bad-request` 仍只属于 `/siteverify` 的 reCAPTCHA 族。
+> 另外阶段 2 没有排序类参数，因此 §5 的"动态列名白名单"在本阶段没有落点（属阶段 5 统计接口）。
+
+测试覆盖：admin Bearer 鉴权矩阵（缺失/错误/已撤销/非 Bearer 方案/超长/无登记凭据）、鉴权失败计数上限、
+公共监听器无管理路由（404 而非 401）、站点 CRUD 与启停的重启持久化、部分更新的"缺省=不改"、
+凭据数量与过渡期上限、跨站点 secret、签发快照语义（难度/TTL）与安全动作语义（停用/撤销）的分别验证、
+来源规范化的 30 余条向量、预检不签发不消费、审计覆盖所有写操作 + 分页边界 + 不含凭据、
+阶段 1 库的真实升级路径与"旧列不可用于认证"、清理与外键相容、验证请求与停用并发的提交顺序一致性。
 
 **阶段 3 — Generator 契约定稿 + `arith-v1` + `text-warp-v1` + 题池 + 一次性消费**
 验收：池低于水位自动补至 `high_watermark`；payload 属性测试断言答案与可推导种子不在其中（各 500 题随机）；
@@ -603,6 +724,14 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
   `internal/store/migrations/`（`go:embed` 只能嵌入本包子树）。验收期间修掉四个真实缺陷：token tag 比较误将 base64 文本与解码字节相比；
   限流 `RetryAfter` 使用真实时钟而非注入时钟；devclient 随机起点可能为负导致提交非法 nonce（改为复用 `internal/pow` 判定）；
   `serve()` 用 `fmt.Fprintf` 与 slog 并发写同一 writer 触发数据竞争（启动信息统一走 slog）。
+- 2026-10-17 **v2.3（阶段 2 实现完成）**：新增 §5.3（站点生命周期、`site_secrets`/`site_origins`/`admin_keys`/`audit`、
+  配置生效两类语义、`hostname` 来源与保证范围、清理与外键）、§10.2 管理 API 实况与监听器隔离与错误族、§10.3 来源策略与 CORS；
+  §6 补齐管理凭据引导（逐字节同值、有记录后忽略 env、无凭据即拒绝）与摘要域分隔的例外理由；
+  §17 阶段 2 验收落地并把旧的"Origin 不符 → `bad-request`"矛盾按 §10.1 更正为 `invalid-request`；
+  新增 ADR-010。实测：`0002` 迁移在阶段 1 库上可重复执行；SQLite 3.51.2 不能 DROP UNIQUE 列（故中和旧列）。
+  阶段 2 期间 `-race` 复现并修掉一处真实缺陷：`serve()` 若在 `Serve` 登记 listener 之前就因 ctx 取消而返回，
+  `Shutdown` 关不到那个 listener（它只关"已被 Serve 登记"的），端口在进程退出路径上仍接受连接 → 现在两个 listener
+  都由 `serve` 自己 `defer Close()`。§13 的二进制实测值随之更新。
 - 2026-10-17 **v2.2（阶段 1 安全复核，见 `docs/reviews/STAGE1-REVIEW.md`）**：修复 6 个真实缺陷——
   `Purge` 与外键冲突导致清理永久失败；`/siteverify` 服务端故障误用 `invalid-request`（应为唯一扩展码 `internal-error` + 5xx）；
   站点维度限流按自报 `site_key` 计数可被污染（改按站点 id）；签发缺少**存量**上限（新增 `Caps` 与两个环境变量）；

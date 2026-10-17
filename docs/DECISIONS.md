@@ -205,3 +205,65 @@ SQL 读 5000 万行/天、SQL 写 10 万行/天、存储 5 GB。因此"必须付
 **影响**：DESIGN §9（新增"速率与存量"段）、§5.1（Purge 语义）、§6（payload 上限按实现取严者 2048B）、
 §14-6/§14-9；`internal/store`（`Caps`、`ErrCapExceeded`、`Purge`）、`internal/api`（限流顺序、错误码族）、
 `internal/config`（4 个新校验/配置项）、`cmd/server`（purge 关闭路径）。
+
+---
+
+## ADR-010 阶段 2：权威数据源、旧列中和、站点版本与撤销的表示法
+
+**背景**：阶段 2 要引入多站点管理、密钥生命周期、来源策略与审计，同时必须能升级现存的阶段 1 库。
+
+**遇到的问题与决定**：
+
+1. **配置文件与数据库谁说了算**。阶段 1 的 `PutSite` 每次启动都 `ON CONFLICT DO UPDATE`，把配置里的
+   secret/难度**覆盖回库**。这在阶段 1 无害（库只有配置这一个来源），但一旦有了管理 API，
+   它就变成安全缺陷：运维在 API 里撤销的密钥、停用的站点会被下一次重启悄悄恢复。
+   → 立场：**SQLite 是站点与策略的唯一权威数据源**。`--sites`/`EPOCHA_SITES_FILE` 降级为
+   **显式的一次性导入**入口：`site_key` 已存在于库中时该条配置完全不生效（`store.ImportSite` 返回 `imported=false`）。
+   有测试同时钉住"重启不复活已停用站点"与"重启不复活已撤销密钥"。
+   *代价*：配置文件改了 secret 却没有任何效果，运维可能误以为改成功了 → 启动日志明确打印"站点已在库中，配置条目不生效"。
+
+2. **`sites.secret_mac` 删不掉**。实测（modernc 内置 SQLite 3.51.2）`ALTER TABLE ... DROP COLUMN` 对带
+   UNIQUE 约束的列报 `cannot drop UNIQUE column`，而阶段 1 的列定义正是 `secret_mac TEXT NOT NULL UNIQUE`。
+   备选方案与结论：
+   - 表重建（12 步法）需要 `PRAGMA foreign_keys=OFF`，而**该 pragma 在事务内是 no-op**（SQLite 文档），
+     意味着迁移要在事务外做、崩溃时留半状态；且 `challenges`/`responses` 的外键指向 `sites`，
+     删父表会触发 FK。风险大于收益。
+   - 留着原值不动 = 留下**第二个真相源**：将来任何一段误读它的代码都会让"已撤销的凭据"重新可用。
+   - → 采用**中和**：迁移把原摘要搬进 `site_secrets` 后，把旧列改写为
+     `HMAC(pepper, "epocha/v1|retired|" + 旧摘要十六进制)`。它不可能等于任何 `HMAC(pepper, secret)`，
+     长度与形状仍是 64 hex（不破坏 UNIQUE 约束），且因为输入含旧摘要而天然跨行唯一。
+     新建站点写的是 `sha256hex("epocha/v1|retired|" + site_key)`——同理不可用于认证。
+     有测试直接断言"旧列不等于任何可用摘要"。
+
+3. **撤销怎么表示**。备选：状态列（`status IN ('active','revoked')`）+ 后台任务把"过渡期到期"的行改成 revoked。
+   → 采用**单一时间戳 `revoked_at`**，有效性 = `revoked_at IS NULL OR revoked_at > now`。
+   "立即撤销"写当前时刻，"过渡期"写 `now + grace`（上限 86400 秒）。
+   理由：不需要任何后台任务或额外状态机，判定纯读库，**重启与崩溃后语义完全一致**；
+   过渡期到期是自然发生的，不依赖清理任务的调度是否健康。
+
+4. **站点版本进入签名**。需求是"停用前签发的未消费 token 不会因为重新启用而复活"。只靠 `enabled` 标志
+   在请求时判定也能做到"停用期间不放行"，但**重新启用后**那些 token 又会重新可放行。
+   → 在 token claims 里加 `svid`（签发时的 `sites.version`），启停各提升一次版本并在 redeem/siteverify 复核。
+   *代价（明确记录）*：升级后旧主密钥签发的**阶段 1 token**（没有 `svid` 字段）一律被拒；
+   影响窗口不超过 TTL 的 1 小时，且账本里的"已消费"状态完整保留——失效方向是"更严"，可接受。
+
+5. **摘要算法的域分隔出现一个例外**。红线要求派生与摘要都带域分隔，但站点 secret 的摘要必须
+   **保持阶段 1 的 `HMAC(pepper, secret)` 原样**，否则 `0002` 迁移搬过来的旧摘要全部对不上，
+   升级即等于把所有站点的密钥作废。管理凭据是新引入的，所以它单独使用
+   `HMAC(pepper, sha256hex("epocha/v1|admin|" + key))`。
+   → 立场：**迁移兼容性优先于形式统一**，但两者不可互换这条性质仍然成立（测试覆盖），
+   并且不引入任何自创算法——两个都是标准 HMAC-SHA256。
+
+6. **`key_id` 是公开的、与 secret 分离的标识**。secret 里**不含**任何 id 段：`/siteverify` 仍然用
+   "对提供的 secret 求一次摘要、与全表常数时间比较"的方式定位站点，`key_id`（`k<12 hex>`）只用于
+   管理面寻址与审计 target。迁移行的 `key_id` 用确定性的 `legacy-<site_id>`（阶段 1 每站点只有一把），
+   而不是从摘要截取前缀——**截断 MAC 等于公开其前缀**，会把在线/离线爆破的判定空间缩小。
+
+7. **管理监听的隔离方式**。阶段 1 复核后确认：把管理路由挂在公共 mux 上再做鉴权，等于把"忘了配凭据"
+   变成"公开暴露一个永远 401 的面"，也让反代配置错误直接变成攻击面。
+   → 管理路由**只存在于 admin listener**（默认 `127.0.0.1:8081`）；公共 listener 的路由表里没有这些路径，
+   从公共端口打过去是 404。测试断言的是"404 而不是 401"，因为这个差别正是隔离是否真实存在的证据。
+
+**影响**：DESIGN §5.3（新增）、§6、§10.2、§10.3、§12、§15、§17 阶段 2；
+`internal/store/{sites,secrets,origins,audit}.go`、`migrations/0002_stage2.sql`、`internal/admin`、
+`internal/api/handlers.go`（来源与 CORS）、`cmd/server/main.go`（双监听器）、`internal/config`。

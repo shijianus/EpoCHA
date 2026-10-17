@@ -93,3 +93,11 @@
 - `hostname` 仍是调用方自报值的回显，不是安全依据；阶段 2 引入服务端裁决的允许来源后重写这段语义。
 - 无就绪探针、无 `VACUUM` 策略、无监控指标——属阶段 5 运维范围。
 - PoW "浏览器 300–900ms" 等性能数字**仍未实测**，本次复核没有改变这一点。
+
+## 7. 补充（阶段 2 期间发现，同属阶段 1 代码路径）
+
+`serve()` 在 `srv.Serve` 尚未登记 listener 时就因 ctx 取消而返回的路径上，`http.Server.Shutdown`
+关不到那个 listener（它只关闭已被 `Serve` 登记的），端口在"进程已退出"之后仍会接受连接。
+`-race` 跑 `cmd/server` 时实测复现（`TestServeStopsListening` 失败：关闭后仍可连接）。
+修复：`serve()` 自己 `defer ln.Close()`（公共与管理各一），并让该测试把 `serve` 的错误传进断言而不是丢弃。
+修复后 `go test -race -count=1 ./...` 全绿。

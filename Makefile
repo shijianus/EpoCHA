@@ -26,6 +26,7 @@ help:
 	@echo "make secret-scan  按值扫描日志密钥泄露（阶段 2 起生效）"
 	@echo "make stage1-check 全流程验收（阶段 1 起生效）"
 	@echo "make stage2-check 管理面 + 来源策略 + 轮换 + 重启语义端到端验收（阶段 2）"
+	@echo "make stage3a-check 题池 + 生成器 + 单次作答端到端验收（阶段 3A）"
 	@echo "make run          以临时 DB 启动（仅本地调试）"
 
 .PHONY: build
@@ -79,7 +80,10 @@ widget-size:
 secret-scan:
 	go test -count=1 -v -run 'TestNothingLeaksSecretsOrKeys' ./internal/api/
 	go test -count=1 -v -run 'TestRunRefusesWithoutSecrets|TestServeHealthzAndGracefulShutdown' ./cmd/server/
-	@echo "按值扫描通过：哨兵 secret 未出现在日志、错误响应与启动输出中"
+	go test -count=1 -v -run 'TestPrivateLeakGuardWorks|TestPublicHasNoPrivateFields' ./internal/generator/
+	go test -count=1 -v -run 'TestPoolStatusIsReadOnlyAndLeakFree|TestAuditCoversWritesAndLeaksNothing' ./internal/admin/
+	go test -count=1 -v -run 'TestPowQuestionHappyPath' ./internal/api/
+	@echo "按值扫描通过：哨兵 secret 与 3A 的私有 verifier 都未出现在日志、错误响应、启动输出与管理面响应中"
 
 .PHONY: stage1-check
 stage1-check:
@@ -88,6 +92,10 @@ stage1-check:
 .PHONY: stage2-check
 stage2-check:
 	@bash docs/scripts/stage2.sh
+
+.PHONY: stage3a-check
+stage3a-check:
+	@bash docs/scripts/stage3a.sh
 
 .PHONY: tidy
 tidy:

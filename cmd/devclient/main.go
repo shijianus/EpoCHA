@@ -35,6 +35,27 @@ type challengeResp struct {
 		Seed string `json:"seed"`
 		Bits uint8  `json:"bits"`
 	} `json:"pow"`
+	// 阶段 3A：站点是 pow_question 时服务端会带公开题面。
+	Mode     string         `json:"mode"`
+	Question map[string]any `json:"question"`
+}
+
+// answer 按题面求值。返回空串表示"这道响应里没有题"（pow_only 路径）。
+// 求值器是 devclient 自己的实现：验收脚本要求"真实求解"，所以既不能读库里的答案，
+// 也不能有一个硬编码的固定解。
+func (c challengeResp) answer() (string, error) {
+	if c.Question == nil {
+		return "", nil
+	}
+	task, _ := c.Question["task"].(string)
+	if task == "" {
+		return "", errors.New("响应带 question 却没有 task 字段")
+	}
+	v, err := evalExpr(task)
+	if err != nil {
+		return "", fmt.Errorf("求解题面 %q: %w", task, err)
+	}
+	return strconv.FormatInt(v, 10), nil
 }
 
 type redeemResp struct {
@@ -75,7 +96,7 @@ func run(args []string, getenv func(string) string) error {
 	fs := flag.NewFlagSet("devclient", flag.ContinueOnError)
 	base := fs.String("base", "http://127.0.0.1:8080", "服务地址")
 	siteKey := fs.String("site-key", "", "站点 site_key（公开）")
-	mode := fs.String("mode", "full", "full|double-redeem|double-verify|wrong-secret|acquire|redeem-only|verify-only")
+	mode := fs.String("mode", "full", "full|double-redeem|double-verify|wrong-secret|acquire|redeem-only|wrong-answer|verify-only")
 	file := fs.String("response-file", "", "acquire 写入 / verify 读取的 response 文件")
 	hostname := fs.String("hostname", "", "siteverify 自报 hostname（阶段 2 起服务端不采信，仅用于验证它不会被回显）")
 	origin := fs.String("origin", "", "浏览器 Origin 头（阶段 2 来源策略；留空表示无来源的直接调用）")
@@ -102,6 +123,8 @@ func run(args []string, getenv func(string) string) error {
 		return c.acquire(*siteKey, getenv, *maxIter, *file)
 	case "redeem-only":
 		return c.redeemOnly(*siteKey, *maxIter, *file)
+	case "wrong-answer":
+		return c.wrongAnswer(*siteKey, *maxIter)
 	case "verify-only":
 		return c.verifyOnly(getenv, *file, "failure")
 	default:
@@ -122,9 +145,13 @@ func (c *client) challenge(siteKey string) (challengeResp, error) {
 	return out, err
 }
 
-func (c *client) redeem(tok, nonce string) (redeemResp, int, error) {
+func (c *client) redeem(tok, nonce, answer string) (redeemResp, int, error) {
 	var out redeemResp
-	body, _ := json.Marshal(map[string]string{"token": tok, "pow_nonce": nonce})
+	payload := map[string]string{"token": tok, "pow_nonce": nonce}
+	if answer != "" {
+		payload["answer"] = answer
+	}
+	body, _ := json.Marshal(payload)
 	status, err := c.post("/api/redeem", body, "application/json", &out)
 	return out, status, err
 }
@@ -178,7 +205,7 @@ func (c *client) full(siteKey string, getenv func(string) string, maxIter int64,
 		return err
 	}
 	fmt.Printf("RESULT step=challenge status=ok bits=%d iterations=%d\n", ch.Pow.Bits, iterations)
-	r, status, err := c.redeem(ch.Token, ch.nonce)
+	r, status, err := c.redeem(ch.Token, ch.nonce, ch.answer)
 	if err != nil {
 		return err
 	}
@@ -202,7 +229,7 @@ func (c *client) doubleRedeem(siteKey string, maxIter int64) error {
 		return err
 	}
 	fmt.Printf("RESULT step=challenge status=ok bits=%d iterations=%d\n", ch.Pow.Bits, iterations)
-	_, status1, err := c.redeem(ch.Token, ch.nonce)
+	_, status1, err := c.redeem(ch.Token, ch.nonce, ch.answer)
 	if err != nil {
 		return err
 	}
@@ -210,7 +237,7 @@ func (c *client) doubleRedeem(siteKey string, maxIter int64) error {
 		return fmt.Errorf("首次 redeem 应成功，status=%d", status1)
 	}
 	fmt.Println("RESULT step=redeem-1 status=ok")
-	_, status2, err := c.redeem(ch.Token, ch.nonce)
+	_, status2, err := c.redeem(ch.Token, ch.nonce, ch.answer)
 	if err != nil {
 		return err
 	}
@@ -226,7 +253,7 @@ func (c *client) doubleVerify(siteKey string, getenv func(string) string, maxIte
 	if err != nil {
 		return err
 	}
-	r, status, err := c.redeem(ch.Token, ch.nonce)
+	r, status, err := c.redeem(ch.Token, ch.nonce, ch.answer)
 	if err != nil || status != http.StatusOK {
 		return fmt.Errorf("redeem 失败：status=%d codes=%s err=%v", status, r.codes(), err)
 	}
@@ -258,7 +285,7 @@ func (c *client) wrongSecret(siteKey string, getenv func(string) string, maxIter
 	if err != nil {
 		return err
 	}
-	r, status, err := c.redeem(ch.Token, ch.nonce)
+	r, status, err := c.redeem(ch.Token, ch.nonce, ch.answer)
 	if err != nil || status != http.StatusOK {
 		return fmt.Errorf("redeem 失败：status=%d codes=%s err=%v", status, r.codes(), err)
 	}
@@ -289,7 +316,7 @@ func (c *client) acquire(siteKey string, getenv func(string) string, maxIter int
 	if err != nil {
 		return err
 	}
-	r, status, err := c.redeem(ch.Token, ch.nonce)
+	r, status, err := c.redeem(ch.Token, ch.nonce, ch.answer)
 	if err != nil || status != http.StatusOK {
 		return fmt.Errorf("redeem 失败：status=%d codes=%s err=%v", status, r.codes(), err)
 	}
@@ -318,7 +345,7 @@ func (c *client) redeemOnly(siteKey string, maxIter int64, path string) error {
 	if err != nil {
 		return err
 	}
-	r, status, err := c.redeem(ch.Token, ch.nonce)
+	r, status, err := c.redeem(ch.Token, ch.nonce, ch.answer)
 	if err != nil || status != http.StatusOK {
 		return fmt.Errorf("redeem 失败：status=%d codes=%s err=%v", status, r.codes(), err)
 	}
@@ -330,6 +357,49 @@ func (c *client) redeemOnly(siteKey string, maxIter int64, path string) error {
 	}
 	fmt.Println("RESULT step=redeem status=ok consumed=0")
 	return nil
+}
+
+// wrongAnswer 演示阶段 3A 的单次作答语义：
+// 错误答案使 challenge 进入终态，紧随其后的正确答案也不能重试成功。
+func (c *client) wrongAnswer(siteKey string, maxIter int64) error {
+	ch, _, err := c.solve(siteKey, maxIter)
+	if err != nil {
+		return err
+	}
+	if ch.answer == "" {
+		return errors.New("wrong-answer 需要一个 pow_question 站点（响应里没有题面）")
+	}
+	wrong, err := bump(ch.answer)
+	if err != nil {
+		return err
+	}
+	r1, s1, err := c.redeem(ch.Token, ch.nonce, wrong)
+	if err != nil {
+		return err
+	}
+	// 只认"契约里的 400 invalid-challenge"：500 说明服务端把错误答案当成了内部故障
+	// （典型错实现：判错分支返回 error ⇒ 事务回滚、重试机会被退回）。
+	if s1 != http.StatusBadRequest || !strings.Contains(r1.codes(), "invalid-challenge") {
+		return fmt.Errorf("错误答案应返回 400 invalid-challenge，got %d %s", s1, r1.codes())
+	}
+	fmt.Printf("RESULT step=redeem-wrong status=%d rejected=1 codes=%s\n", s1, r1.codes())
+	r2, s2, err := c.redeem(ch.Token, ch.nonce, ch.answer)
+	if err != nil {
+		return err
+	}
+	if s2 != http.StatusBadRequest || !strings.Contains(r2.codes(), "invalid-challenge") {
+		return fmt.Errorf("错误答案之后正确答案应仍被拒（400 invalid-challenge），got %d %s", s2, r2.codes())
+	}
+	fmt.Printf("RESULT step=redeem-right-after-wrong status=%d rejected=1 codes=%s\n", s2, r2.codes())
+	return nil
+}
+
+func bump(s string) (string, error) {
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return "", err
+	}
+	return strconv.FormatInt(n+1, 10), nil
 }
 
 // verifyOnly 用于重启后的重放检查。expect=failure 时，成功返回才是错误。
@@ -359,7 +429,8 @@ func (c *client) verifyOnly(getenv func(string) string, path, expect string) err
 
 type solved struct {
 	challengeResp
-	nonce string
+	nonce  string
+	answer string // pow_only 时为空
 }
 
 // solveRaw 领取 challenge 并真实搜索 PoW 解。
@@ -392,7 +463,11 @@ func (c *client) solve(siteKey string, maxIter int64) (solved, int64, error) {
 	if nonce == "" {
 		return solved{}, iterations, errors.New("未找到解")
 	}
-	return solved{challengeResp: ch, nonce: nonce}, iterations, nil
+	answer, err := ch.answer()
+	if err != nil {
+		return solved{}, iterations, err
+	}
+	return solved{challengeResp: ch, nonce: nonce, answer: answer}, iterations, nil
 }
 
 // searchNonce 从随机起点线性搜索，用服务端同一套 Verify 判定。
@@ -435,4 +510,68 @@ func randStart() (int64, error) {
 		return 0, err
 	}
 	return n.Int64(), nil
+}
+
+// evalExpr 求 arithmetic-baseline 题面的值。它是 devclient 自己的实现，
+// 语法契约与生成器一致："a op b" 或 "(a op b) op c"，运算符 + - × ÷，÷ 保证整除。
+// 验收脚本用它来"真实答题"：既没有读数据库里的答案，也没有硬编码固定解。
+func evalExpr(task string) (int64, error) {
+	inner := task
+	if strings.HasPrefix(task, "(") {
+		end := strings.Index(task, ")")
+		if end < 0 {
+			return 0, errors.New("括号未闭合")
+		}
+		v, err := evalFlat(task[1:end])
+		if err != nil {
+			return 0, err
+		}
+		rest := strings.TrimSpace(task[end+1:])
+		if rest == "" {
+			return v, nil
+		}
+		op, tail, found := strings.Cut(rest, " ")
+		if !found {
+			return 0, errors.New("括号后缺少运算符")
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(tail), 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		return applyOp(v, op, n)
+	}
+	return evalFlat(inner)
+}
+
+func evalFlat(s string) (int64, error) {
+	f := strings.Fields(s)
+	if len(f) != 3 {
+		return 0, errors.New("表达式不是 a op b 形状")
+	}
+	a, err := strconv.ParseInt(f[0], 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	b, err := strconv.ParseInt(f[2], 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return applyOp(a, f[1], b)
+}
+
+func applyOp(a int64, op string, b int64) (int64, error) {
+	switch op {
+	case "+":
+		return a + b, nil
+	case "-":
+		return a - b, nil
+	case "×":
+		return a * b, nil
+	case "÷":
+		if b == 0 || a%b != 0 {
+			return 0, errors.New("非整除除法")
+		}
+		return a / b, nil
+	}
+	return 0, errors.New("未知运算符 " + op)
 }

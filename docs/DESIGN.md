@@ -37,6 +37,7 @@
 | D10 | widget 原生 JS 零依赖，`go:embed` 打进二进制 | 无构建工具链，`<30KB gzip` 作为 `[目标]` 由 `make widget-size` 守护 |
 | D11 | 一次性消费的正确性来自四条：原子条件状态转移、同一事务提交、检查影响行数、并发+重启重放测试（§5、§14-4） | 与具体 SQL 隔离级别/连接池形态解耦；阶段 1 已按此实现并有测试覆盖 |
 | D12 | 安全关键状态**事务提交后才对外返回成功**；只有访问统计可异步 | 防重放账本不属于可异步类别（ADR-006） |
+| D13 | 题目与 challenge **一对一绑定且永不回池**；池空时给 503 而**不降级成 PoW-only**（阶段 3A） | 代价：容量不足直接对调用方表现为"暂时不可用"（R12），且被作废 challenge 占用的题会沉没到题目 TTL 到期。换取的是"同一题面不会面对第二个挑战者"与"站点策略不会静默失效"（§5.4、ADR-011） |
 
 ## 3. 架构
 
@@ -145,6 +146,8 @@ CREATE TABLE responses (
 
 阶段 2 追加：域名白名单、限流与 TTL 的站点级配置、`admin_key` 摘要与 `audit`。
 阶段 3 追加：`pool`（题池）、`generator_config`、`gen_stats`、`sessions`（链路记录）。
+**其中 `pool` 已在 3A 定稿并实现，实际列名与状态集见 §5.4（`ready|assigned|terminal`，不是下面草稿的
+`ready|claimed|consumed|expired`）**；`generator_config`/`gen_stats`/`sessions` 仍未实现。
 `pool` 的判分列按 ADR-003 命名与定义为 **`verifier_blob`（服务端私有 verifier 数据：摘要、参数或私有结构）**，
 而不是强制 `answer_mac`；是否可用摘要存储由每个题型在阶段 3 单独论证。
 
@@ -254,6 +257,85 @@ CREATE TABLE audit (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, acto
 但**非浏览器客户端可以任意伪造**，所以它不是机器人身份证明，也没有任何硬件级/浏览器证明/可信远程证明的含义；
 只有签名绑定还不够——被绑定的数据本身对浏览器来源可信，对手工构造的请求不可信。
 
+### 5.4 阶段 3A 实际实现（题池、题目 ↔ challenge 绑定、单次作答终结）
+
+迁移同样是**增量**的（`0003_stage3a.sql`）：阶段 1/2 的站点与账本数据全部保留，
+旧站点迁移后是 `verify_mode='pow_only'`（列默认值），**现有业务行为不变**——`pow_question` 只能经管理 API 显式开启。
+
+```sql
+-- 0003_stage3a.sql
+ALTER TABLE sites      ADD COLUMN verify_mode TEXT NOT NULL DEFAULT 'pow_only'
+  CHECK (verify_mode IN ('pow_only','pow_question'));
+ALTER TABLE sites      ADD COLUMN generator_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE sites      ADD COLUMN difficulty INTEGER NOT NULL DEFAULT 1 CHECK (difficulty BETWEEN 1 AND 5);
+ALTER TABLE challenges ADD COLUMN mode TEXT NOT NULL DEFAULT 'pow_only';
+ALTER TABLE challenges ADD COLUMN generator_id TEXT NOT NULL DEFAULT '';
+CREATE TABLE pool (
+  id TEXT PRIMARY KEY, generator_id TEXT NOT NULL, version TEXT NOT NULL,
+  difficulty INTEGER NOT NULL CHECK (difficulty BETWEEN 1 AND 5),
+  status TEXT NOT NULL CHECK (status IN ('ready','assigned','terminal')),
+  payload_json TEXT NOT NULL CHECK (length(payload_json) <= 4096),   -- 公开题面
+  verifier_blob BLOB NOT NULL,                                      -- 私有判分数据，永不下发
+  created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+  challenge_id TEXT REFERENCES challenges(id), assigned_at TEXT, terminal_at TEXT);
+CREATE UNIQUE INDEX pool_bound_challenge ON pool(challenge_id) WHERE challenge_id IS NOT NULL;
+CREATE INDEX pool_claim  ON pool(generator_id, version, difficulty, status, expires_at);
+CREATE INDEX pool_expire ON pool(status, expires_at);
+```
+
+**四个概念必须分开，不能塞进同一个可序列化结构体**（红线 5、ADR-003）：
+- `generator.PublicPayload`：**具名公开结构体的接口**（不是 `map[string]any`、不是 `json:"-"`）。
+  `ArithPublic` 只有 `task`/`answer_type`/`max_answer_len` 三个字段——答案、操作数、内部随机数**根本不在这个类型里**，
+  所以"漏抑制"这类错误在结构上不可能发生。出网走 `SanitizePublic`：先解成白名单键集合，未知键直接报错。
+- `generator.PrivateVerifier`（`[]byte`）：服务端私有判分数据，只在 `pool.verifier_blob` 与判分路径上存在。
+- `store.PoolQuestion`：持久化题池记录（含 `Status`/`ChallengeID`/三个时间戳），是上面两者的容器加上状态机字段。
+- 绑定后的挑战状态：`challenges.mode/generator_id`（签发快照）+ `pool.challenge_id`（唯一绑定）+ `challenges.status`。
+
+**绑定关系只存一处**：`pool.challenge_id`。`challenges` **不**反向存 `pool_id`——两处都存就要回答"谁是真的"，
+而且清理时两条外键互相咬。于是"一题一 challenge"由 partial UNIQUE 索引（`WHERE challenge_id IS NOT NULL`，
+`ready` 行的 NULL 不参与唯一性）加上"条件更新 + 影响行数"共同保证。
+
+**题池状态机 `ready → assigned → terminal` 是单向的**，五条不变量与实现手段（逐条有测试，见 §17 阶段 3A）：
+
+| # | 不变量 | 实现手段 |
+|---|---|---|
+| 1 | 一条题只绑一个 challenge | partial UNIQUE 索引 + `UPDATE … WHERE status='ready' AND expires_at>?` 判 `RowsAffected==1` |
+| 2 | `assigned` 永不回 `ready`（断线/超时/答错都不回池） | 只有 `InsertQuestion` 写 `ready`；没有任何把状态改回 `ready` 的代码路径 |
+| 3 | 分配与 challenge 创建同事务 | `IssueChallengeWithQuestion` 在一个 `BeginTx` 内插 challenge 行 + 选题 + 条件更新 + 回读题面 |
+| 4 | 慢操作不进写事务 | 生成（抽熵、构造表达式、序列化）全在 `pool` worker 的事务外完成，事务里只有 SQL |
+| 5 | 池空 ⇒ 文档化的可重试错误，**不静默降级成 PoW-only** | `store.ErrPoolEmpty` → `503 challenge-unavailable + Retry-After: 2` |
+| 6 | 重启后 `assigned`/`terminal` 行不再作为可领取题发出 | 领取条件要求 `status='ready'`，状态在库里而非内存里（有重启测试） |
+| 7 | 容量共同限流 | 池有全局行数硬上限（`INSERT … SELECT … WHERE (SELECT count(*))<max` 同语句判定）；challenge 存量沿用阶段 1 的 `Caps` |
+
+"记录不复用"不等于"题面永不重复"：算术题的答案空间小，**没有**为它加"重复题面就重抽"的无限重试循环——
+那只会把失败模式变成忙循环，且不改变安全性（见 §8.4）。
+
+**领题竞争的两种形态（本轮实测，别把其中一种当成另一种）**：同一进程内 `SetMaxOpenConns(1)` 让事务在这唯一的
+连接上串行，"条件更新影响 0 行"这一支实际走不到；真正会发生的是**跨句柄**（多进程共享同一库文件，不是部署形态）：
+后写的一方因为读快照已过期，`UPDATE` 直接拿到 `database is locked`，于是**整笔事务回滚**——challenge 行不留、
+别人的绑定不被改写。`claimAttempts=5` 的存在只是给循环封顶，**不是**正确性依赖；正确性依赖"同一事务内的条件更新
++ 影响行数判定 + partial UNIQUE 索引"。两个方向都有测试（`TestOneQuestionPerChallengeTwoHandles` 断言
+"绑定行数 == distinct challenge_id == 成功次数"，`TestStaleSnapshotClaimFailsClosed` 断言过期快照那一笔不得改写绑定）。
+
+**`verifier_blob` 的形态**（阶段 3A 只做可离散化的题型，因此可以走摘要）：
+`verifier_blob = nonce(16B) || HMAC(K(qver, kid), "epocha/v1|qver|" || nonce || 0x00 || 规范化答案)`。
+`K(qver)` 由 §6 的域分隔派生按 `purpose="qver"` 得到，与 `chal`/`resp` 两把密钥互不可替代。
+答案明文不落库、不进日志、不进响应（红线 5、11）；判分是"对候选答案做同一条 HMAC 再常数时间比"，
+所以**没有**任何接口能把已存答案读出来。`nonce` 让同一答案在不同题目行里的摘要不同，避免"摘要相同 ⇒ 题面相同"的旁路观察。
+
+**清理顺序**（`Purge`，响应 `PurgeCounts`）：`responses` → `pool` → `challenges`。
+必须先删 response 行再删 pool 行、最后删 challenge 行，否则外键把清理永久卡死（阶段 1 复核就是这个 bug，ADR-009）。
+只删：过期且已 `terminal` 的题、过期且未绑定的 `ready` 题、以及**没有任何 response 引用**的过期终态 challenge。
+仍绑定着有效 challenge 的 `assigned` 行不删——删了就等于"题目被静默回收"，而 challenge 与签名还活着。
+
+**第一笔有效作答即终结该 challenge**（`RedeemAttempt`，取代阶段 1 的 `Redeem`）：
+校验顺序是 token 签名 → 站点/来源 → 请求结构与答案文法 → PoW → **终结性作答**。
+只有前四步全过才叫"一次有效答题尝试"；畸形请求与错误 PoW **不**消耗题目（它们连事务都不进入判分分支）。
+判分结果在同一事务里落终态：答对 ⇒ `challenges.status='redeemed'` + `responses` 行 + `pool.status='terminal'`；
+答错 ⇒ `challenges.status='invalid'` + `pool.status='terminal'`，并**提交**、返回 `OutcomeWrongAnswer` 而非 error。
+把"答案错"实现成返回 error 会让整笔事务回滚，题目回到 `ready`、challenge 回到可重试状态 ⇒ 无限重试同一道题。
+这个失败模式有专门的故障注入回归（§17）。
+
 ## 6. 密钥体系与 token
 
 **主密钥**：`EPOCHA_MASTER_KEY`（32B，env 或 `--master-key-file`，权限 0600）；**pepper**：`EPOCHA_PEPPER`（32B，与 DB 文件分离存放，独立挂载）。两者缺一服务拒绝启动（不静默降级）。
@@ -262,18 +344,31 @@ CREATE TABLE audit (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, acto
 单次 HMAC 展开在此场景与 HKDF-expand 等价，且域分隔串含版本与 purpose，无跨用途复用风险）：
 ```
 kid     = hex(HMAC-SHA256(master, "epocha/v1|kid")[:8])
-K(purpose, kid) = HMAC-SHA256(master, "epocha/v1|" + purpose + "|" + kid)     // purpose ∈ {chal, resp}
+K(purpose, kid) = HMAC-SHA256(master, "epocha/v1|" + purpose + "|" + kid)     // purpose ∈ {chal, resp, qver}
 ```
+`qver` 是阶段 3A 新增的第三把派生密钥，只用于题目判分摘要（§5.4）：`token.DerivePurpose(master, "qver")`
+走的是与 token 内部完全同一个 `deriveKey(master, purpose, Kid(master))`，因此它既不是签 token 的密钥、也不能反过来签 token。
+`TestDerivedPurposeKeysAreDistinct` 逐对比对三把密钥：长度 32、两两不同、换主密钥结果改变、短主密钥与空 purpose 返回 nil。
 **token 线格式**：`v1.<kid>.<b64url(payload_json)>.<b64url(tag)>`，`tag = HMAC(K(purpose,kid), "epocha:v1|" + purpose + "|" + b64url(payload))`。
 签名覆盖 payload 的**原始 base64url 字节**（不重新序列化），因此难度、TTL、站点、challenge id 全部不可被客户端改动；
 PoW 参数以 **DB 行为权威**再校验一次（纵深防御：即使密钥泄露导致伪造 token，参数与站点仍受库内记录约束）。
 
 payload 字段（阶段 1 实现）：`typ`(`chal`|`resp`)、`kid`、`sid`(站点 id，硬绑定)、`cid`(challenge id)、
 `rid`(仅 resp，response id)、`iat`、`exp`(Unix 秒)；`chal` 额外带 `bits`、`seed`(base64url)。未知字段一律拒绝。
+**阶段 2 追加 `svid`**（站点版本，§5.3）；**阶段 3A 追加 `mode` 与 `gen`**：
+`mode` 必填且只能是 `pow_only`/`pow_question`，`pow_question` 必须带非空 `gen`、`pow_only` 必须不带——
+四种非法组合在**签名阶段**就拒绝（`ErrUnusableKey`），不等到消费时。这样一张 `pow_question` 的 token
+无法被当作 `pow_only` 使用（少一层判定即验签失败），生成器也不能被客户端替换。
+`mode`/`gen` 同时落进 `challenges` 行并被交叉核对：**签名说一套、库行说另一套时按失败处理**。
 实现取 **token 总长 ≤4096B、payload ≤2048B**（比本文原先写的"payload ≤4KB"更严，复核后按取严者固化）。
 验证顺序：总长度上限 → 分段解析 → kid ∈ {current, previous} → **常数时间比 tag** → `DisallowUnknownFields` 解 payload →
 `typ`/purpose 匹配 → `exp`/`iat` 时钟窗口 → `sid` 与请求站点一致 → 业务层原子消费。任何一步失败对外都是同一族错误码，不区分原因。
 轮换：`kid` 允许同时存在 current + previous（`--master-key-previous`），旧 token 在 TTL 内自然过期。
+**题目 verifier 不参与这套双密钥**：`K(qver)` 只由**当前**主密钥派生，所以轮换主密钥后，题池里存量题的摘要
+在新密钥下**必然判假**——即使提交正确答案（`TestVerifierFailsClosedAfterKeyChange` 钉住这条 fail-closed 语义）。
+后果与运维程序：轮换后这些题会消耗掉用户的作答机会（答案被拒 ⇒ challenge 终态作废），直到它们被清理或过期。
+**因此轮换主密钥的操作程序里必须包含"清空或等空题池"**（停 worker → 等存量题过期，或直接删 `pool` 行 → 起服务）。
+本版不为此实现自动失效（那需要"给 verifier 盖密钥指纹"这类新增结构），如实记录为运维约束而不是隐藏它。
 
 `secret_key` 校验：`want = HMAC(pepper, provided_secret)`，`subtle.ConstantTimeCompare(want, site.secret_mac)`。
 遍历该表全部行、不因命中而提前返回，避免用响应时序定位"命中第几条记录"。
@@ -315,6 +410,11 @@ payload 字段（阶段 1 实现）：`typ`(`chal`|`resp`)、`kid`、`sid`(站�
 
 ### 8.1 Generator 接口（阶段 3 落地）
 
+> **3A 更新**：本节是阶段 0 的草稿，`Challenge`/`Verifier` 的最终形状、`version` 与 `SanitizePublic` 等
+> 与实现有差别的地方以 **§8.4** 为准；保留原文是为了不重写整份设计、并留下"接口是怎么被实际约束改出来的"。
+> 下面两处草稿表述已失效：`internal/generator` 不再是契约占位（已实现 `arithmetic-baseline-v1`）；
+> "注册表 `generator.Register(g)`"改为**实例注册表** `generator.NewRegistry()`（按 purpose 派生的密钥要先注入，全局注册表做不到）。
+
 ```go
 package generator
 
@@ -345,7 +445,9 @@ type Verifier interface{ /* 阶段 3 定稿 */ }
 判分方式由题型自定，但**答案与可推导种子绝不下发**是硬约束。
 注册表 `generator.Register(g)`；`pool` 按站点权重加权随机选择生成器；`--generators` 可白名单启停。
 渲染仅用纯 Go：`image`、`image/draw`、`golang.org/x/image/font` + `opentype`；字体 `go:embed`。
-**本节全部内容属阶段 3，本轮不实现**；`internal/generator` 现有代码仍是契约占位。
+**3A 实现范围**：`internal/generator` 已实现文本类基线题型 `arithmetic-baseline-v1`（§8.4）；
+带权重的多题型选择（`--generators` 白名单、按站点权重）与图片渲染路径属 3B，**3A 一律没有**，
+因此 3A 的站点策略只有一个生成器可选。
 
 ### 8.2 题型的安全论证必须拆成四个独立指标（ADR-002）
 
@@ -362,7 +464,7 @@ type Verifier interface{ /* 阶段 3 定稿 */ }
 
 | ID | 交互 | M1 题面随机空间 `[估算]` | M2/M3 答案空间·容差·猜测通过率 | M4 每次尝试成本 |
 |---|---|---|---|---|
-| `arith-v1` 算术/逻辑文字题 | 输入数字 | 模板 40+ × 参数区间 ≥10^4 → ≥4×10^5 | 答案域 ≥10^4、精确匹配 → 猜测通过率 ≤10^-4（未测） | 待测：模型直接算 vs 打码人工 |
+| `arith-v1` 算术/逻辑文字题 | 输入数字 | **3A 以 `arithmetic-baseline-v1` 实现，M2/M3 已实测，见 §8.4**；下表数字是阶段 0 草稿（且用的是"模板组合数"，属 M1，不是防御力） | 答案域 ≥10^4、精确匹配 → 猜测通过率 ≤10^-4（未测） | 待测：模型直接算 vs 打码人工 |
 | `text-warp-v1` 扭曲字符图 | 输入字符串 | 5–7 字符 × 字体随机指派 × 逐字旋转/错切/扭曲 × 干扰线 × 噪声 | 字符集去易混后约 32^n（n≥5）→ >3×10^7；容差 0 → 猜测通过率极低（未测） | 待测：本地 OCR/多模态基线通过率与单次成本，**必须替换 §4 的 60–90% 估算** |
 | `cjk-v1` 中文/成语选择题 | 点选 4 选项 | 语料 × 干扰项组合 × 遮罩/描边/色相 × 问法模板 | **答案空间仅 4，接受域 1 → 猜测通过率 25%，这是本题型最弱的量**；靠 3 次尝试封顶（≤58%）+ PoW 成本叠加，不靠渲染混淆 | 待测 |
 | `rotate-v1` 图片旋转/拼合 | 拖动滑块转正 | 底图 × θ∈[0,360) × 翻转/裁剪/水印 | 原始设计写"粗 24 × 精 6 = 144"——**该数值是未验证估算，且它只描述 M2，不代表安全性**；若容差取 ±7.5°，接受域将显著放大猜测通过率（阶段 3 实测给出） | 待测 |
@@ -373,7 +475,63 @@ type Verifier interface{ /* 阶段 3 定稿 */ }
 - 生成时记录 `solve_ms_p50_hint`（按难度档静态表 + 题型），用于 §9 时延异常判定；阈值待 `[实测]` 后设定。
 - 素材与语料必须本地自有或许可证允许再分发（OFL 字体 / CC0 图片 / 自建成语表）；许可证清单落 `docs/NOTICE.md`。
 
+### 8.4 阶段 3A 实现：`arithmetic-baseline-v1` 与生成器契约
+
+**定位（必须写在显眼处）**：这是**生成器接口、题池与提交生命周期的工程基线**，不是生产抗自动解题题型。
+公开 payload 里的 `task` 就是一道可以直接算出答案的表达式，因此**它的"答案可从 payload 推导"是设计事实而不是缺陷**——
+本节不声称、§10.1 的响应也不掩盖这一点。任何"抗 OCR / 抗 AI / 证明是人"的结论都不适用于此题型（阶段 3B 的视觉题型才需要论证）。
+**不得用"随机实例多"论证安全性**：M1 只影响同题复用，对本题型毫无防御价值（ADR-002）。
+
+已实现的契约（`internal/generator/generator.go`）：
+```go
+type PublicPayload interface{ PublicKind() string }   // 公开题面：具名结构体，字段即白名单
+type PrivateVerifier []byte                           // 私有判分数据：与 payload 不是同一个可序列化类型
+type Question struct{ Payload PublicPayload; Verifier PrivateVerifier; Asset []byte; MimeType string }
+type Params struct{ Difficulty int; Lang string }
+type Generator interface {
+    ID() string; Version() string; Media() string
+    Generate(ctx context.Context, p Params, entropy io.Reader) (Question, error)
+    Verify(v PrivateVerifier, input string) bool
+    NormalizeAnswer(input string) (canonical string, ok bool)
+    SanitizePublic(payloadJSON []byte) (map[string]any, error)   // 出网唯一通道：未知键 ⇒ 报错
+}
+type Registry  // NewRegistry / Register / Lookup / IDs
+```
+与 §8.1 草稿的三处差别，都是被实际约束逼出来的：
+1. `Verifier` 从"接口"改成 `PrivateVerifier []byte`：库里的 `verifier_blob` 就是一段字节，
+   判分由生成器自己解释。再套一层接口只会诱导把私有结构体直接 `json.Marshal` 出网。
+2. 新增 `Version()`：题池按 `(generator_id, version, difficulty)` 分桶。**改了判分实现必须升 version**，
+   否则库里遗留的旧 verifier 会被新实现解释——那是静默的正确性事故。
+3. 新增 `NormalizeAnswer`：把"什么算一个答案"从 `Verify` 里拆出来单独可测（前导零、符号、空白、非 ASCII 数字各是一条独立断言）。
+   `Lookup` 未登记的 generator_id ⇒ `ErrUnknownGenerator`，**没有任何回落**（不"随便挑一个题型顶上"）。
+
+`arithmetic-baseline-v1`（`internal/generator/arith.go`）的取值范围与判定：
+- 难度档 1..5；操作数 ≤99、中间值与答案一律落在 ±1e9 内、表达式串 ≤64 字符；**乘积在求值前做溢出检查**；
+  除法只允许"右操作数 2..9 且整除"的组合，否则重抽（有界 128 次，耗尽 ⇒ `ErrGenerateExhausted`，可重试）。
+- 决定答案的随机量全部来自 `crypto/rand`（`rand.Int`），**不接收** `math/rand`；`Generate` 的 `entropy` 由调用方给（worker 传 `crypto/rand.Reader`），
+  测试可注入确定性流，生产路径不回落到固定种子。
+- 规范化答案：裁首尾 ASCII 空白、内部空白即畸形、允许单个 `+`/`-` 前缀、只接受 ASCII 数字、剥前导零（`-000` ⇒ `0`）、≤12 位。
+  非 ASCII 数字（如 `١٢٣`）、`1e3`、`0x10`、`+1` 之后再接符号等一律拒绝——拒绝是"非法答案"，不是"答案错"。
+- 判分：`Verify` 先规范化再重算 HMAC 并 `subtle.ConstantTimeCompare`；**没有**任何读回答案的接口。
+
+M1–M4 填表（ADR-002；实测条件：本机 go1.24.5/linux-arm64，2026-10-17，每档 5000 样本，见 `TestArithAnswerDistribution`）：
+
+| 指标 | 值 | 说明 |
+|---|---|---|
+| M1 题面随机空间 | ≥10^6 `[估算]` | **无防御价值**，只说明同题复用概率低 |
+| M2 答案空间与接受容差 | 依赖难度档，答案域约 10^2..10^7；容差 0（精确匹配） | 规范化后每个答案对应唯一串 |
+| M3 随机猜测通过率 | 单点最高概率 **实测**：d1 ≈0.045–0.048 / d2 ≈0.022 / d3 ≈0.008 / d4 ≈0.014 / d5 ≈0.011 | **答案分布不均匀**：d1 只有约 35 个不同答案，且**众数是并列的**（`a-b` 的 0 与 `a+b` 的 14 各有 11 种组合 ⇒ 同概率，所以"热点是 14"与"热点是 0"是同一份分布的两次抽样，不是两个结论），"均匀随机猜"的乐观假设不成立，因此按**最大单点概率**算。3 次尝试的累计上界 ≈ 3×P（d1 ⇒ **13.5%–14.4%**，已超 §8.2 的 10% 线）。数字是每档 5000 样本的**单次抽样**，重复运行会在小数点第二位抖动（`TestArithAnswerDistribution` 每次打印；2026-10-17 复核时第二次抽样实录 d1=0.048/众数 0、d2=0.0222、d3=0.0076、d4=0.0136、d5=0.0106） |
+| M4 每次尝试成本 | 未测 | 基线题型可被程序 O(1) 解出（解析 `task` 即得答案），成本 ≈ 0。**这正是它不进生产的原因** |
+
+结论照 §8.2 的硬门槛执行：**`arithmetic-baseline-v1` 只用于验收与接口回归，不得作为站点面向真实流量的题型配置**；
+文档、错误码、管理响应都不声称它抗自动解题。分布数据是"答案聚集程度"的度量，不是"安全性"的度量。
+
 ### 8.3 题池水位与预生成
+
+> **3A 实现见本节末尾与 §5.4**；下面第一段是阶段 0 草稿，`low_watermark` 公式与 `max_rows` 沿用，
+> 但"池空 ⇒ 同步生成、连续 5 次转 429"**没有实现**——3A 改成 **503 `challenge-unavailable` + `Retry-After`**，
+> 因为同步生成会把生成成本搬进公共请求路径（1 vCPU 下一个慢生成就是一个慢请求），
+> 而"降级成 PoW-only 先发出去"会让站点声明的策略静默失效，两者都不如"如实说现在给不出题"。
 
 ```
 low_watermark  = clamp(2 * 站点数, 50, 500)   # 低于则补
@@ -386,6 +544,33 @@ worker         = 单个后台 goroutine，priority=让出 CPU（每补 10 题 sl
   由 `db.BeginTx` 让驱动发起 `BEGIN`；**不得**在 `*sql.Tx` 上手工执行 `BEGIN IMMEDIATE`（嵌套事务错误，ADR-004）。
   若因性能需要 immediate 事务，只能通过驱动连接参数实现，并另写并发测试证明等价性。
 - 池空/被耗尽：同步生成（走同一 `Generate`）并打 metric `pool_miss`，连续 5 次 → 返回 429 并告警。
+
+**3A 实际形状**（`internal/pool/pool.go`，默认值即 `DefaultConfig()`，可经 6 个 `EPOCHA_POOL_*` 环境变量覆盖）：
+
+| 参数 | 默认 | 约束 | 为什么这样定 |
+|---|---|---|---|
+| `LowWatermark` / `HighWatermark` | 50 / 100 | `high ≥ low`，均为正 | 沿用 §8.3 草稿，仍是 `[目标]` |
+| `MaxRows` | 20000 | 全局（不是每桶）硬上限 | 写满即停；判定与插入在同一条 SQL 里，不靠"先查再插" |
+| `Workers` | 1 | 上限 `MaxWorkers=4` | 1 vCPU 下多 worker 只是抢同一份 CPU；上限防手滑 |
+| `QuestionTTL` | 4200s | **必须 > 站点最大 challenge TTL** | 领题条件要求题目比 challenge 晚过期；不成立时永远 503。启动打警告而非静默 |
+| `PollInterval` | 2000ms | ≥100ms | 水位检查周期 |
+| `BatchPerTick` | 20 | 正数 | 把写事务与 CPU 都切成小段 |
+| `YieldEvery` / `YieldPause` | 10 / 100ms | 正数 | 每 10 题主动让出 CPU |
+| `BackoffStart` / `BackoffMax` | 100ms / 10s | 指数增长 | 生成或写库失败绝不打成忙循环 |
+
+三条实现细节不是装饰：
+- **水位迟滞**：`refilling` 是一个内存态标志。跌破 `low` 才置位、补到 `high` 才撤除。没有它，
+  当"一轮补不完"（`BatchPerTick` 小于缺口）时 worker 会永远在"补到 low 就停 → 立刻又低于 low"之间抖，
+  池子长期停在低位。代价：这一位是内存态，重启最多晚一轮或多补一轮，不影响任何安全判定。
+- **熵读取有上限**：每次生成最多消费 4096 字节熵（`io.LimitReader`）。一条"重复返回同一字节"的熵源
+  会让 `crypto/rand.Int` 的拒绝采样**永久自旋**（这是本轮实测踩到的挂死），上限把它变成一个有界的失败。
+- **`Stats` 是进程内计数**（`Generated`/`Failed`/`Rejected`/`LastErr`/`LastTick`），重启归零，
+  管理响应里显式带 `restart_resets:true` 说明这一点——它是可观测性，不是账本，绝不参与任何安全判定。
+  `LastErr` 只写 `errClass` 折叠后的有限类别（`pool-full` / `entropy` / `generate-exhausted` / `bad-params` /
+  `unknown-generator` / `canceled` / `unspecified`），不含答案、题面、库或驱动原文、密钥材料。
+- claim 落在**单个事务** `IssueChallengeWithQuestion`：插 challenge 行 + 选 ready 题 + 条件更新为 `assigned` +
+  回读题面。`SELECT` 候选与 `UPDATE` 之间的竞争由条件更新的**影响行数**裁决（不是靠"先抢到行锁"），
+  输了就换下一个候选，最多 `claimAttempts=5` 次；5 次都输 ⇒ `ErrPoolEmpty`（可重试，不是错误升级）。
 
 ## 9. 风险打分层（第三层，阶段 3+ 实现）
 
@@ -423,15 +608,17 @@ TTL 有 `[1s, 1h]` 上下界——有效期长度直接决定防重放账本必�
 
 | 方法 | 路径 | 鉴权 | 阶段 | 说明 |
 |---|---|---|---|---|
-| POST | `/api/challenge` | `site_key` | 1 | 签发 PoW challenge（阶段 3 起附带题目 payload） |
-| POST | `/api/redeem` | challenge token | 1 | 提交 PoW 解，成功换一次性 `response`（阶段 3 起附带答案与行为数据） |
+| POST | `/api/challenge` | `site_key` | 1（3A 起按站点模式附带题目） | 签发 PoW challenge；`pow_question` 站点同时从池里领一道题并原子绑定 |
+| POST | `/api/redeem` | challenge token | 1（3A 起接受 `answer`） | 提交 PoW 解（与答案），成功换一次性 `response` |
 | POST | `/siteverify` | `secret` | 1 | reCAPTCHA 风格，服务端调用 |
 | GET | `/healthz` | 无 | 1 | 存活探针，只返回 `{"status":"ok"}`，不含版本/路径/计数/依赖信息，不做健康即放行的语义 |
 | GET | `/asset/<pool_id>/<sig>` | 签名 | 3 | 题目图片，`Cache-Control: no-store` |
 | GET | `/widget/v1.js` | 公开 | 4 | widget 静态资源（gzip） |
 
 阶段 1 的公开端点**只有 PoW**：响应里不存在 `challenge` 对象，也不接受 `answer`/`behavior`。文档与实现都必须如实反映这一点，
-不得用空字段伪装成完整三层（ADR-005）。
+不得用空字段伪装成完整三层（ADR-005）。**3A 之后这段话只适用于 `pow_only` 站点**：`mode` 由站点配置决定，
+客户端没有任何字段可以选择它；三层里的第三层（风险打分）**仍然不存在**，3A 只加到第二层的工程骨架。
+行为数据（`behavior`）**不接受、不存储、不判定**——它是阶段 3+/4 的东西。
 
 `POST /api/challenge` — 请求（`application/json`，≤4KB `[目标]`）
 ```json
@@ -446,7 +633,25 @@ TTL 有 `[1s, 1h]` 上下界——有效期长度直接决定防重放账本必�
 }
 ```
 所有 API 响应带 `Cache-Control: no-store` 与 `X-Content-Type-Options: nosniff`（单次可用的 challenge 不得被中间缓存复用）。
-阶段 3 在此响应里追加 `challenge: {id, media, asset_url, task}`（形状见 §8.2）。
+**阶段 3A 追加两个键**（`pow_only` 站点不会看到 `question`）：
+```json
+{
+  "token": "v1....", "expires_in": 180,
+  "pow": { "algo": "sha256-prefix", "seed": "<b64url(16B)>", "bits": 14 },
+  "mode": "pow_question",
+  "question": { "generator": "arithmetic-baseline-v1", "generator_version": "v1",
+                "task": "12 + 7", "answer_type": "integer", "max_answer_len": 14 }
+}
+```
+`question` 的字段集合由生成器的 `SanitizePublic` 白名单给出（§5.4/§8.4），**不是**题池行的直接序列化：
+里面没有答案、没有 verifier、没有内部随机数，也**没有题池行 id**（客户端不需要一个可枚举的题目标识，
+题目 ↔ challenge 的绑定只存在于服务端 `pool.challenge_id`）。`mode` 是站点策略的**签发快照**，同时被签名覆盖。
+草稿里写的 `challenge: {id, media, asset_url, task}` 形状**没有采用**：3A 无图片资产，
+把 `id` 与 `asset_url` 发给客户端会凭空造出一个需要防枚举、防跨 challenge 引用的面。
+
+给不出题时（题池空、或站点配的生成器本进程没登记）是**可重试的资源状态**，不是验证失败：
+`503` + `Retry-After: 2` + `{ "error-codes": ["challenge-unavailable"] }`，且响应里**没有** `pow`/`token`。
+**绝不静默降级成 PoW-only**——那会让站点的策略声明在容量不足时悄悄失效（§5.4 不变量 5）。
 
 `POST /api/redeem` — 请求（≤4KB）
 ```json
@@ -456,8 +661,30 @@ TTL 有 `[1s, 1h]` 上下界——有效期长度直接决定防重放账本必�
 ```json
 { "response": "v1.6f2a1c9b8d0e4a71.<b64url(resp payload)>.<b64url(tag)>", "expires_in": 120 }
 ```
-失败 `400/401/429`：`{ "error-codes": ["invalid-challenge"] }` —— 这两个 `/api/*` 端点**不是** reCAPTCHA 契约面，
-使用自有且有限的码集：`invalid-request` / `invalid-challenge`（含篡改、过期、已消费、尝试次数耗尽，**不做区分**） / `rate-limited`。
+**阶段 3A 增加 `answer` 字段**（`pow_question` 站点必填；`pow_only` 站点带了它也不参与判定——
+`pow_only` 根本不进入判分分支，这个字段在那条路径上是**被忽略**的，服务端不会因为"多带了一个 answer"而报错，
+但也绝不会因为它而改变结论。别把"必填"读成"pow_only 必须为空否则拒绝"，实现里没有这条判定）：
+```json
+{ "token": "v1.6f2a...", "pow_nonce": "98765432", "answer": "19" }
+```
+`answer` 有两层上限，作用不同：传输上限 `len ≤64`（畸形与垃圾输入在进入任何判定前就挡掉），
+语义上限由生成器的 `NormalizeAnswer` 裁决（裁首尾 ASCII 空白、单个 `±` 前缀、仅 ASCII 数字、剥前导零、≤12 位；
+`1e3`/`0x10`/`١٢٣`/内部空白一律**畸形**）。`question.max_answer_len` 只是给客户端的输入提示，**不是**服务端判定依据。
+
+`/api/redeem` 的判定顺序是**契约的一部分**，不是实现细节（§5.4 的"一次有效作答"依赖它）：
+token 验签 → 站点存在且启用且 `svid` 一致 → 站点/IP 限流 → 来源与签发一致 → 库内 challenge 交叉核对
+（`sid`/`bits`/`seed`/`mode`/`gen`/`status`/`expires_at`）→ 答案**文法** → PoW → 终结性作答。
+因此：**畸形请求（含答案文法不合法）、来源不符都不消耗那道题**（同一 token 仍可修正后重试）；
+**PoW 解错**也不算"作答"，但沿用阶段 1 的失败计数——累计 3 次即作废该 challenge，
+此时它绑定的那道题**不会回到池里**（不变量 2），而是随题目 TTL 到期被清理：宁浪费一条容量，也不让同一题面面对第二个挑战者。
+**文法正确但数值错** ⇒ 同一事务里 `challenges.status='invalid'` + `pool.status='terminal'` 并提交，
+之后同一 token 的第二次提交只会得到 `invalid-challenge`。一题一次机会，答错不能刷。
+答案错与 PoW 错对外是**同一个** `invalid-challenge`：不透露"是哪一层失败"（红线 8）。
+
+失败 `400/429/503`：`{ "error-codes": ["invalid-challenge"] }` —— 这两个 `/api/*` 端点**不是** reCAPTCHA 契约面，
+使用自有且有限的码集：`invalid-request` / `invalid-challenge`（含篡改、过期、已消费、尝试次数耗尽，**不做区分**） /
+`rate-limited` / **`challenge-unavailable`（3A 新增，可重试，随 503）**。
+阶段 1 文档写过的 `401` 从未出现（复核后按实际实现记录：`/api/*` 只用 400/429/503）。
 
 `POST /siteverify` — 请求（`application/x-www-form-urlencoded` 或 `application/json`）
 ```json
@@ -499,8 +726,23 @@ TTL 有 `[1s, 1h]` 上下界——有效期长度直接决定防重放账本必�
 | GET/POST | `/api/admin/admin-keys` | 列出管理凭据元数据 / 新增一把 |
 | POST | `/api/admin/admin-keys/{key_id}/revoke` | 撤销管理凭据（自撤销时返回 `warning:"self-revoked"`） |
 | GET | `/api/admin/audit?before_id=&limit=` | 审计倒序游标分页（上限 500） |
+| GET | `/api/admin/generators` | **3A**：本进程登记的题型（`id`/`version`/`media`/`production_ready`/`note`）+ `max_difficulty` |
+| GET | `/api/admin/pool` | **3A**：按 `(generator, version, difficulty)` 分桶的 `ready`/`assigned`/`terminal`/`total` 计数 + worker 观测 |
 
-尚未实现（阶段 3/5）：`/api/admin/sites/{id}/generators`、`/api/admin/pool`、`/api/admin/stats`、master key 的 `kid` 轮换登记接口。
+尚未实现（阶段 3B/5）：`/api/admin/sites/{id}/generators`（多题型权重）、`/api/admin/stats`、master key 的 `kid` 轮换登记接口。
+
+**阶段 3A 的模式与生成器配置**（写在这三个字段上：`verify_mode`/`generator_id`/`difficulty`，创建与部分更新都走同一校验）：
+- `pow_only` 必须不带 `generator_id`；`pow_question` 必须带**本进程已登记**的 `generator_id` 与 1..`max_difficulty` 的难度档。
+  校验在**写库之前**（`checkModePolicy`）：库里存一个没登记的 generator_id，等于给站点配了一条只会返回 503 的策略，
+  那是运维事故而不是运行时兜底。未知模式串一律 `400 bad-request`。
+- `GET /api/admin/pool` 的响应只有计数、时间戳与题型标识：**没有** `payload_json`、没有 `verifier_blob`、
+  没有答案、没有内部随机数、没有可用 secret（红线 5/11）。worker 计数缺失时该键给出 `{"enabled":false}`，
+  而不是伪装成"0 条已生成"。
+- **这两个只读接口不写审计**：`/api/challenge` 每次都会消耗一条题池行，若为统计给公开查询挂一条审计写入，
+  等于让公开流量把审计表打满（阶段 3A 明确不做，见下方"审计边界"）。
+- `production_ready` 与 `note` 是刻意的自我标记：`arithmetic-baseline-v1` 在这里**如实写明**"题面可被脚本直接求值，
+  不抗自动解题，仅用于验证题池与提交生命周期"，让运维在管理面就看到基线题型的定位，而不是只写在文档里。
+
 `DELETE /sites/{id}` 是**软吊销**（停用 + 提升版本），不删任何账本行——已消费的 response 行正是"重放必失败"的证据。
 
 管理面的结构隔离与错误族：
@@ -581,20 +823,32 @@ swap: 512M + vm.swappiness=10；GOMEMLIMIT=56MiB GOMAXPROCS=1
 
 | 项 | 目标/估算 | 实测 | 守护方式 |
 |---|---|---|---|
-| 常驻 RSS | `[目标]` <100MB（Go 基线 + 字体光栅 + SQLite page cache + 池缓冲，阶段 3 后才有光栅项） | 待填 | `GOMEMLIMIT`；测试读 `/proc/self/status` 断言峰值 |
-| 二进制体积 | `[目标]` ≤35MB（含 modernc/sqlite） | `[实测]` 9.44MB（9,896,228 字节；2026-10-17，linux/arm64，go1.24.5，`-trimpath -ldflags "-s -w"`，含 modernc SQLite 驱动与两条内嵌迁移） | `make size` |
-| 内嵌字体 | `[估算]` Latin 1–3MB；CJK 子集 4–6MB | 待填（阶段 3） | 子集脚本 + NOTICE |
-| 池预生成 CPU | `[目标]` 平均 ≤15%（补 10 题睡 100ms） | 待填（阶段 3） | metric `pool_gen_ms` 直方图 |
+| 常驻 RSS | `[目标]` <100MB（Go 基线 + 字体光栅 + SQLite page cache + 池缓冲，阶段 3 后才有光栅项） | `[实测]` **真实服务进程**（`cmd/server` 二进制、`-trimpath -ldflags -s -w`）在"池里 200 道 ready 题 + 20 次完整 challenge→redeem→siteverify 闭环"下 `/proc/<pid>/status` 的 **VmRSS = VmHWM = 15,488 kB（15.1MB）、Threads=9**（2026-10-17，linux/arm64，go1.24.5）。这是**功能闭环形状**的采样、不是持续负载下的稳态，也没有压过 20000 行满载；基准确另见测试进程 VmRSS 9.6MB(100 题)/13.1MB(1000 题)，**含测试框架、不得混引** | `GOMEMLIMIT`；测试读 `/proc/self/status` 断言峰值 |
+| 二进制体积 | `[目标]` ≤35MB（含 modernc/sqlite） | `[实测]` 9.44MiB（9,896,228 字节；2026-10-17，linux/arm64，go1.24.5，`-trimpath -ldflags "-s -w"`，含 modernc SQLite 驱动与**三条**内嵌迁移）。同一天用**完全相同的 flag** 把 HEAD（阶段 2）与工作树（阶段 3A）各构建一次，两者字节数相同 —— 体积未随 3A 的新代码增长，这是实测对比；**原因未做符号级分析，本文不解释** | `make size` |
+| 单题数据体积 | `[目标]` payload ≤4096B / verifier ≤512B（库内 CHECK 强制） | `[实测]` `arithmetic-baseline-v1` 较大块 **62–63 字节**（verifier 恒为 16B nonce + 32B HMAC = 48B）；库内**净增 ≈432 字节/题**（1000 题与 100 题两次 checkpoint 后大小之差 ÷ 900 行；SQLite 4KB 页填充率决定了它远大于裸字段和） | `store.MaxPayloadBytes`/`MaxVerifierBytes` + 有测试 |
+| 有限批次生成耗时 | — | `[实测]` 补 100 题：纯生成+写入 **29ms**（0.29ms/题）；补 1000 题：**339–391ms**（0.34–0.39ms/题）。总墙钟 1.03s / 10.3s 里**主动让出 CPU 占 1s / 10s**（`YieldEvery=10`/`YieldPause=100ms`，是设计意图不是开销）。测量条件：本机 4 核可见但 `BatchPerTick=n` 单轮补满、`t.TempDir()` 独立库、2026-10-17 | `BenchmarkPoolFill`（需显式 `-bench`） |
+| 题池磁盘占用 | `[目标]` 20000 行上限 | `[估算]` 按上行的 432 B/题 ⇒ 上限约 **8.4MB**（**外推值，未实测到 20000 行**；50GB 磁盘下不构成约束）。WAL 在写入进行中额外占 ~4.7MB（自动 checkpoint 阈值 1000 页） | `MaxRows` 同语句判定 |
+| 内嵌字体 | `[估算]` Latin 1–3MB；CJK 子集 4–6MB | 待填（**3A 没有字体**：基线题型是纯文本，光栅路径属 3B） | 子集脚本 + NOTICE |
+| 池预生成 CPU | `[目标]` 平均 ≤15%（补 10 题睡 100ms） | 待填（未做持续负载测量；0.35ms/题的纯成本意味着按默认 `BatchPerTick=20`/`PollInterval=2s` 稳态补题时 CPU 占用远低于该目标，但这是算术推论不是实测） | metric `pool_gen_ms` 直方图（阶段 5） |
 | `/siteverify` p99 | `[目标]` <60ms | 待填（阶段 1 未做性能测量） | 基准测试 `TestBenchmarkSiteVerify` |
 | `/api/challenge` p99 | `[目标]` <120ms | 待填 | 同上 |
 | 混合吞吐 | `[目标]` ≥150 req/s 且无 `SQLITE_BUSY` | 待填 | `make loadtest`（阶段 5） |
-| PoW 求解时延 | `[估算]` bits=18 浏览器 300–900ms | 待填（阶段 4，需真实设备） | widget 上报 `pow_impl` 与耗时 |
+| PoW 求解时延 | `[估算]` bits=18 浏览器 300–900ms | 待填（阶段 4，需真实设备） | widget 上报 `impl` 与耗时 |
+
+**未测项与原因（3A 明确列出，不编造数值）**：
+**稳态**服务进程 RSS 与库体积（已测的是"200 题 + 20 次闭环"的功能形状采样，见上表；
+长期运行、真实流量形状与 20000 行满载仍未测——满载会把"池打满后行为"这个更该先测的性质掩盖掉）；
+200 题时的库体积 `[实测]` **checkpoint 后 245,760 B（含 schema、站点、账本与 200 条题目）**，
+写入进行中另含 `-wal` 3.8MB / `-shm` 32KB（自动 checkpoint 阈值 1000 页决定，不是净占用）；
+claim 在双句柄并发下的**吞吐**上限（3A 测的是**正确性**——只有一个领取者、过期快照那一笔必须回滚，不是吞吐）；
+`pool_gen_ms` 直方图（本版没有 metrics 导出面）。
 
 ## 14. 安全实现清单（review 时逐条对照）
 
 1. 密钥/摘要/token 的比较一律 `crypto/subtle.ConstantTimeCompare`（阶段 1 已覆盖 secret 比对与 tag 比对）。
 2. token 解析前必须有总长度上限；payload 段用 `io.LimitReader` + `DisallowUnknownFields`，禁止无限制读取。
-3. 所有 nonce/seed/随机答案参数来自 `crypto/rand`；`math/rand` 仅用于图形抖动且每次独立播种（阶段 3）。
+3. 所有 nonce/seed/随机答案参数来自 `crypto/rand`；`math/rand` 仅用于图形抖动且每次独立播种（**3A 无图形抖动**，
+   整个包树里没有 `math/rand`；每题熵读取另有 4096B 上限，防止畸形熵源把拒绝采样变成永久自旋，§8.3）。
 4. 一次性消费的四条保证（ADR-004 / §5.1）：原子条件状态转移、同一 `Tx` 提交、检查 `RowsAffected == 1`、
    并发（含**两个独立 DB 句柄**）与**重启后重放**测试。`db.BeginTx` 已负责 `BEGIN`，**禁止在 `*sql.Tx` 上再执行 `BEGIN IMMEDIATE`**。
 5. HTTP：请求体 `http.MaxBytesReader`（公开 4KB / siteverify 8KB / 管理 64KB）；`ReadHeaderTimeout/ReadTimeout/WriteTimeout/IdleTimeout` 全设；
@@ -610,6 +864,11 @@ swap: 512M + vm.swappiness=10；GOMEMLIMIT=56MiB GOMAXPROCS=1
 10. admin（阶段 2）：admin_key 摘要存储、失败计数锁定（内存）、默认仅 localhost；审计表覆盖所有写操作。
 11. 依赖：见 §16；引入任何新依赖需记录理由并由我确认。`GOTOOLCHAIN=local`，禁止构建过程隐式升级 Go。
 12. 错误处理不吞异常；不 panic 出栈（中间件 recover + 通用文案）；安全关键状态**事务提交后才返回成功**（D12）。
+13. **题目私有数据（3A）**：答案明文不落库、不下发、不落日志；`verifier_blob` 只由生成器解释；
+    公开出网唯一通道是 `SanitizePublic`（白名单键，未知键报错）；管理观测面只给计数与题型元数据。
+14. **降级即失效（3A）**：`pow_question` 在任何路径上都不能退化成 `pow_only`——池空 ⇒ 503 可重试、
+    生成器未登记 ⇒ 503、绑定丢失 ⇒ `invalid-challenge`、题面不合法 ⇒ 作废该 challenge 并 503。
+    四种情形都有测试，且都不返回 `pow`/`token`。
 
 ## 15. 目录骨架（现状与计划）
 
@@ -618,21 +877,27 @@ cmd/server/          单二进制入口（flag→config→store→http）
 internal/api/        HTTP 层：路由、校验、限流中间件、错误码
 internal/pow/        PoW 签发与验证、难度校准
 internal/token/      域分隔密钥派生、签名/验签、kid 轮换
-internal/store/      SQLite 打开、PRAGMA、迁移（0001/0002）、原子条件消费（阶段 1）；
-                     站点与凭据生命周期 sites.go/secrets.go、来源规范化 origins.go、审计 audit.go（阶段 2）
-internal/pool/       题池水位、预生成、claim 事务（阶段 3）
-internal/generator/  Generator 契约（阶段 3 定稿并实现）
+internal/store/      SQLite 打开、PRAGMA、迁移（0001/0002/0003）、原子条件消费（阶段 1）；
+                     站点与凭据生命周期 sites.go/secrets.go、来源规范化 origins.go、审计 audit.go（阶段 2）；
+                     题池与题目 ↔ challenge 绑定 pool.go、终结性作答 RedeemAttempt（阶段 3A）
+internal/pool/       后台预生成 worker：水位迟滞、有界批次、CPU 让步、指数退避（阶段 3A 实现）；
+                     领取与终态化在 store 的事务方法里，不在这里
+internal/generator/  Generator 契约 + Registry + arithmetic-baseline-v1（阶段 3A 实现，工程基线题型）；
+                     视觉题型与渲染路径属 3B
 internal/risk/       有界令牌桶与来源地址裁决（阶段 1）；打分（阶段 3+）
-internal/admin/      管理 API：鉴权/审计/站点与凭据生命周期（阶段 2，admin.go + handlers.go）；页面属阶段 5
-internal/config/     配置装载（flag + env + 站点文件，无 YAML 依赖）
+internal/admin/      管理 API：鉴权/审计/站点与凭据生命周期（阶段 2，admin.go + handlers.go）；
+                     模式与生成器配置校验、`/api/admin/generators` 与 `/api/admin/pool` 只读观测（阶段 3A）；页面属阶段 5
+internal/config/     配置装载（flag + env + 站点文件，无 YAML 依赖）；3A 起含 6 个题池水位/节奏项与组合校验
 internal/version/    构建信息（ldflags 注入）
-cmd/devclient/       开发/验收客户端：真实暴力求解 PoW，驱动 stage1.sh（阶段 1）
+cmd/devclient/       开发/验收客户端：真实暴力求解 PoW（阶段 1）、站点策略闭环与**独立求值**基线题答案（阶段 3A），
+                     驱动 stage1.sh / stage2.sh / stage3a.sh
 web/widget/          v1.js + i18n + 样式（阶段 4）
 deploy/docker/       Dockerfile + compose（阶段 5）
 deploy/cloudflare/   Worker + wrangler.toml（阶段 5 之后评估）
 internal/store/migrations/  NNNN_*.sql（阶段 1 起）——偏离"顶层 migrations/"是有意的：
                      go:embed 只能嵌入本包子树，放在仓库根就无法编进单二进制
-docs/                DESIGN.md、DECISIONS.md、scripts/（stage1.sh、stage2.sh）、reviews/（阶段自检报告）
+docs/                DESIGN.md、DECISIONS.md、STAGE3A.md（3A 状态转换表与资源实测）、
+                     scripts/（stage1.sh、stage2.sh、stage3a.sh）、reviews/（阶段自检报告）
 ```
 调整需说明理由；测试与被测文件同包同目录（`*_test.go`），集成测试用 `t.TempDir()` 建独立 DB，禁止依赖外部环境。
 
@@ -683,7 +948,53 @@ docs/                DESIGN.md、DECISIONS.md、scripts/（stage1.sh、stage2.sh
 来源规范化的 30 余条向量、预检不签发不消费、审计覆盖所有写操作 + 分页边界 + 不含凭据、
 阶段 1 库的真实升级路径与"旧列不可用于认证"、清理与外键相容、验证请求与停用并发的提交顺序一致性。
 
-**阶段 3 — Generator 契约定稿 + `arith-v1` + `text-warp-v1` + 题池 + 一次性消费**
+**阶段 3A — 生成器契约 + 题池基础设施 + `arithmetic-baseline-v1` + 流程基线（已实现，2026-10-17）**
+范围边界（与阶段 3B 分界）：3A 只做**工程基线**——可插拔生成器接口、有界预生成题池、原子领题、
+challenge 绑定、单次答案提交，以及一条纯文本基线题型。**不含**视觉题型、渲染依赖、风险打分、自动淘汰、widget、
+"用 LLM 生成题目"，且**不声称**基线题型抗 OCR/抗 AI（§8.4 明确它可被脚本 O(1) 解出）。
+因此**不打 `stage-3-done`**，只打 `stage-3a-done`。
+
+验收（`make stage3a-check` 自动化 10 项，见 `docs/scripts/stage3a.sh`）：
+- 密钥运行时随机生成、DB 在临时目录、端口由内核分配（`:0`）；`trap` 只清理本脚本自己创建的进程与文件。
+- 阶段 1/2 的站点在新库上仍是 `pow_only` 且流程不变（**不静默改变现有业务**）。
+- 管理面配置 `pow_question` + 生成器 + 难度档；未登记的 generator_id 与"模式与生成器不匹配"必须 400。
+- worker 关闭且池空 ⇒ **503 `challenge-unavailable` + `Retry-After`，且响应里没有 `pow`/`token`**（不是降级成 PoW-only）。
+- 后台 worker 自动备题 ⇒ 池水位从 0 升到 `low_watermark` 后 challenge 恢复 200。
+- 端到端**真实求解**：脚本自己解析公开 `task` 求值（独立于 `internal/generator` 的实现），
+  **不读库里的答案、不新增答案调试接口、不硬编码固定解**。
+- 错误答案 ⇒ `invalid-challenge`，且**同一 token 再提交仍然失败**（终结性由已提交的终态保证，不是靠内存）。
+- 缺 `answer`、答案文法非法、PoW 解错 ⇒ 不终结该题（与上一条对照，证明两类语义不同）。
+- **进程重启后**：终态 challenge 不可重放、已消费 response 仍 `timeout-or-duplicate`、
+  `assigned`/`terminal` 题不再作为可领取题发出。
+- 哨兵扫描：凭据与密钥材料**按值**扫（公开响应、管理响应、日志、**库文件原始字节**都不含站点 secret）；
+  答案与私有 verifier 的 verifier **字节**只在集成测试里按值扫（测试能读库拿哨兵），
+  脚本层**按字段名**扫（`"answer"`/`"verifier"`/`"seed"` 不得出现在日志里）——算术答案是小整数，
+  按值扫日志会撞上 `dur_ms` 这类合法数值字段，那属于会把真问题掩盖掉的假阳性。
+
+测试覆盖（`internal/generator` / `internal/pool` / `internal/store` / `internal/api`，**3A 无 `t.Skip`**）：
+生成器侧——已知答案向量与独立求值器交叉验证（5 档 × 1000 题）、答案规范化接受/拒绝表、
+公开 payload 不含私有字段（按字段名与按值双向断言）、`SanitizePublic` 未知键拒绝、熵源报错原样上抛、
+注册表不回落、答案分布实测；池侧——低于水位补题、到 `MaxRows` 停、水位按桶、配置校验、
+失败指数退避（并断言失败计数不爆表 = 无忙循环）、失败后可恢复、`Stop`/`Wait` 与 ctx 取消、未登记生成器不被替换；
+库侧——一题只被一个 challenge 领走（**两个独立 `*sql.DB` 句柄争抢同一文件**，且**两个方向都断言**：
+带绑定的行数与 `count(distinct challenge_id)` 都必须等于成功次数——只查"一个 challenge 绑多题"是半个不变量，
+漏掉"同一题行被第二个事务改绑"那一半）、事务失败不留孤立绑定、
+跨句柄的**过期读快照**去领题时必须失败而不是覆盖（`TestStaleSnapshotClaimFailsClosed`：实测形态是
+`UPDATE` 拿到 `database is locked`，整笔事务回滚，被抢的题仍只属于先提交的那方）、
+`assigned` 不回 `ready`、错误答案走已提交终态、清理顺序不破坏有效绑定与防重放记录、重启后终态保持；
+API 侧——模式与生成器降级尝试被拒、答错终结、重复提交失败、畸形请求不消耗题、池空 503 形状、响应键集合。
+
+**失败回归（不是"测试通过"的附注，是它的证据）**：把 `RedeemAttempt` 的"错误答案"分支临时改成
+**返回 error**（等价于事务回滚 ⇒ 题目回 `ready`、challenge 回可重试），2026-10-17 实跑
+`go test -count=1 ./internal/store/ ./internal/api/` 变红的**完整**名单是 7 条：
+store 侧 `TestAssignedNeverReturnsToReady`、`TestRedeemAttemptWrongAnswerCommits`、`TestConcurrentRedeemMixedAnswers`；
+api 侧 `TestWrongAnswerTerminatesChallenge`、`TestAnswerIsBoundToItsOwnChallenge`、
+`TestDisableDoesNotReturnQuestionAndRestartKeepsState`、`TestFailedChallengeStaysFailedAfterRestart`。
+随后恢复正确实现并复跑为绿；故意破坏的版本**没有提交**（`grep` 确认注入标记不在树里）。
+
+**阶段 3B（未开始）— 视觉生成器 + 反自动解题基线测量**
+前置条件：字体/图片素材的**再分发许可**先定（§18-R3，未确认就不动代码），可能需要 `golang.org/x/image`
+（属新增依赖，须先问用户，AGENTS.md）。
 验收：池低于水位自动补至 `high_watermark`；payload 属性测试断言答案与可推导种子不在其中（各 500 题随机）；
 并发生成/claim 在 `-race` 下无竞争、无重复下发；统计计数与并发写一致；字体缺失时启动即失败（不静默降级）。
 **ADR-002 的硬门槛**：每个题型必须提交 M1–M4 四个指标，其中 M4（每次尝试成本）与 M3（猜测通过率）需带**本地基线测量**的
@@ -706,7 +1017,7 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
 |---|---|---|---|
 | R1 | SHA-256 前缀 PoW 对 GPU 友好，成本上限有限 | 默认 `bits=18 [估算]` | 动态难度 + memory-hard 协议位（启用前需 `[实测]` 验证侧成本，§7） |
 | R2 | 多模态模型可解字符图（`[估算]` 60–90%，**非本专案测量**） | 接受，且此数字待阶段 3 基线替换 | 一次性 + 尝试次数封顶 + 成本层叠加；不指望题目本身 |
-| R3 | `cjk-v1` 成语语料与 `rotate-v1` 底图的再分发许可 | **未确认**，阶段 3 前必须定 | 自建/CC0/OFL；`docs/NOTICE.md` 清单 |
+| R3 | `cjk-v1` 成语语料与 `rotate-v1` 底图的再分发许可 | **未确认**，现在是 **阶段 3B 的开工前置条件**（3A 是纯文本，不需要素材） | 自建/CC0/OFL；`docs/NOTICE.md` 清单 |
 | R4 | 选择题答案空间仅 4（猜测通过率 25%，3 次尝试累计 ≤58%） | 这是题型的**主要弱点**，不能靠渲染混淆掩盖 | 阶段 3 用 M2/M3 正式量化；必要时改题型结构而非加噪声 |
 | R5 | 边缘（Worker/DO）持状态会改变故障域与一致性模型 | 本版不在边缘放权威状态（工程选择，非平台限制，ADR-001） | 阶段 5 之后按 §12 的重新评估条件决定 |
 | R6 | SQLite 单写者在 claim 高并发下的吞吐上限 `[估算]` | 未实测 | 阶段 5 压测给数字；超标则改内存队列 + 批量落库 |
@@ -714,9 +1025,42 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
 | R8 | widget 行为数据可伪造 | 设计为 ≤10% 弱权重 | 永不作为唯一 deny 依据（代码注释说明） |
 | R9 | **§13 与 §7 的全部性能数字均未实测**，阶段 1 只做功能正确性 | 已按 `[目标]`/`[估算]` 标注 | 阶段 5 压测回填；在此之前不得据此做容量或选型决策 |
 | R10 | 配额类外部事实会随平台变化（ADR-001 的教训） | 文档已改为"引用来源 + 使用时重新核对" | 任何平台限制写入文档时注明日期与出处 |
+| R11 | `arithmetic-baseline-v1` 可被脚本 O(1) 解出（M4 ≈ 0）；d1 单点答案概率实测 ≈4.5%–4.8%（两次抽样，众数在 `0` 与 `14` 之间并列），3 次尝试累计 ≈13.5%–14.4%，已超 §8.2 的 10% 线 | **已知且刻意**：它是流程/生命周期的工程基线，不是生产题型。管理面用 `production_ready:false` + `note` 显式标记；把它当真实防线用属运维误配 | 3B 用视觉题型与基线测量替换；在此之前不得用它论证任何抗 AI 结论（§8.4） |
+| R12 | 池容量不足时公共请求直接吃 503（不降级是正确的，但对调用方表现为"暂时不可用"） | 默认水位 50/100 与 20000 行上限都是 `[目标]`，**未经真实流量校准** | 3B/阶段 5 按 `[实测]` 到达率重设水位；运维侧先用 `/api/admin/pool` 观测 |
 
 ## 19. 变更日志
 
+- 2026-10-17 **v2.5（阶段 3A 交付复核）**：v2.4 的表述里有 6 处与代码不符或依赖了未验证机制，本轮逐条按实测更正——
+  ① `0003` 迁移注释与 ADR-011 原稿把 verifier 写成 `HMAC(…, pool.id ‖ 答案)`，实现是 **每题随机 nonce**，注释按实现改写；
+  ② `claimAttempts` 的注释声称"并发对手赢下该行后 `RowsAffected==0` ⇒ 换下一个候选"，实测**不成立**：同进程被
+  `SetMaxOpenConns(1)` 串行化而走不到这一支，跨句柄则是 `UPDATE` 拿 `database is locked` 整笔回滚
+  （新增 `TestStaleSnapshotClaimFailsClosed` 钉住该失败模式，重试上限重新定性为"只为封顶循环，不是正确性依赖"）；
+  ③ `SanitizePublic` 的注释与测试名说"丢弃未知键"，实现是**整次报错**（fail closed，配合作废该 challenge），
+  注释与 `TestSanitizePublicRejectsUnknownFields` 按实现更名；
+  ④ §10.1 把 `pow_only` 的 `answer` 写成"必须为空"，实现是**忽略**该字段，按实现改述；
+  ⑤ §5.4 不变量 #1 的测试原来只断言"一个 challenge 没绑多题"（partial UNIQUE 已经保证的那一半），
+  补成"绑定行数 == `count(distinct challenge_id)` == 成功领取次数"，才真正覆盖"同一题行被改绑"那一半；
+  ⑥ 故障注入回归的红名单从 4 条更正为实跑的 **7 条**（store 3 + api 4，见 §17）；
+  ⑦ 补上一条验收要求却缺失的测试：`pow_question` 答错终结的 challenge **经进程重启后**拿正确答案仍必须被拒、
+  其绑定题不得回到 `ready`（`TestFailedChallengeStaysFailedAfterRestart`；此前只测了"站点停用导致的版本失效"那条路径，
+  没有测"答案错误导致的终态"这条路径的重启语义）。
+  另外：`burnQuestionTx` 的 `terminal_at` 原用 `time.Now()`（与注入时钟两套时间源）改为传入的 `now`；
+  池 worker 的迟滞撤防原用**跨桶累计**的 `made` 判定（第二个桶会被第一个桶的产量提前撤防）改为按桶计数；
+  删除两个无人使用的契约字段/常量（`generator.Params.Binding`、`MaxInputLen`）与管理面一处 `_ = g` 死赋值。
+  §13 新增**真实服务进程** RSS 与库体积的 `[实测]`（200 题 + 20 次闭环：VmRSS=VmHWM=15.1MB、checkpoint 后库 240KB），
+  并明确它不是稳态值；§8.4 的 M3 与 R11 按第二次抽样改为区间表述，并记录 d1 的众数 `0` 与 `14` **是并列的**。
+- 2026-10-17 **v2.4（阶段 3A 实现完成）**：新增 §5.4（`0003` 增量迁移、PublicPayload/PrivateVerifier/题池记录/绑定挑战
+  四层契约、题池状态机与七条不变量、`verifier_blob = nonce||HMAC(K_qver,…)` 的答案不落库形态、清理顺序
+  responses→pool→challenges、第一笔有效作答终结语义）、§8.4（3A 的生成器契约与 `arithmetic-baseline-v1` 的 M1–M4，
+  含**答案分布不均匀**的实测单点概率）、§8.3 补实现形状（水位迟滞、熵读取上限、进程内计数与 `restart_resets`）、
+  §10.1 追加 `mode`/`question` 与 `answer` 及 **503 `challenge-unavailable`**、§10.2 追加 `/api/admin/generators`
+  与 `/api/admin/pool`（只读、不落审计）、§6 追加第三把派生密钥 `qver` 与 `mode`/`gen` 签名快照、
+  §13 回填生成耗时/单题体积/库增长速率/二进制体积的 `[实测]` 与未测项清单、§17 把阶段 3 拆成 **3A（已完成）/3B（未开始）**。
+  两处草稿按实现更正：§8.1 的 `Verifier` 接口与 `generator.Register` 全局注册表（改为 `PrivateVerifier []byte` 与实例注册表）、
+  §8.3 的"池空 ⇒ 同步生成 ⇒ 429"（改为 503 可重试，**不降级成 PoW-only**）。新增 ADR-011。
+  3A 期间修掉三个真实缺陷：错误答案分支若返回 error 会让整笔事务回滚从而**永久可重试**（改为提交终态，并有故障注入回归）；
+  一批补不完时水位长期停在低位（加 `refilling` 迟滞）；一条"重复返回同一字节"的熵源让 `crypto/rand.Int` 的拒绝采样
+  **永久自旋**（测试挂死 5 分钟；生产路径改为每题熵读取上限 + 有界失败）。
 - 2026-10-17 v1：阶段 0 定稿（目录骨架、三层防线、API 契约、SQLite schema、密钥体系、CF 折衷、四题型反枚举设计、威胁模型与残余风险 R1–R8）。
 - 2026-10-17 v1.1：模块路径改为 `github.com/shijianus/EpoCHA`（远端 private 仓库已确定）。§6 新增管理密钥引导与**密钥材料不入仓库**硬约束；真实密钥走 `/etc/epocha/env`（0600）与 DB 分离存放。理由见 DECISIONS。
 - 2026-10-17 **v2.1（阶段 1 实现完成）**：按 v2 落地 `config/store/pow/token/risk/api/cmd`；实测二进制 9.19MB（回填 §13）；

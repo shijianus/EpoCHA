@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/shijianus/EpoCHA/internal/config"
+	"github.com/shijianus/EpoCHA/internal/generator"
 	"github.com/shijianus/EpoCHA/internal/store"
 )
 
@@ -27,6 +29,7 @@ type h struct {
 	t      *testing.T
 	db     *store.DB
 	srv    *Server
+	gens   *generator.Registry
 	public *httptest.Server
 	admin  *httptest.Server
 	logs   *bytes.Buffer
@@ -45,6 +48,14 @@ func newHarness(t *testing.T, tune func(*config.Config)) *h {
 	if _, _, err := db.BootstrapAdminKey(context.Background(), sentinelAdminKey, "bootstrap"); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
+	gens := generator.NewRegistry()
+	g, err := generator.NewArithmeticBaseline(bytes.Repeat([]byte{9}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gens.Register(g); err != nil {
+		t.Fatal(err)
+	}
 	cfg := &config.Config{
 		Listen: "127.0.0.1:0", AdminListen: "127.0.0.1:0", DBPath: dbPath,
 		MasterKey: bytes.Repeat([]byte{0x5a}, 32), Pepper: pepper,
@@ -57,11 +68,11 @@ func newHarness(t *testing.T, tune func(*config.Config)) *h {
 	}
 	logs := &bytes.Buffer{}
 	log := slog.New(slog.NewTextHandler(logs, nil))
-	srv, err := New(cfg, db, log)
+	srv, err := New(cfg, db, log, nil, gens)
 	if err != nil {
 		t.Fatalf("admin.New: %v", err)
 	}
-	hh := &h{t: t, db: db, srv: srv, logs: logs, dbPath: dbPath}
+	hh := &h{t: t, db: db, srv: srv, gens: gens, logs: logs, dbPath: dbPath}
 	hh.admin = httptest.NewServer(srv.Handler())
 	t.Cleanup(func() { hh.admin.Close(); _ = db.Close() })
 	return hh
@@ -625,7 +636,7 @@ func (x *h) restart(t *testing.T) {
 		t.Fatalf("重开库: %v", err)
 	}
 	x.db = db
-	srv, err := New(x.cfgForTest(), db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv, err := New(x.cfgForTest(), db, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, x.gens)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -664,4 +675,198 @@ func TestStatsSortWhitelist(t *testing.T) {
 
 func TestWeightAutoDemotionRule(t *testing.T) {
 	t.Skip("待阶段 5（DESIGN §17 阶段 5、ADR-006）：分级淘汰——候选告警 + 人工确认，自动降权需多信号同时成立")
+}
+
+// --- 阶段 3A：验证模式、生成器配置与题池观测 ---
+
+func TestSiteModeAndGeneratorConfig(t *testing.T) {
+	x := newHarness(t, nil)
+	// 登记的题型必须能被管理面看见，并带着"工程基线、不抗自动解题"的标记
+	gens := x.do(http.MethodGet, "/api/admin/generators", nil)
+	if gens.status != http.StatusOK {
+		t.Fatalf("生成器列表失败：%d %s", gens.status, gens.body)
+	}
+	list, _ := gens.got["generators"].([]any)
+	if len(list) != 1 {
+		t.Fatalf("应只登记一个基线题型：%s", gens.body)
+	}
+	g0 := list[0].(map[string]any)
+	if g0["id"] != "arithmetic-baseline-v1" || g0["version"] != "v1" {
+		t.Fatalf("题型标识不符：%v", g0)
+	}
+	if g0["production_ready"] != false {
+		t.Errorf("基线题型必须标 production_ready=false：%v", g0)
+	}
+	if g0["note"] == "" || !strings.Contains(g0["note"].(string), "不抗自动解题") {
+		t.Errorf("管理返回必须说明这个题型的定位：%v", g0["note"])
+	}
+
+	// 未知题型不能写进站点：那会让站点只会返回 503
+	bad := x.do(http.MethodPost, "/api/admin/sites", map[string]any{
+		"name": "ghost", "site_key": "pk_ghost",
+		"verify_mode": "pow_question", "generator_id": "text-warp-v1", "difficulty": 2,
+	})
+	if bad.status != http.StatusBadRequest {
+		t.Fatalf("未登记题型应 400，got %d %s", bad.status, bad.body)
+	}
+	// pow_question 缺 generator_id
+	if r := x.do(http.MethodPost, "/api/admin/sites", map[string]any{
+		"name": "nogen", "site_key": "pk_nogen", "verify_mode": "pow_question",
+	}); r.status != http.StatusBadRequest {
+		t.Fatalf("pow_question 缺生成器应 400，got %d %s", r.status, r.body)
+	}
+	// 未知模式
+	if r := x.do(http.MethodPost, "/api/admin/sites", map[string]any{
+		"name": "weird", "site_key": "pk_weird", "verify_mode": "question-only",
+	}); r.status != http.StatusBadRequest {
+		t.Fatalf("未知模式应 400，got %d %s", r.status, r.body)
+	}
+
+	// 合法创建：默认必须是 pow_only（不静默改变现有业务）
+	def := x.do(http.MethodPost, "/api/admin/sites", map[string]any{"name": "plain", "site_key": "pk_plain"})
+	if def.got["site"].(map[string]any)["verify_mode"] != "pow_only" {
+		t.Fatalf("新站点默认应 pow_only：%s", def.body)
+	}
+	created := x.do(http.MethodPost, "/api/admin/sites", map[string]any{
+		"name": "quiz", "site_key": "pk_quiz",
+		"verify_mode": "pow_question", "generator_id": "arithmetic-baseline-v1", "difficulty": 3,
+	})
+	if created.status != http.StatusCreated {
+		t.Fatalf("合法配置应 201，got %d %s", created.status, created.body)
+	}
+	site := created.got["site"].(map[string]any)
+	id := int64(site["id"].(float64))
+	if site["verify_mode"] != "pow_question" || site["generator_id"] != "arithmetic-baseline-v1" ||
+		site["difficulty"] != float64(3) {
+		t.Fatalf("模式配置未生效：%s", created.body)
+	}
+	// 部分更新不能把模式静默改掉
+	part := x.do(http.MethodPut, pathSite(id), map[string]any{"pow_bits": 15})
+	p := part.got["site"].(map[string]any)
+	if p["verify_mode"] != "pow_question" || p["generator_id"] != "arithmetic-baseline-v1" || p["difficulty"] != float64(3) {
+		t.Fatalf("部分更新改动了未请求的模式字段：%s", part.body)
+	}
+	if p["pow_bits"] != float64(15) {
+		t.Fatalf("pow_bits 未更新：%s", part.body)
+	}
+	// 模式改回 pow_only 时生成器字段留在库里但不再被使用；显式清空要能成功
+	off := "pow_only"
+	back := x.do(http.MethodPut, pathSite(id), map[string]any{"verify_mode": off, "generator_id": ""})
+	if back.got["site"].(map[string]any)["verify_mode"] != "pow_only" {
+		t.Fatalf("应能退回 pow_only：%s", back.body)
+	}
+	// 重启后模式与生成器仍在（权威数据源是库）
+	x.restart(t)
+	after := x.do(http.MethodGet, pathSite(id), nil)
+	if a := after.got["site"].(map[string]any); a["verify_mode"] != "pow_only" || a["pow_bits"] != float64(15) {
+		t.Fatalf("重启后站点策略丢失：%s", after.body)
+	}
+}
+
+// TestPoolStatusIsReadOnlyAndLeakFree 覆盖阶段 3A 的观测面：
+// 计数可以看，题目内容与私有判分数据一个字节都不能看。
+func TestPoolStatusIsReadOnlyAndLeakFree(t *testing.T) {
+	x := newHarness(t, nil)
+	created := x.do(http.MethodPost, "/api/admin/sites", map[string]any{
+		"name": "quiz", "site_key": "pk_quiz",
+		"verify_mode": "pow_question", "generator_id": "arithmetic-baseline-v1", "difficulty": 2,
+	})
+	id := int64(created.got["site"].(map[string]any)["id"].(float64))
+
+	// 未鉴权不能读
+	if r := x.doAuth(http.MethodGet, "/api/admin/pool", nil, ""); r.status != http.StatusUnauthorized {
+		t.Fatalf("池状态查询必须鉴权，got %d", r.status)
+	}
+	// 空池
+	empty := x.do(http.MethodGet, "/api/admin/pool", nil)
+	if empty.status != http.StatusOK {
+		t.Fatalf("空池也应 200：%d %s", empty.status, empty.body)
+	}
+	if _, ok := empty.got["buckets"].([]any); !ok {
+		t.Fatalf("缺 buckets 数组：%s", empty.body)
+	}
+
+	// 直接备几道题（管理面没有"手动补题"接口，那属阶段 5 运维操作）
+	spec := store.PoolSpec{GeneratorID: "arithmetic-baseline-v1", Version: "v1", Difficulty: 2}
+	for i := 0; i < 3; i++ {
+		qid := fmt.Sprintf("q%032d", i)
+		if err := x.db.InsertQuestion(context.Background(), &store.PoolQuestion{
+			ID: qid, GeneratorID: spec.GeneratorID, Version: spec.Version, Difficulty: spec.Difficulty,
+			PayloadJSON: `{"task":"7 × 8","answer_type":"integer","max_answer_len":14}`,
+			Verifier:    []byte("SECRET-VERIFIER-MUST-NEVER-LEAVE-THE-SERVER"),
+			CreatedAt:   time.Now().UTC(),
+			ExpiresAt:   time.Now().Add(time.Hour).UTC(),
+		}, 1000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st := x.do(http.MethodGet, "/api/admin/pool", nil)
+	buckets := st.got["buckets"].([]any)
+	if len(buckets) != 1 {
+		t.Fatalf("分桶数不符：%s", st.body)
+	}
+	b := buckets[0].(map[string]any)
+	if b["ready"] != float64(3) || b["assigned"] != float64(0) || b["total"] != float64(3) {
+		t.Fatalf("水位计数不符：%v", b)
+	}
+	// 逐键检查：不得出现题目内容或私有判分数据
+	for _, k := range []string{"payload", "payload_json", "task", "verifier", "answer", "id", "ids"} {
+		if _, ok := b[k]; ok {
+			t.Errorf("池状态响应含 %q 字段（应为白名单计数字段）：%v", k, b)
+		}
+	}
+	if strings.Contains(st.body, "SECRET-VERIFIER") || strings.Contains(st.body, "7 × 8") {
+		t.Fatal("池状态响应泄露了私有 verifier 或题面内容")
+	}
+	// worker 计数：明确标注重启清零
+	if w, ok := st.got["worker"].(map[string]any); ok {
+		if rr, exists := w["restart_resets"]; exists && rr != true {
+			t.Errorf("worker 计数必须声明 restart_resets=true，got %v", rr)
+		}
+	}
+	_ = id
+}
+
+// TestPoolStatusReflectsAssignment 让"assigned 不再算 ready"这条不变量在观测面也看得见。
+func TestPoolStatusReflectsAssignment(t *testing.T) {
+	x := newHarness(t, nil)
+	created := x.do(http.MethodPost, "/api/admin/sites", map[string]any{
+		"name": "quiz", "site_key": "pk_quiz",
+		"verify_mode": "pow_question", "generator_id": "arithmetic-baseline-v1", "difficulty": 4,
+	})
+	siteID := int64(created.got["site"].(map[string]any)["id"].(float64))
+	site, err := x.db.SiteByID(context.Background(), siteID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := x.db.InsertQuestion(context.Background(), &store.PoolQuestion{
+		ID: "a" + strings.Repeat("0", 31), GeneratorID: "arithmetic-baseline-v1", Version: "v1",
+		Difficulty:  site.Policy.Difficulty,
+		PayloadJSON: `{"task":"1 + 1","answer_type":"integer","max_answer_len":14}`,
+		Verifier:    []byte("v"), CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().Add(2 * time.Hour).UTC(),
+	}, 100); err != nil {
+		t.Fatal(err)
+	}
+	cid := strings.Repeat("f", 32)
+	if _, err := x.db.IssueChallengeWithQuestion(context.Background(), &store.Challenge{
+		ID: cid, SiteID: siteID, Mode: store.ModePowQuestion, GeneratorID: "arithmetic-baseline-v1",
+		PowSeed: []byte("0123456789abcdef"), PowBits: 12,
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().Add(time.Minute).UTC(),
+	}, store.Caps{MaxActive: 100, MaxActivePerSite: 100}, &store.PoolSpec{
+		GeneratorID: "arithmetic-baseline-v1", Version: "v1", Difficulty: site.Policy.Difficulty,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b := x.do(http.MethodGet, "/api/admin/pool", nil).got["buckets"].([]any)[0].(map[string]any)
+	if b["ready"] != float64(0) || b["assigned"] != float64(1) {
+		t.Fatalf("领题后的水位不符：%v", b)
+	}
+	// 答案错终结后：题变 terminal，且**不会**回到 ready
+	if _, err := x.db.RedeemAttempt(context.Background(), cid, time.Now(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	b2 := x.do(http.MethodGet, "/api/admin/pool", nil).got["buckets"].([]any)[0].(map[string]any)
+	if b2["ready"] != float64(0) || b2["assigned"] != float64(0) || b2["terminal"] != float64(1) {
+		t.Fatalf("终结后的水位不符（题不得回池）：%v", b2)
+	}
 }

@@ -267,3 +267,107 @@ SQL 读 5000 万行/天、SQL 写 10 万行/天、存储 5 GB。因此"必须付
 **影响**：DESIGN §5.3（新增）、§6、§10.2、§10.3、§12、§15、§17 阶段 2；
 `internal/store/{sites,secrets,origins,audit}.go`、`migrations/0002_stage2.sql`、`internal/admin`、
 `internal/api/handlers.go`（来源与 CORS）、`cmd/server/main.go`（双监听器）、`internal/config`。
+
+---
+
+## ADR-011 阶段 3A：题池模型、单次作答终结与答案的摘要存储
+
+**背景**：3A 要建立生成器 + 预生成题池 + 原子领题 + 一次答案提交，并通过既有的 PoW → redeem → siteverify 流程。
+DESIGN §8.3 的题池草案写于阶段 0，几处细节在实现时必须定形或被证明不合适。
+
+**决定与理由**：
+
+1. **站点显式模式，而非"有题就出题"**。`sites.verify_mode ∈ {pow_only, pow_question}`，迁移默认 `pow_only`。
+   理由：模式是业务方契约的一部分（改模式会让现有集成拿到的响应形状变化），绝不能因为"池里刚好有题"而自动变化。
+   `pow_question` 只能通过管理 API 显式设置；阶段 2 的"重启不把配置覆盖回库"语义同样适用于这里。
+
+2. **`Redeem` 与"答案对不对"绑在一个事务里，但答案的判定必须在 store 之外**。
+   `store.RedeemAttempt(ctx, cid, now, ttl, verdict)` 接受一个已经算好的判定结果：
+   `verdict=correct` → 条件置 `redeemed` + 建 response；`verdict=wrong` → 条件置 `invalid`（终态）。
+   **两条分支都在同一事务里提交，且 wrong 分支绝不返回 error**——否则一次 `error` 让整笔事务回滚，
+   challenge 回到 `issued`，攻击者就能对同一道题无限重试（这正是本轮要做故障注入回归的点）。
+   判分本身（HMAC 比较）在 API 层完成：它不需要写库，放进写事务只会拉长持锁时间。
+   判定顺序（3A 定稿，取代我最初的草稿"先判 PoW"）：**token → 站点/来源 → 答案文法 → PoW → 终结性作答**。
+   `verdict` 在 PoW 之前就算出来了，但**状态变更在 PoW 之后**，所以顺序不影响终态；把它写成"先判 PoW"
+   会让读者以为存在一个"PoW 通过但答案还没判"的窗口，实际不存在。
+
+3. **一次作答**：`pow_question` 下 challenge 只有一次有效答案尝试机会（正确→签发，错误→终态作废）。
+   DESIGN §3 原来的"累计 3 次失败作废"保留给 `pow_only`（PoW 解错的场景，且那条路径行为不变以免破坏阶段 1/2 验收）。
+   界定"有效尝试"：**结构畸形与非数字答案不算**（返回 400 `invalid-request`，不改状态），
+   文法正确但数值错误才算；PoW 不对也不算作答（走 `FailAttempt`，不进终结事务）。
+   代价如实记录：被 PoW 失败累计作废的 `pow_question` challenge，其绑定的题**不回池**（invariant #2 优先），
+   而是随题目 TTL 到期被清理——用一条容量换"同一题面绝不面对第二个挑战者"。
+
+4. **答案不落库明文，改用带上下文的摘要**。红线 5 禁止答案明文入库，而算术题答案是可离散化的
+   （ADR-003 明确"可离散化时摘要是首选"）。**实现形态**（与本文最初的草稿不同：原稿写的是
+   `HMAC(K_q, pool_row_id || "\0" || 答案)`，定稿改为**每题随机 nonce**，因为 row id 由 `INSERT` 前生成的 id 决定、
+   且把行标识当密码学上下文用是不必要的耦合）：
+   `verifier_blob = nonce(16B) || HMAC(K_q, "epocha/v1|qver|" || nonce || 0x00 || 规范化答案)`，
+   `K_q = token.DerivePurpose(master, "qver") = HMAC(master, "epocha/v1|qver|" + kid)`
+   （DESIGN §6 的域分隔派生，**不引入新密码学原语**、不加 HKDF、不改 HMAC 结构）。
+   为什么带 per-题 nonce：只读到库的人无法用"摘要相同"免费聚类出"这些题同答案"，
+   同时轮换 `kid` 会让所有历史 verifier 失效——这正是期望语义（密钥泄露后旧题目摘要不该继续可用）。
+   总长 48 字节，被 `MaxVerifierBytes=512` 与库内 CHECK 双重限制。
+   诚实记录的残余风险：答案空间小 + 摘要在库内 ⇒ **同时拿到 DB 与主密钥**的人可在题目 TTL 内离线枚举；
+   这正是 §4 已列的"活跃题目可被离线暴力猜测"，不是新增风险，也再次说明 pepper 与主密钥必须与库分离存放。
+
+5. **公开 payload 用明确类型 + 允许字段列表**，不依赖 `json:"-"`。
+   生成器返回 `PublicPayload`（具名结构体）与 `PrivateVerifier`（字节）两个独立值；
+   落库时 `payload_json` 只来自公开结构体的序列化，`verifier_blob` 只来自私有值；
+   出网时 API 再用自己的 DTO 结构体（`question` 字段白名单）重新编码。
+   为什么不只用 `json:"-"`：那是"字段级抑制"，一旦有人新增字段忘了打标签就静默泄露；
+   两道具名类型 + 一个"键集合必须等于白名单"的测试比标签可靠。
+   **算术题面本身可被程序求值**，所以绝不写"答案不可从 payload 推导"；
+   这里保证的只是"payload 里没有额外的答案字段、没有私有 verifier、没有内部种子"。
+
+6. **领题与 challenge 创建同事务，生成不在事务内**。
+   `IssueChallengeWithQuestion` 在一个 `BeginTx` 里：插 challenge 行 → `SELECT` 一个候选 `pool.id`
+   → `UPDATE pool SET status='assigned', challenge_id=? WHERE id=? AND status='ready' AND expires_at>?`
+   并检查 `RowsAffected==1`（ADR-004 的手法）→ 回读题面。**候选 SELECT 在事务内**（本文最初的草稿写的是
+   "事务外 SELECT 候选"，实现后确认放事务内更简单且同样正确——判定权在条件更新，不在 SELECT 的位置）。
+   领取条件还要求 `pool.expires_at > challenge.expires_at`：题目不能比绑它的 challenge 先过期，
+   否则会出现"challenge 还有效但题已过期"的死角（这条一度让种子题永远领不到，是本轮实测踩到的）。
+   池里没有满足条件的题 ⇒ 事务回滚，**challenge 行也不留下**（不会凭空消耗一份 challenge 存量）。
+   *为什么不用 `UPDATE ... WHERE id=(SELECT ...) LIMIT 1`*：SQLite 的 UPDATE 不支持 LIMIT（子查询形式虽可行，
+   但可读性与错误定位更差），且唯一性由条件更新 + 影响行数保证，不需要 LIMIT。
+
+7. **池空不降级**。返回 503 + 文档化码 `challenge-unavailable` + `Retry-After`，由后台 worker 补题。
+   这**偏离** DESIGN §8.3 的"池空时同步生成 + pool_miss 计数"：同步生成会把不可控的 CPU 成本塞进
+   公开请求路径（1 vCPU），而 3A 还没有渲染成本可测。阶段 3B 若引入图片题再评估是否恢复同步兜底。
+
+8. **池按 (generator_id, version, difficulty) 分桶，不按站点分桶**。
+   理由：题目内容与站点无关，站点差异只在策略（选哪个生成器、哪档难度）；按站点复制会让
+   水位与容量随站点数线性膨胀。隔离粒度必须覆盖策略维度，否则会把不合适的档位发给站点。
+
+9. **终态与清理**：`ready → assigned → terminal`，assigned **永不回 ready**（断线、超时、答案错误都不回池，
+   这是 invariant #2 的落点——回池等于让同一题面对多个挑战者，破坏"一题一挑战"）。
+   清理规则同时修掉阶段 1 遗留的一个体积问题：`challenges` 原先只删"非 issued 且过期"的行，
+   于是被放弃的 issued 行永不消失。新规则是"过期即可删（任何状态），前提是没有 response 行引用它、
+   **也没有 pool 行绑定它**"；删除顺序固定 `responses → pool → challenges`（反了就会被外键永久卡住，
+   阶段 1 的 ADR-009 就是这个 bug 的教训）。
+   安全性不变：删除过期行只会让判定更早走到 fail closed，不会让已消费 token 重新可用（有测试钉住）。
+   代价如实记录：被 PoW 失败累计作废的 `pow_question` challenge，其绑定题要等到**题目 TTL 到期**才离开库里，
+   期间它占着池容量但不可能再被任何人领走。
+
+10. **池水位沿用 DESIGN §8.3 的量级，但 3A 用常量而不是按站点数动态计算**：
+    `low=50`、`high=100`、`max_rows=20000` 全部标注 `[目标]`。
+    §8.3 的 `clamp(2*站点数, 50, 500)` **没有实现**——"按站点数"要求回答"站点数变了怎么办、按活跃站点还是全部站点、
+    软吊销的站点算不算"，这些都是阶段 5 的运维面问题，3A 不猜答案。生成并发固定 1（`MaxWorkers=4` 封顶），
+    每补 10 题 sleep 100ms 让出 CPU。
+
+11. **两条只在实现后才看得见的资源约束**（都属于"不测就不会想到"的一类）：
+    - **每题熵读取上限 4096B**（`io.LimitReader`）。测试注入一条"每次返回相同字节"的熵源时，
+      `crypto/rand.Int` 的拒绝采样会**永久自旋**——本轮实测把测试挂死 5 分钟。生产路径同样必须有界：
+      熵源变畸形应当变成一次可退避的失败（`ErrOutOfEntropy`），而不是把 worker 变成不可取消的忙循环。
+    - **水位迟滞 `refilling`**。一批补不完（`BatchPerTick` < 缺口）时，"补到 low 就停"会让池长期停在低位
+      （下一轮检查立刻又低于 low）。置位/撤除分别绑定 low/high 两个阈值解决。
+      它是内存态：重启最多晚一轮或多补一轮，**不参与任何安全判定**，这一点写进 §8.3 而不是藏在代码里。
+
+12. **主密钥轮换与题目 verifier**：`K(qver)` 只由当前主密钥派生，**不做双密钥兼容**。
+    后果是轮换后存量题的摘要在新密钥下必然判假（即使答案正确）——fail closed，有测试
+    （`TestVerifierFailsClosedAfterKeyChange`）。代价换成"不给生成器再加一层密钥指纹结构"，
+    并把"轮换前先清池"写成运维程序（DESIGN §6），而不是在实现里假装这个问题不存在。
+
+**影响**：DESIGN §5.4（新增）、§8.4（新增）、§10.1（`challenge`/`redeem` 响应形状与 `challenge-unavailable`）、
+§10.2（模式与池状态接口）、§17 阶段 3A；`internal/generator`（契约补齐）、`internal/pool`（实现）、
+`internal/store`（`RedeemAttempt`、领题事务、池行与清理）、`internal/api`、`internal/admin`、`migrations/0003_stage3a.sql`。

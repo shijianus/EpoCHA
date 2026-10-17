@@ -23,6 +23,8 @@ import (
 	"github.com/shijianus/EpoCHA/internal/admin"
 	"github.com/shijianus/EpoCHA/internal/api"
 	"github.com/shijianus/EpoCHA/internal/config"
+	"github.com/shijianus/EpoCHA/internal/generator"
+	"github.com/shijianus/EpoCHA/internal/pool"
 	"github.com/shijianus/EpoCHA/internal/store"
 	"github.com/shijianus/EpoCHA/internal/token"
 	"github.com/shijianus/EpoCHA/internal/version"
@@ -37,6 +39,8 @@ const (
 	idleTimeout       = 20 * time.Second
 	maxHeaderBytes    = 8 << 10
 	bootstrapLabel    = "bootstrap"
+	// questionKeyPurpose 是题目 verifier 密钥的域分隔用途串（DESIGN §6）。
+	questionKeyPurpose = "qver"
 )
 
 func main() {
@@ -104,11 +108,48 @@ func serve(ctx context.Context, cfg *config.Config, ln, adminLn net.Listener, st
 		return err
 	}
 
+	// 题型注册表。3A 只有一个基线生成器；登记失败（比如派生密钥太短）必须拒绝启动，
+	// 因为"站点配了 pow_question 却没有可用生成器"会在运行时变成一片 503。
+	gens := generator.NewRegistry()
+	qKey := token.DerivePurpose(cfg.MasterKey, questionKeyPurpose)
+	if len(qKey) < 32 {
+		return errors.New("初始化生成器: 题目 verifier 派生密钥长度不足")
+	}
+	arith, err := generator.NewArithmeticBaseline(qKey)
+	if err != nil {
+		return fmt.Errorf("初始化生成器: %w", err)
+	}
+	if err := gens.Register(arith); err != nil {
+		return fmt.Errorf("登记生成器: %w", err)
+	}
+
+	// 题池 worker：只有存在 pow_question 站点时才会真正生成题目（QuestionBuckets 为空即空转等待）。
+	// 因此默认启用不是"多一个后台负载"，而是让开关只在需要时才有代价。
+	var pw *pool.Worker
+	if cfg.PoolEnabled {
+		pw, err = pool.New(db, gens, pool.Config{
+			LowWatermark: cfg.PoolLow, HighWatermark: cfg.PoolHigh, MaxRows: cfg.PoolMaxRows,
+			Workers: cfg.PoolWorkers, QuestionTTL: cfg.PoolQuestionTTL, PollInterval: cfg.PoolPoll,
+			BatchPerTick: pool.DefaultConfig().BatchPerTick,
+			YieldEvery:   pool.DefaultConfig().YieldEvery,
+			YieldPause:   pool.DefaultConfig().YieldPause,
+			BackoffStart: pool.DefaultConfig().BackoffStart,
+			BackoffMax:   pool.DefaultConfig().BackoffMax,
+		}, log, nil)
+		if err != nil {
+			return fmt.Errorf("初始化题池: %w", err)
+		}
+		pw.Start(ctx)
+		defer func() { pw.StopCancel(); pw.Wait() }()
+		log.Info("题池已启用", "low", cfg.PoolLow, "high", cfg.PoolHigh,
+			"max_rows", cfg.PoolMaxRows, "workers", cfg.PoolWorkers, "question_ttl", cfg.PoolQuestionTTL.String())
+	}
+
 	signer, err := token.NewSigner(cfg.MasterKey, cfg.PrevMaster)
 	if err != nil {
 		return fmt.Errorf("初始化签名器: %w", err)
 	}
-	handler, err := api.New(cfg, db, signer, log)
+	handler, err := api.New(cfg, db, signer, gens, log)
 	if err != nil {
 		return fmt.Errorf("初始化 API: %w", err)
 	}
@@ -116,7 +157,7 @@ func serve(ctx context.Context, cfg *config.Config, ln, adminLn net.Listener, st
 
 	var adminSrv *http.Server
 	if adminLn != nil {
-		adminHandler, err := admin.New(cfg, db, log)
+		adminHandler, err := admin.New(cfg, db, log, pw, gens)
 		if err != nil {
 			return fmt.Errorf("初始化管理 API: %w", err)
 		}
@@ -257,7 +298,7 @@ func purgeLoop(ctx context.Context, db *store.DB, log *slog.Logger, done chan<- 
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
-			r, c, err := db.Purge(ctx, now)
+			c, err := db.Purge(ctx, now)
 			if err != nil {
 				log.Error("清理账本", "err", errKindOf(err))
 				continue
@@ -266,8 +307,9 @@ func purgeLoop(ctx context.Context, db *store.DB, log *slog.Logger, done chan<- 
 			if err != nil {
 				log.Error("清理审计", "err", errKindOf(err))
 			}
-			if r > 0 || c > 0 || a > 0 {
-				log.Info("清理", "responses", r, "challenges", c, "audit", a)
+			if c.Responses > 0 || c.Challenges > 0 || c.Pool > 0 || a > 0 {
+				log.Info("清理", "responses", c.Responses, "pool", c.Pool,
+					"challenges", c.Challenges, "audit", a)
 			}
 		}
 	}

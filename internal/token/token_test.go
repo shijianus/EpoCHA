@@ -27,6 +27,7 @@ func chalClaims() Claims {
 	return Claims{
 		Sid:  7,
 		Svid: 3,
+		Mode: "pow_only",
 		CID:  "cid-abc",
 		Exp:  time.Now().Add(3 * time.Minute).Unix(),
 		Bits: 18,
@@ -245,7 +246,7 @@ func TestUnknownClaimFieldRejected(t *testing.T) {
 		t.Fatalf("未知字段应拒绝，got %v", err)
 	}
 	// 反向确认：同一段 payload 去掉未知字段后能通过，说明失败原因确实是字段校验
-	good, err := json.Marshal(Claims{Typ: PurposeChallenge, Kid: s.CurrentKid(), Sid: 7, Svid: 3, CID: "cid-abc",
+	good, err := json.Marshal(Claims{Typ: PurposeChallenge, Kid: s.CurrentKid(), Sid: 7, Svid: 3, Mode: "pow_only", CID: "cid-abc",
 		Iat: now.Unix(), Exp: now.Add(time.Minute).Unix(), Bits: 18, Seed: "aGVsbG8"})
 	if err != nil {
 		t.Fatal(err)
@@ -293,7 +294,7 @@ func TestVerifyHasBoundedRead(t *testing.T) {
 	s := newSigner(t, nil)
 	now := time.Now()
 	// 巨大但签名正确的 payload 也必须被 token 总长度上限挡住
-	big, err := json.Marshal(Claims{Typ: PurposeChallenge, Kid: s.CurrentKid(), Sid: 7, Svid: 3, CID: strings.Repeat("c", 1),
+	big, err := json.Marshal(Claims{Typ: PurposeChallenge, Kid: s.CurrentKid(), Sid: 7, Svid: 3, Mode: "pow_only", CID: strings.Repeat("c", 1),
 		Iat: now.Unix(), Exp: now.Add(time.Minute).Unix(), Bits: 18, Seed: strings.Repeat("A", maxPayloadBytes)})
 	if err != nil {
 		t.Fatal(err)
@@ -342,7 +343,7 @@ func TestSiteVersionBinding(t *testing.T) {
 	// 缺少 svid（阶段 1 线格式）必须在验签后被拒，而不是当成 0 放行
 	master := bytes.Repeat([]byte{0x5a}, 32)
 	legacy, err := json.Marshal(map[string]any{
-		"typ": PurposeChallenge, "kid": s.CurrentKid(), "sid": 7, "cid": "cid-abc",
+		"typ": PurposeChallenge, "kid": s.CurrentKid(), "sid": 7, "svid": 3, "cid": "cid-abc",
 		"iat": now.Unix(), "exp": now.Add(time.Minute).Unix(), "bits": 18, "seed": "aGVsbG8",
 	})
 	if err != nil {
@@ -357,5 +358,74 @@ func TestSiteVersionBinding(t *testing.T) {
 	c2.Svid = 0
 	if _, err := s.Sign(PurposeChallenge, c2, now); !errors.Is(err, ErrUnusableKey) {
 		t.Fatalf("缺站点版本不应签发，got %v", err)
+	}
+}
+
+// 验证模式与生成器是签名覆盖的策略快照：客户端既不能降级模式，也不能换生成器。
+func TestModeAndGeneratorBinding(t *testing.T) {
+	s := newSigner(t, nil)
+	now := time.Now()
+
+	q := chalClaims()
+	q.Mode, q.Gen = "pow_question", "arithmetic-baseline-v1"
+	tok, err := s.Sign(PurposeChallenge, q, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Verify(PurposeChallenge, tok, now)
+	if err != nil || got.Mode != "pow_question" || got.Gen != "arithmetic-baseline-v1" {
+		t.Fatalf("模式与生成器未签名往返: %+v err %v", got, err)
+	}
+	bare := chalClaims()
+	bare.Mode = ""
+	if _, err := s.Sign(PurposeChallenge, bare, now); !errors.Is(err, ErrUnusableKey) {
+		t.Fatalf("缺验证模式不应签发，got %v", err)
+	}
+	bad := chalClaims()
+	bad.Mode, bad.Gen = "pow_question", ""
+	if _, err := s.Sign(PurposeChallenge, bad, now); !errors.Is(err, ErrUnusableKey) {
+		t.Fatalf("pow_question 缺生成器不应签发，got %v", err)
+	}
+	bad2 := chalClaims()
+	bad2.Mode, bad2.Gen = "pow_only", "arithmetic-baseline-v1"
+	if _, err := s.Sign(PurposeChallenge, bad2, now); !errors.Is(err, ErrUnusableKey) {
+		t.Fatalf("pow_only 不该带生成器，got %v", err)
+	}
+	bad3 := chalClaims()
+	bad3.Mode = "question"
+	if _, err := s.Sign(PurposeChallenge, bad3, now); !errors.Is(err, ErrUnusableKey) {
+		t.Fatalf("未知模式应拒绝，got %v", err)
+	}
+}
+
+// 三把用途密钥必须两两不同：题目 verifier 摘要用的 qver 不能同时是签发 token 的密钥
+// （DESIGN §6 域分隔派生的唯一实际落点，红线 2/5）。
+func TestDerivedPurposeKeysAreDistinct(t *testing.T) {
+	kys := map[string][]byte{
+		"chal": DerivePurpose(master, PurposeChallenge),
+		"resp": DerivePurpose(master, PurposeResponse),
+		"qver": DerivePurpose(master, "qver"),
+	}
+	for name, k := range kys {
+		if len(k) != 32 {
+			t.Fatalf("%s 派生密钥长度 = %d，应为 32", name, len(k))
+		}
+	}
+	for a, ka := range kys {
+		for b, kb := range kys {
+			if a < b && bytes.Equal(ka, kb) {
+				t.Fatalf("%s 与 %s 派生出同一把密钥", a, b)
+			}
+		}
+	}
+	// 主密钥不同 ⇒ 密钥不同（没有"purpose 相同就撞车"的短路）。
+	if bytes.Equal(DerivePurpose(master, "qver"), DerivePurpose(prevMaster, "qver")) {
+		t.Fatal("换主密钥后派生结果不变")
+	}
+	if DerivePurpose(bytes.Repeat([]byte{1}, 8), "qver") != nil {
+		t.Fatal("短主密钥应返回 nil")
+	}
+	if DerivePurpose(master, "") != nil {
+		t.Fatal("空 purpose 应返回 nil")
 	}
 }

@@ -72,8 +72,10 @@ func TestRunRefusesWithoutSecrets(t *testing.T) {
 		"缺 pepper": func(m map[string]string) { delete(m, "EPOCHA_PEPPER") },
 		"密钥非法":     func(m map[string]string) { m["EPOCHA_MASTER_KEY"] = "%%%not-base64" },
 		"密钥过短":     func(m map[string]string) { m["EPOCHA_PEPPER"] = base64.StdEncoding.EncodeToString([]byte("tiny")) },
-		"缺站点配置":    func(m map[string]string) { delete(m, "EPOCHA_SITES_FILE") },
-		"缺数据库路径":   func(m map[string]string) { delete(m, "EPOCHA_DB") },
+		// 阶段 2 起站点配置是**可选**的一次性导入入口，所以"没有配置文件"必须能启动；
+		// 这里改成"显式指向一个读不到的文件"，那才是真配置错误。
+		"站点文件不可读": func(m map[string]string) { m["EPOCHA_SITES_FILE"] = "/nonexistent/sites.json" },
+		"缺数据库路径":  func(m map[string]string) { delete(m, "EPOCHA_DB") },
 	} {
 		t.Run(name, func(t *testing.T) {
 			env := testEnv(t)
@@ -166,8 +168,8 @@ func TestServeHealthzAndGracefulShutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
-	if v, _ := d.SchemaVersion(context.Background()); v != 2 {
-		t.Fatalf("迁移版本 = %d（阶段 2 应为 2）", v)
+	if v, _ := d.SchemaVersion(context.Background()); v != 3 {
+		t.Fatalf("迁移版本 = %d（阶段 3A 应为 3）", v)
 	}
 	if _, err := d.SiteByKey(context.Background(), "sk-e2e"); err != nil {
 		t.Fatalf("站点未落库：%v", err)

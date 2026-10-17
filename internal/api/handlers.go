@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shijianus/EpoCHA/internal/generator"
 	"github.com/shijianus/EpoCHA/internal/pow"
 	"github.com/shijianus/EpoCHA/internal/risk"
 	"github.com/shijianus/EpoCHA/internal/store"
@@ -32,11 +34,16 @@ type challengeResponse struct {
 	Token     string     `json:"token"`
 	ExpiresIn int64      `json:"expires_in"`
 	Pow       powPayload `json:"pow"`
+	// Mode 让业务方知道自己走的是哪条路径；pow_only 站点省略 question 字段。
+	Mode     string         `json:"mode"`
+	Question map[string]any `json:"question,omitempty"`
 }
 
 type redeemRequest struct {
 	Token    string `json:"token"`
 	PowNonce string `json:"pow_nonce"`
+	// Answer 只在 pow_question 下必填。它**不是**安全边界：真正的判定在服务端库里。
+	Answer string `json:"answer"`
 }
 
 type redeemResponse struct {
@@ -209,29 +216,96 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 		PowSeed: params.Seed, PowBits: site.PowBits,
 		CreatedAt: now, ExpiresAt: now.Add(site.Policy.ChallengeTTL),
 	}
-	if err := s.db.InsertChallenge(ctx, ch, s.caps); err != nil {
-		if errors.Is(err, store.ErrCapExceeded) {
-			// 存量到顶：对外与限流同族，不透露内部原因（红线 8）。
-			s.rateLimited(w, time.Second)
+
+	// 模式来自**站点配置**（权威），不是客户端可选参数：请求体里没有 mode 字段，
+	// 也没有任何方式让客户端把 pow_question 降级成 pow_only。
+	var spec *store.PoolSpec
+	if site.Policy.VerifyMode == store.ModePowQuestion {
+		g, err := s.gens.Lookup(site.Policy.GeneratorID)
+		if err != nil {
+			// 站点配了本程序没登记的题型：宁可 503，也不"随便挑一个题型顶上"
+			s.log.Warn("生成器不可用", "site_id", site.ID, "err", errKind(err))
+			s.challengeUnavailable(w)
 			return
 		}
-		s.internalError(w, r, "写入 challenge", err)
+		spec = &store.PoolSpec{
+			GeneratorID: site.Policy.GeneratorID, Version: g.Version(),
+			Difficulty: site.Policy.Difficulty,
+		}
+		ch.Mode = site.Policy.VerifyMode
+		ch.GeneratorID = site.Policy.GeneratorID
+	} else {
+		ch.Mode = store.ModePowOnly
+	}
+
+	q, err := s.db.IssueChallengeWithQuestion(ctx, ch, s.caps, spec)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrCapExceeded):
+			// 存量到顶：对外与限流同族，不透露内部原因（红线 8）。
+			s.rateLimited(w, time.Second)
+		case errors.Is(err, store.ErrPoolEmpty):
+			s.challengeUnavailable(w)
+		default:
+			s.internalError(w, r, "写入 challenge", err)
+		}
 		return
 	}
 	seedB64 := base64.RawURLEncoding.EncodeToString(params.Seed)
 	tok, err := s.signer.Sign(token.PurposeChallenge, token.Claims{
 		Sid: site.ID, Svid: site.Version, CID: id,
 		Exp: ch.ExpiresAt.Unix(), Bits: site.PowBits, Seed: seedB64,
+		Mode: ch.Mode, Gen: ch.GeneratorID,
 	}, now)
 	if err != nil {
 		s.internalError(w, r, "签名", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, challengeResponse{
+	out := challengeResponse{
 		Token:     tok,
 		ExpiresIn: int64(site.Policy.ChallengeTTL / time.Second),
 		Pow:       powPayload{Algo: params.Algo, Seed: seedB64, Bits: site.PowBits},
-	})
+		Mode:      ch.Mode,
+	}
+	if q != nil {
+		dto, err := s.questionDTO(ctx, q)
+		if err != nil {
+			// 题面读不出合法 DTO：这张 challenge 已经消耗了一条题，必须作废而不是下发坏题面。
+			s.log.Error("题面不合法", "cid8", shortCID(q.ChallengeID))
+			if _, ferr := s.db.RedeemAttempt(ctx, q.ChallengeID, now, time.Second, false); ferr != nil {
+				s.internalError(w, r, "作废题目", ferr)
+				return
+			}
+			s.challengeUnavailable(w)
+			return
+		}
+		out.Question = dto
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// questionDTO 是题面出网的唯一通道：生成器的白名单字段 + 题型标识。
+// 池行 id **不**出现在响应里：客户端不需要、也不该有一个可枚举的题目标识；
+// 题目与 challenge 的绑定只在服务端（pool.challenge_id）。
+func (s *Server) questionDTO(ctx context.Context, q *store.PoolQuestion) (map[string]any, error) {
+	g, err := s.gens.Lookup(q.GeneratorID)
+	if err != nil {
+		return nil, err
+	}
+	fields, err := g.SanitizePublic([]byte(q.PayloadJSON))
+	if err != nil {
+		return nil, err
+	}
+	fields["generator"] = q.GeneratorID
+	fields["generator_version"] = q.Version
+	return fields, nil
+}
+
+// challengeUnavailable 是"暂时给不出题"的可重试响应：503 + Retry-After。
+// 它与限流分开，因为业务方的处理动作不同（限流要退避更久，缺题只要稍后重试）。
+func (s *Server) challengeUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "2")
+	writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error-codes": []string{CodeChallengeUnavailable}})
 }
 
 // handleRedeem 校验 PoW 解并原子消费 challenge。
@@ -241,7 +315,8 @@ func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 		s.reject(w, CodeInvalidRequest)
 		return
 	}
-	if !fieldOK(req.Token, 4096) || len(req.PowNonce) == 0 || len(req.PowNonce) > maxPowNonceLen {
+	if !fieldOK(req.Token, 4096) || len(req.PowNonce) == 0 || len(req.PowNonce) > maxPowNonceLen ||
+		len(req.Answer) > maxAnswerLen {
 		s.reject(w, CodeInvalidRequest)
 		return
 	}
@@ -293,7 +368,9 @@ func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// token 与库内记录必须完全一致：这是"签名之外再以库为权威"的纵深防御（DESIGN §6）。
+	// 模式与生成器也在这里比对：客户端无法把 pow_question 降级成 pow_only，也无法换题型。
 	if ch.SiteID != claims.Sid || ch.PowBits != claims.Bits ||
+		ch.Mode != claims.Mode || ch.GeneratorID != claims.Gen ||
 		base64.RawURLEncoding.EncodeToString(ch.PowSeed) != claims.Seed {
 		s.rejectChallenge(w, ch.ID)
 		return
@@ -308,12 +385,53 @@ func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 		s.rejectChallenge(w, ch.ID)
 		return
 	}
+	// --- 有效作答尝试的门槛 ---
+	// 顺序是刻意的：token → 站点/来源 → 结构（含答案文法）→ PoW → 才进入**会终结状态**的那一步。
+	// 畸形答案在这之前就被挡掉，因此它不会消耗掉 pow_question 唯一的作答机会；
+	// 而"文法正确但数值错"的答案会终结 challenge（一次机会，ADR-011 #3）。
+	var (
+		verdict         bool
+		requireQuestion = ch.Mode == store.ModePowQuestion
+	)
+	if requireQuestion {
+		if req.Answer == "" {
+			s.reject(w, CodeInvalidRequest)
+			return
+		}
+		g, err := s.gens.Lookup(ch.GeneratorID)
+		if err != nil {
+			s.log.Warn("生成器不可用", "site_id", site.ID, "err", errKind(err))
+			s.challengeUnavailable(w)
+			return
+		}
+		q, err := s.db.QuestionForChallenge(ctx, ch.ID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				// 绑定丢了：绝不"那就按没题处理"放行，那是把 pow_question 静默降级
+				s.log.Error("pow_question 的 challenge 没有绑定题目", "cid8", shortCID(ch.ID))
+				s.rejectChallenge(w, ch.ID)
+				return
+			}
+			s.internalError(w, r, "查绑定题目", err)
+			return
+		}
+		canon, okGrammar := g.NormalizeAnswer(req.Answer)
+		if !okGrammar {
+			// 畸形 ≠ 答错：不终态化（否则攻击者可以用垃圾输入把受害者的机会耗光，
+			// 更要紧的是"格式差异"会变成安全判定）
+			s.reject(w, CodeInvalidRequest)
+			return
+		}
+		verdict = g.Verify(q.Verifier, canon)
+	}
+
 	ok, err := pow.Params{Algo: pow.Algo, Bits: ch.PowBits, Seed: ch.PowSeed}.Verify(req.PowNonce)
 	if err != nil {
 		s.rejectChallenge(w, ch.ID)
 		return
 	}
 	if !ok {
+		// PoW 不对不算作答；pow_only 沿用阶段 1 的"累计 N 次失败作废"
 		if _, _, ferr := s.db.FailAttempt(ctx, ch.ID); ferr != nil && !errors.Is(ferr, store.ErrNotFound) {
 			s.internalError(w, r, "记录失败尝试", ferr)
 			return
@@ -321,7 +439,10 @@ func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 		s.rejectChallenge(w, ch.ID)
 		return
 	}
-	resp, err := s.db.Redeem(ctx, ch.ID, now, site.Policy.ResponseTTL)
+	if !requireQuestion {
+		verdict = true
+	}
+	res, err := s.db.RedeemAttempt(ctx, ch.ID, now, site.Policy.ResponseTTL, verdict)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotRedeemable) {
 			s.internalError(w, r, "兑换", err)
@@ -330,6 +451,14 @@ func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 		s.rejectChallenge(w, ch.ID)
 		return
 	}
+	if res.Outcome == store.OutcomeWrongAnswer {
+		// 答案错：状态**已经提交**为终态。这里返回的必须是"不可兑换"，
+		// 而且绝不允许把这条路径改成返回 error 触发回滚——那等于给回重试机会（有回归测试钉住）。
+		s.log.Info("答案错误，challenge 已终结", "cid8", shortCID(ch.ID))
+		s.rejectChallenge(w, ch.ID)
+		return
+	}
+	resp := res.Response
 	tok, err := s.signer.Sign(token.PurposeResponse, token.Claims{
 		Sid: resp.SiteID, Svid: site.Version, CID: resp.ChallengeID, RID: resp.ID,
 		Exp: resp.ExpiresAt.Unix(),
@@ -484,6 +613,10 @@ func errKind(err error) string {
 		return "cap-exceeded"
 	case errors.Is(err, store.ErrConflict):
 		return "conflict"
+	case errors.Is(err, store.ErrPoolEmpty):
+		return "pool-empty"
+	case errors.Is(err, generator.ErrUnknownGenerator):
+		return "unknown-generator"
 	default:
 		return "unspecified"
 	}

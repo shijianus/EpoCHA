@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/shijianus/EpoCHA/internal/config"
+	"github.com/shijianus/EpoCHA/internal/generator"
+	"github.com/shijianus/EpoCHA/internal/pool"
 	"github.com/shijianus/EpoCHA/internal/risk"
 	"github.com/shijianus/EpoCHA/internal/store"
 )
@@ -41,9 +43,17 @@ const (
 )
 
 // Server 是管理 API。
+// PoolObserver 让管理面读到补题 worker 的计数，而不拥有它的生命周期。
+// 计数是**内存态、重启清零**：可观测性数据，权威永远是库里的行。
+type PoolObserver interface {
+	Stats() pool.Stats
+}
+
 type Server struct {
-	db  *store.DB
-	src *risk.Source
+	db   *store.DB
+	pool PoolObserver
+	gens *generator.Registry
+	src  *risk.Source
 	// authFails 复用有界令牌桶做鉴权失败计数：条目数有硬上限，
 	// 否则攻击者用随机源地址就能把失败计数表变成内存放大器（红线 6）。
 	authFails *risk.Limiter
@@ -52,8 +62,9 @@ type Server struct {
 }
 
 // New 组装管理面。cfg 提供来源地址裁决参数与限流状态上限。
-func New(cfg *config.Config, db *store.DB, log *slog.Logger) (*Server, error) {
-	if cfg == nil || db == nil {
+func New(cfg *config.Config, db *store.DB, log *slog.Logger, observer PoolObserver, gens *generator.Registry) (*Server, error) {
+	// gens 必传：管理面必须能判断"站点选的题型到底存不存在"。
+	if cfg == nil || db == nil || gens == nil {
 		return nil, errors.New("admin: 构造参数不完整")
 	}
 	if log == nil {
@@ -67,7 +78,7 @@ func New(cfg *config.Config, db *store.DB, log *slog.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{db: db, src: src, authFails: fails, log: log, now: time.Now}, nil
+	return &Server{db: db, pool: observer, gens: gens, src: src, authFails: fails, log: log, now: time.Now}, nil
 }
 
 // Handler 返回管理路由。**只**应挂在 admin 监听器上。
@@ -96,6 +107,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/admin-keys/{keyID}/revoke", s.auth(s.handleRevokeAdminKey))
 
 	mux.HandleFunc("GET /api/admin/audit", s.auth(s.handleAudit))
+	mux.HandleFunc("GET /api/admin/pool", s.auth(s.handlePoolStatus))
+	mux.HandleFunc("GET /api/admin/generators", s.auth(s.handleGenerators))
 
 	return s.recoverMiddleware(s.headerMiddleware(s.accessLog(mux)))
 }

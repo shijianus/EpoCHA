@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/shijianus/EpoCHA/internal/config"
+	"github.com/shijianus/EpoCHA/internal/generator"
 	"github.com/shijianus/EpoCHA/internal/pow"
 	"github.com/shijianus/EpoCHA/internal/risk"
 	"github.com/shijianus/EpoCHA/internal/store"
@@ -26,6 +27,7 @@ import (
 const (
 	maxBodyAdmin    = 64 << 10
 	maxBodyPublic   = 4 << 10
+	maxAnswerLen    = 64
 	maxBodyVerify   = 8 << 10
 	maxFieldLen     = 512
 	maxPowNonceLen  = pow.MaxNonceLen
@@ -49,6 +51,10 @@ const (
 	CodeInvalidRequest   = "invalid-request"
 	CodeInvalidChallenge = "invalid-challenge"
 	CodeRateLimited      = "rate-limited"
+	// CodeChallengeUnavailable 是阶段 3A 新增的可重试码：池里没有满足本站策略的题，
+	// 或站点配了一个本程序没登记的题型。两者折叠成同一个响应——不透露哪一层挡住的（红线 8）。
+	// 它**绝不**被处理成"那就只发 PoW"：静默降级会让站点声明的策略失效而业务方毫无察觉。
+	CodeChallengeUnavailable = "challenge-unavailable"
 )
 
 // ErrInternal 是内部错误的哨兵，对外一律折叠成通用响应。
@@ -57,6 +63,7 @@ var ErrInternal = errors.New("api: 内部错误")
 type Server struct {
 	db        *store.DB
 	signer    *token.Signer
+	gens      *generator.Registry
 	src       *risk.Source
 	ipLimit   *risk.Limiter
 	siteLimit *risk.Limiter
@@ -66,8 +73,10 @@ type Server struct {
 }
 
 // New 组装服务。限流器与代理裁决来自配置。
-func New(cfg *config.Config, db *store.DB, signer *token.Signer, log *slog.Logger) (*Server, error) {
-	if cfg == nil || db == nil || signer == nil {
+func New(cfg *config.Config, db *store.DB, signer *token.Signer, gens *generator.Registry, log *slog.Logger) (*Server, error) {
+	// gens 必传：允许 nil 会让"配了 pow_question 却没有注册表"变成运行时静默 503，
+	// 那是接线错误，应该在构造时就失败。
+	if cfg == nil || db == nil || signer == nil || gens == nil {
 		return nil, errors.New("api: 构造参数不完整")
 	}
 	if log == nil {
@@ -86,7 +95,7 @@ func New(cfg *config.Config, db *store.DB, signer *token.Signer, log *slog.Logge
 		return nil, err
 	}
 	return &Server{
-		db: db, signer: signer, src: src, ipLimit: ipLimit, siteLimit: siteLimit,
+		db: db, signer: signer, gens: gens, src: src, ipLimit: ipLimit, siteLimit: siteLimit,
 		log: log, now: time.Now,
 		caps: store.Caps{MaxActive: cfg.MaxActiveChallenges, MaxActivePerSite: cfg.MaxActivePerSite},
 	}, nil

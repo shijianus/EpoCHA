@@ -46,6 +46,12 @@ type SitePolicy struct {
 	RateIPRPM          int
 	RateSiteRPM        int
 	AllowMissingOrigin bool
+	// VerifyMode 是 pow_only / pow_question（阶段 3A）。它决定公开端点的响应形状，
+	// 因此必须是站点的显式声明，不能由"池里刚好有题"推导。
+	VerifyMode string
+	// GeneratorID 与 Difficulty 只在 pow_question 下有意义：它们就是领题的分桶键。
+	GeneratorID string
+	Difficulty  int
 }
 
 // Site 是库中站点的完整视图（权威数据源是 SQLite，配置文件只是一次性导入入口）。
@@ -64,7 +70,8 @@ type Site struct {
 // siteColumns 是站点读取的统一列序；不含 sites.secret_mac——该列已在 0002 迁移中被中和，
 // 任何真实 secret 都匹配不上它（见 0002_stage2.sql 注释）。
 const siteColumns = `id, name, site_key, pow_bits, enabled, version,
-	challenge_ttl_sec, response_ttl_sec, rate_ip_rpm, rate_site_rpm, allow_missing_origin, created_at`
+	challenge_ttl_sec, response_ttl_sec, rate_ip_rpm, rate_site_rpm, allow_missing_origin,
+	verify_mode, generator_id, difficulty, created_at`
 
 func scanSite(sc interface {
 	Scan(dest ...any) error
@@ -77,7 +84,8 @@ func scanSite(sc interface {
 		err                error
 	)
 	if err = sc.Scan(&s.ID, &s.Name, &s.SiteKey, &s.PowBits, &enabled, &s.Version,
-		&chalTTL, &respTTL, &s.Policy.RateIPRPM, &s.Policy.RateSiteRPM, &allowMiss, &created); err != nil {
+		&chalTTL, &respTTL, &s.Policy.RateIPRPM, &s.Policy.RateSiteRPM, &allowMiss,
+		&s.Policy.VerifyMode, &s.Policy.GeneratorID, &s.Policy.Difficulty, &created); err != nil {
 		return nil, err
 	}
 	s.Policy.PowBits = s.PowBits
@@ -103,6 +111,13 @@ func (p SitePolicy) Validate() error {
 		return fmt.Errorf("%w: rate_ip_rpm=%d 须在 1..%d", ErrBadConfig, p.RateIPRPM, MaxRateRPM)
 	case p.RateSiteRPM < 1 || p.RateSiteRPM > MaxRateRPM:
 		return fmt.Errorf("%w: rate_site_rpm=%d 须在 1..%d", ErrBadConfig, p.RateSiteRPM, MaxRateRPM)
+	case p.VerifyMode != ModePowOnly && p.VerifyMode != ModePowQuestion:
+		return fmt.Errorf("%w: 未知验证模式 %q", ErrBadConfig, p.VerifyMode)
+	case p.VerifyMode == ModePowQuestion && p.GeneratorID == "":
+		// pow_question 没配生成器 = 领题时只能整批失败；在写入前就拒绝，别留到运行时
+		return fmt.Errorf("%w: pow_question 站点必须指定 generator_id", ErrBadConfig)
+	case p.VerifyMode == ModePowQuestion && (p.Difficulty < MinDifficulty || p.Difficulty > MaxDifficulty):
+		return fmt.Errorf("%w: 难度档须在 %d..%d", ErrBadConfig, MinDifficulty, MaxDifficulty)
 	}
 	return nil
 }
@@ -115,6 +130,8 @@ func DefaultPolicy() SitePolicy {
 		ResponseTTL:  120 * time.Second,
 		RateIPRPM:    60,
 		RateSiteRPM:  300,
+		VerifyMode:   ModePowOnly, // 默认与阶段 1/2 行为一致：只发 PoW
+		Difficulty:   MinDifficulty,
 	}
 }
 
@@ -186,11 +203,13 @@ func (d *DB) createSite(ctx context.Context, name, siteKey string, p SitePolicy,
 
 	res, err := tx.ExecContext(ctx, `
 INSERT INTO sites(name, site_key, secret_mac, pow_bits, created_at, enabled, version,
-                  challenge_ttl_sec, response_ttl_sec, rate_ip_rpm, rate_site_rpm, allow_missing_origin)
-VALUES(?,?,?,?,?,?,1,?,?,?,?,?)`,
+                  challenge_ttl_sec, response_ttl_sec, rate_ip_rpm, rate_site_rpm, allow_missing_origin,
+                  verify_mode, generator_id, difficulty)
+VALUES(?,?,?,?,?,?,1,?,?,?,?,?,?,?,?)`,
 		name, siteKey, retiredMacFor(siteKey), int(p.PowBits), now,
 		1, int64(p.ChallengeTTL/time.Second), int64(p.ResponseTTL/time.Second),
-		p.RateIPRPM, p.RateSiteRPM, b2i(p.AllowMissingOrigin))
+		p.RateIPRPM, p.RateSiteRPM, b2i(p.AllowMissingOrigin),
+		p.VerifyMode, p.GeneratorID, p.Difficulty)
 	if err != nil {
 		if isUniqueErr(err) {
 			return nil, "", fmt.Errorf("%w: 站点名或 site_key 已存在", ErrConflict)
@@ -247,6 +266,9 @@ type SiteUpdate struct {
 	RateIPRPM          *int
 	RateSiteRPM        *int
 	AllowMissingOrigin *bool
+	VerifyMode         *string
+	GeneratorID        *string
+	Difficulty         *int
 }
 
 // UpdateSite 改策略字段。**不**提升站点版本：已签发的 token 继续按签发快照生效（DESIGN §5.3）。
@@ -261,10 +283,12 @@ func (d *DB) UpdateSite(ctx context.Context, id int64, u SiteUpdate) (*Site, err
 		return nil, err
 	}
 	res, err := d.h.ExecContext(ctx, `
-UPDATE sites SET pow_bits=?, challenge_ttl_sec=?, response_ttl_sec=?, rate_ip_rpm=?, rate_site_rpm=?, allow_missing_origin=?
+UPDATE sites SET pow_bits=?, challenge_ttl_sec=?, response_ttl_sec=?, rate_ip_rpm=?, rate_site_rpm=?,
+                 allow_missing_origin=?, verify_mode=?, generator_id=?, difficulty=?
 WHERE id=?`,
 		int(next.PowBits), int64(next.ChallengeTTL/time.Second), int64(next.ResponseTTL/time.Second),
-		next.RateIPRPM, next.RateSiteRPM, b2i(next.AllowMissingOrigin), id)
+		next.RateIPRPM, next.RateSiteRPM, b2i(next.AllowMissingOrigin),
+		next.VerifyMode, next.GeneratorID, next.Difficulty, id)
 	if err != nil {
 		return nil, fmt.Errorf("store: 更新站点: %w", err)
 	}
@@ -368,6 +392,12 @@ func withDefaults(p SitePolicy) SitePolicy {
 	if p.RateSiteRPM == 0 {
 		p.RateSiteRPM = def.RateSiteRPM
 	}
+	if p.VerifyMode == "" {
+		p.VerifyMode = def.VerifyMode
+	}
+	if p.Difficulty == 0 {
+		p.Difficulty = def.Difficulty
+	}
 	return p
 }
 
@@ -391,6 +421,15 @@ func applyUpdate(cur SitePolicy, u SiteUpdate) SitePolicy {
 	}
 	if u.AllowMissingOrigin != nil {
 		out.AllowMissingOrigin = *u.AllowMissingOrigin
+	}
+	if u.VerifyMode != nil {
+		out.VerifyMode = *u.VerifyMode
+	}
+	if u.GeneratorID != nil {
+		out.GeneratorID = *u.GeneratorID
+	}
+	if u.Difficulty != nil {
+		out.Difficulty = *u.Difficulty
 	}
 	return out
 }

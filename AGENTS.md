@@ -8,15 +8,25 @@
 `/siteverify` 采用 reCAPTCHA **风格**的契约（`secret`/`response`/`remoteip` → `success`/`challenge_ts`/`hostname`/`error-codes`），
 **不声称无条件兼容所有现成 SDK**（v2/v3 的额外参数未实现）。
 
-## 当前实现进度（阶段 1 已完成，2026-10-17）
-已实现：`config`、`store`（SQLite 最小迁移 + 原子条件消费）、`pow`、`token`、`risk`（有界令牌桶 + 代理信任裁决）、
-`api`（`/api/challenge`、`/api/redeem`、`/siteverify`、`/healthz`）、`cmd/server`（优雅关闭）、`cmd/devclient`、`docs/scripts/stage1.sh`。
-**尚未实现**：站点管理 API 与域名白名单（阶段 2）、题库/题池/风险打分（阶段 3+）、widget（阶段 4）、后台/容器/边缘（阶段 5 及之后）。
-**阶段 1 只有 PoW 一层**：不得在响应或文档里伪装存在题库或行为风控。
+## 当前实现进度（阶段 1、2、3A 已完成，2026-10-17）
+已实现：`config`、`store`（三条增量迁移 0001/0002/0003 + 原子条件消费 + 题池绑定）、`pow`、`token`
+（`chal`/`resp`/`qver` 三把域分隔密钥）、`risk`（有界令牌桶 + 代理信任裁决）、`api`（`/api/challenge`、`/api/redeem`、
+`/siteverify`、`/healthz`）、`admin`（站点与凭据生命周期、来源策略、模式/生成器配置、`/api/admin/generators` 与
+`/api/admin/pool` 只读观测，独立监听器）、`generator`（生成器契约 + `arithmetic-baseline-v1`）、
+`pool`（后台预生成 worker：水位迟滞、有界批次、CPU 让步、指数退避）、`cmd/server`（优雅关闭 + worker 生命周期）、
+`cmd/devclient`、`docs/scripts/{stage1,stage2,stage3a}.sh`、`docs/STAGE3A.md`。
+**尚未实现**：视觉/图形题型与渲染依赖、题型权重与多生成器选择、风险打分、自动淘汰、widget（阶段 4）、后台页面/容器/边缘（阶段 5 及之后）。
+**阶段 3A 只有"文本基线题型 + 题池工程骨架"两层（PoW + 一次性题目）**：第三层风险打分不存在，
+且 `arithmetic-baseline-v1` 的答案**可由公开 payload 程序化推出**——不得在响应或文档里把它说成抗 AI/抗 OCR 题型，
+也不得用"随机实例多"论证安全性（DESIGN §8.4、ADR-011、红线 14）。
+阶段边界与验收：`make stage1-check` / `stage2-check` / `stage3a-check`；标签只打 `stage-3a-done`，**不打 `stage-3-done`**。
 
 ## 硬性技术约束
 - **只用 Go，纯 Go 依赖，禁止 cgo**。禁止引入 JVM、MongoDB、Postgres、Redis、外部二进制（ImageMagick/fontconfig/headless chrome）。
-- 目标机器：1 vCPU / 1GB RAM / 50GB 磁盘。常驻 RSS `[目标]` <100MB、二进制 `[目标]` ≤35MB——**这些是未实测目标**，遵守 DESIGN §13 与 ADR-006 的标注纪律。
+- 目标机器：1 vCPU / 1GB RAM / 50GB 磁盘。常驻 RSS `[目标]` <100MB、二进制 `[目标]` ≤35MB；遵守 DESIGN §13 与 ADR-006 的标注纪律。
+  3A 已有的 `[实测]` 是**功能闭环形状**而非稳态：服务进程 VmRSS=VmHWM=15.1MB（200 题 + 20 次完整流程）、
+  二进制 9,896,228 字节（阶段 2 与 3A 同 flag 构建字节数相同）。**不得**据此宣布"预算达标"——长期运行、
+  真实流量形状与 20000 题满载仍未测。
 - 已批准依赖：**只有** `modernc.org/sqlite v1.46.1`（BSD-3，锁版本原因见 ADR-007）。不得为后续阶段提前引入 `golang.org/x/image` 等；新增任何依赖必须停下问我。
 - **`GOTOOLCHAIN=local`（已写入 Makefile）**：构建不得下载/切换 Go 版本；不升级工具链（本机 go1.24.5 / linux-arm64）。
 - 权威状态（防重放账本、题池、统计）在 VPS 源站 SQLite。**这是工程选择，不是平台限制**——Cloudflare 免费计划**可以**使用

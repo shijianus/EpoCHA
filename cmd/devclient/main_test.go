@@ -68,3 +68,50 @@ func TestVerifyRespCodes(t *testing.T) {
 		t.Errorf("codes = %q", got)
 	}
 }
+
+// evalExpr 必须真的会算题：它答的是脚本从服务端拿到的表达式，读不到库里的答案。
+// 这些用例同时是"括号语义"的回归——(9 - 3) × 5 与 9 - 3 × 5 是两个不同的值。
+func TestEvalExprAnswersTasks(t *testing.T) {
+	cases := map[string]int64{
+		"12 + 7":        19,
+		"3 - 20":        -17,
+		"9 × 8":         72,
+		"56 ÷ 8":        7,
+		"(9 - 3) × 5":   30,
+		"(2 + 3) ÷ 5":   1,
+		"(12 - 18) × 2": -12,
+		"2 × 3":         6,
+	}
+	for task, want := range cases {
+		got, err := evalExpr(task)
+		if err != nil {
+			t.Errorf("evalExpr(%q): %v", task, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("evalExpr(%q) = %d，期望 %d", task, got, want)
+		}
+	}
+	for _, bad := range []string{"", "1 +", "(1 + 2", "1 ? 2", "1 ÷ 0", "7 ÷ 2", "a × b", "1 + 2 + 3"} {
+		if v, err := evalExpr(bad); err == nil {
+			t.Errorf("非法题面 %q 竟算出 %d", bad, v)
+		}
+	}
+}
+
+// challengeResp.answer 决定 devclient 走 pow_only 还是 pow_question 形状：
+// 带题面就必须带答案，不带题面就不能凭空造一个 answer 字段（阶段 1/2 的契约不能变形）。
+func TestAnswerFieldFollowsMode(t *testing.T) {
+	var powOnly challengeResp
+	if a, err := powOnly.answer(); err != nil || a != "" {
+		t.Fatalf("pow_only 不该有答案：%q %v", a, err)
+	}
+	withQ := challengeResp{Question: map[string]any{"task": "7 × 8"}}
+	a, err := withQ.answer()
+	if err != nil || a != "56" {
+		t.Fatalf("题面求值不符：%q err %v", a, err)
+	}
+	if _, err := (challengeResp{Question: map[string]any{"task": ""}}).answer(); err == nil {
+		t.Error("question 缺 task 应报错，不能静默当成 pow_only")
+	}
+}

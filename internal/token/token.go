@@ -51,6 +51,12 @@ type Claims struct {
 	Exp  int64  `json:"exp"`
 	Bits uint8  `json:"bits,omitempty"`
 	Seed string `json:"seed,omitempty"`
+	// Mode 与 Gen 是**验证策略的签发快照**（阶段 3A）：pow_only / pow_question。
+	// 它们进签名，所以客户端不能拿一张 pow_question 的 token 去走"只交 PoW"的路径，
+	// 也不能换 generator；再配合库中行的交叉核对（DESIGN §6），策略就不是客户端可控量。
+	// 注意：mode 为空是**非法**的，不允许"缺字段=按旧语义放行"这种回落。
+	Mode string `json:"mode"`
+	Gen  string `json:"gen,omitempty"`
 }
 
 // Signer 持有一把当前主密钥与可选的一把上一把主密钥（kid 轮换期间双活）。
@@ -114,6 +120,22 @@ func (s *Signer) Sign(purpose string, c Claims, now time.Time) (string, error) {
 	if purpose == PurposeChallenge && c.Bits == 0 {
 		return "", fmt.Errorf("%w: challenge 令牌缺少难度", ErrUnusableKey)
 	}
+	if purpose == PurposeChallenge {
+		switch c.Mode {
+		case "":
+			return "", fmt.Errorf("%w: challenge 令牌缺少验证模式", ErrUnusableKey)
+		case "pow_question":
+			if c.Gen == "" {
+				return "", fmt.Errorf("%w: pow_question 令牌缺少生成器绑定", ErrUnusableKey)
+			}
+		case "pow_only":
+			if c.Gen != "" {
+				return "", fmt.Errorf("%w: pow_only 令牌不该带生成器", ErrUnusableKey)
+			}
+		default:
+			return "", fmt.Errorf("%w: 未知验证模式 %q", ErrUnusableKey, c.Mode)
+		}
+	}
 	c.Typ = purpose
 	c.Kid = s.cur
 	c.Iat = now.Unix()
@@ -176,8 +198,23 @@ func (s *Signer) Verify(purpose string, tok string, now time.Time) (Claims, erro
 	if purpose == PurposeResponse && c.RID == "" {
 		return zero, ErrMalformed
 	}
-	if purpose == PurposeChallenge && (c.Bits == 0 || c.Seed == "") {
-		return zero, ErrMalformed
+	if purpose == PurposeChallenge {
+		if c.Bits == 0 || c.Seed == "" {
+			return zero, ErrMalformed
+		}
+		// 缺 mode 的旧 token 一律拒绝：绝不把"字段缺失"解释成"按旧策略放行"
+		switch c.Mode {
+		case "pow_only":
+			if c.Gen != "" {
+				return zero, ErrMalformed
+			}
+		case "pow_question":
+			if c.Gen == "" {
+				return zero, ErrMalformed
+			}
+		default:
+			return zero, ErrMalformed
+		}
 	}
 	if c.Exp <= 0 || c.Iat <= 0 {
 		return zero, ErrMalformed
@@ -231,6 +268,16 @@ func tagBytes(master []byte, purpose, payload string) []byte {
 // computeTag 是 tagBytes 的 base64url 形式，供测试与调试构造 token。
 func computeTag(master []byte, purpose, payload string) string {
 	return base64.RawURLEncoding.EncodeToString(tagBytes(master, purpose, payload))
+}
+
+// DerivePurpose 派生一把**用途密钥**：HMAC(master, "epocha/v1|<purpose>|<kid>")。
+// 与 token 内部派生完全同一手法，因此题目 verifier 的密钥与 chal/resp 签名密钥互不可用
+// ——拿到一个推不出另一个，也不会出现"同一个密钥既签 token 又算答案摘要"。
+func DerivePurpose(master []byte, purpose string) []byte {
+	if len(master) < 32 || purpose == "" {
+		return nil
+	}
+	return deriveKey(master, purpose, Kid(master))
 }
 
 // deriveKey 是带域分隔的 HMAC 派生（DESIGN §6）：每个用途一把固定长度密钥，

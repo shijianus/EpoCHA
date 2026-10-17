@@ -1,54 +1,139 @@
-// Package generator 定义可插拔题型生成器的契约（DESIGN §8.1、ADR-002/003）。
+// Package generator 定义可插拔题型生成器的契约与实现（DESIGN §8.1、§8.4，ADR-002/003/011）。
 //
-// 本文件只有契约，没有实现：具体题型（arith-v1、text-warp-v1、cjk-v1、rotate-v1）在阶段 3 落地。
-// 契约是跨阶段边界，改动需同步 DESIGN §8.2 的 M1–M4 指标论证。
+// 隔离措施是**类型层面**的，不靠 json:"-":
+//   - 公开题面必须是实现 PublicPayload 的具名结构体，生成器不会把私有字段放进来；
+//   - 私有判分数据是独立的 PrivateVerifier（一段字节），落进 pool.verifier_blob；
+//   - 公开 API 只能通过 SanitizePublic 拿到"白名单字段"的 map，任何多出来的键都会让这次出网失败。
+//
+// 阶段 3A 只有 arithmetic-baseline-v1：它是**工程基线**（用来验证生成器接口、题池与提交生命周期），
+// 不是生产抗自动解题题型。公开算术表达式可以被程序直接求值，因此这里绝不声称"答案不可从题面推导"。
 package generator
 
 import (
 	"context"
+	"errors"
 	"io"
+	"sort"
+	"strings"
+	"sync"
 )
 
-// Generator 是单个题型的生成与校验器。
+// 协议边界。
+const MaxDifficulties = 5
+
+var (
+	ErrUnknownGenerator = errors.New("generator: 未注册的题型")
+	ErrBadParams        = errors.New("generator: 生成参数不合法")
+	ErrOutOfEntropy     = errors.New("generator: 熵源不足")
+)
+
+// PublicPayload 是可下发的题面。实现者必须是**只含公开字段**的具名结构体。
+type PublicPayload interface {
+	// PublicKind 是出网 DTO 的题型标识，写入响应的 kind 字段。
+	PublicKind() string
+}
+
+// PrivateVerifier 是服务端私有判分数据：永不下发、永不写日志。
+// 形态由题型自定（ADR-003）：可摘要、可参数、可私有结构；这里只规定"它是字节且不出门"。
+type PrivateVerifier []byte
+
+// Question 是一次生成的结果：公开部分与私有部分严格分离。
+type Question struct {
+	Payload  PublicPayload   // 序列化后作为 pool.payload_json 下发
+	Verifier PrivateVerifier // 序列化后作为 pool.verifier_blob，永不下发
+	Asset    []byte          // 图片字节，可为 nil（阶段 3B 才用）
+	MimeType string          // Asset 非空时必填
+}
+
+// Params 是一次生成的输入。
 //
-// 实现必须满足（阶段 3 的属性测试逐条覆盖）：
-//   - Payload 与 Verifier 严格分离：答案、可推导答案的种子、判分秘密材料都只能待在 Verifier 里。
-//   - 安全性按 DESIGN §8.2 的四个指标分别论证（M1 题面随机空间、M2 答案空间与接受容差、
-//     M3 随机猜测通过率、M4 每次尝试成本）；不得用"随机字体/噪声/CSPRNG"代替论证。
-//   - 决定答案的随机量（数值、正确选项位置、旋转角）必须直接取自 entropy（CSPRNG）；
-//     仅图形抖动可由 entropy 播种的 math/rand 承担，且每次调用新建、不得共享实例。
-type Generator interface {
-	// ID 是题型稳定标识，写入 pool.generator_id，例如 "text-warp-v1"。
-	ID() string
-
-	// Media 返回 "text" 或 "image"，决定 widget 渲染分支。
-	Media() string
-
-	// Generate 产出一道新题。entropy 是调用方提供的 crypto/rand 流，每次调用独立、用完即弃。
-	// 同一实例被并发调用，实现不得持有可变状态。
-	Generate(ctx context.Context, p Params, entropy io.Reader) (Challenge, error)
-
-	// Verify 判分。input 已由调用方截断到协议上限。
-	// 比较方式由题型决定：可离散化的题型用常数时间精确比较，
-	// 需要容差的题型（角度、区域）自行实现判定，但不得为此把答案放进 Payload。
-	Verify(v Verifier, input string) bool
-}
-
-// Params 是站点级生成配置。
+// 3A 没有按 lang 或按站点分桶：arithmetic-baseline-v1 与语言无关，
+// 题目内容也只由 (generator, version, difficulty) 决定，所以这里只有难度档。
 type Params struct {
-	Difficulty int    // 1..5，映射到题目内部参数
-	Lang       string // "zh-CN" | "en"
+	Difficulty int    // 1..MaxDifficulties
+	Lang       string // "zh-CN" | "en"（与语言无关的题型必须忽略它）
 }
 
-// Challenge 是生成结果：公开下发部分与私有判分部分严格分离（ADR-003）。
-type Challenge struct {
-	Payload  any      // JSON 序列化后作为 pool.payload_json 下发客户端
-	Verifier Verifier // 服务端私有判分数据，永不下发
-	Asset    []byte   // 图片字节，可为 nil；经签名 URL 单次取回
-	MimeType string   // Asset 的 MIME，Asset 非空时必填
+// Generator 是单个题型的生成与判分器。
+//
+// 实现必须满足：
+//   - 决定答案的随机量必须直接来自 entropy（CSPRNG）；不得用 math/rand 抽答案参数
+//     （图形抖动可以在阶段 3B 用 entropy 播种的独立 math/rand 实例，且不得共享）。
+//   - 同一实例被并发调用：不得持有可变状态。
+//   - 答案、可推导答案的种子、判分秘密材料只能待在 Verifier 里。
+//   - 安全性按 DESIGN §8.2 的 M1–M4 分别论证；"随机实例多"、"用了 CSPRNG"都不算论证。
+type Generator interface {
+	ID() string      // 含版本的稳定标识，例如 "arithmetic-baseline-v1"
+	Version() string // 协议版本 "v1"：判分兼容性的判定依据
+	Media() string   // "text" | "image"
+
+	Generate(ctx context.Context, p Params, entropy io.Reader) (Question, error)
+
+	// Verify 判分。input 必须是 NormalizeAnswer 之后的规范形式；实现内部用常数时间比较。
+	// 需要容差的题型（角度、区域）自行定义判定方式，但不得为此把答案放进 Payload。
+	Verify(v PrivateVerifier, input string) bool
+
+	// NormalizeAnswer 把用户提交串规范成可判分形式。
+	// ok=false 表示**畸形**（不是"答错"）：调用方必须按请求形态错误处理，
+	// 不能消耗掉这张 challenge 唯一的作答机会。
+	NormalizeAnswer(input string) (canonical string, ok bool)
+
+	// SanitizePublic 把库里存的题面 JSON 归一成"只含允许字段"的出网对象。
+	// 这是公开 API 拿到题面的唯一途径：出现任何非白名单键都**报错**（而不是带着它出门，
+	// 也不是悄悄裁掉后继续下发），调用方据此作废这张 challenge。
+	SanitizePublic(raw []byte) (map[string]any, error)
 }
 
-// Verifier 是服务端私有判分数据的载体。
-// 形态由每个题型自定义（摘要、参数、私有结构皆可）；阶段 3 定稿时若需要类型安全的接口，
-// 由各题型自行持有解析逻辑，本层只负责"它是字节，且不出服务端"。
-type Verifier []byte
+// Registry 是按 id 索引的生成器表。
+type Registry struct {
+	mu   sync.RWMutex
+	byID map[string]Generator
+}
+
+func NewRegistry() *Registry { return &Registry{byID: map[string]Generator{}} }
+
+// Register 登记一个生成器。同 id 重复登记是编程错误：它会静默替换判分实现。
+func (r *Registry) Register(g Generator) error {
+	if g == nil || g.ID() == "" {
+		return ErrBadParams
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, dup := r.byID[g.ID()]; dup {
+		return errors.New("generator: 同 id 重复登记 " + g.ID())
+	}
+	r.byID[g.ID()] = g
+	return nil
+}
+
+// Lookup 按 id 取生成器。未登记一律报错——**不允许**回落到"随机一个可用题型"，
+// 那会把站点声明的策略换成别的策略。
+func (r *Registry) Lookup(id string) (Generator, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	g, ok := r.byID[id]
+	if !ok {
+		return nil, ErrUnknownGenerator
+	}
+	return g, nil
+}
+
+// IDs 返回已登记题型 id（管理面校验与观测用）。
+func (r *Registry) IDs() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]string, 0, len(r.byID))
+	for id := range r.byID {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// --- 共享的输入规范化工具 ---
+
+// trimASCII 只裁 ASCII 空白：Unicode 空白与不可见字符属于"畸形"而不是"可宽容的空格"，
+// 宽容它们会让同一个答案有多种提交形式，给判分逻辑添噪声。
+func trimASCII(s string) string {
+	return strings.Trim(s, " \t\r\n\v\f")
+}

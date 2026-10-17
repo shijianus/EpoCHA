@@ -43,6 +43,12 @@ const (
 	envMaxActiveSite = "EPOCHA_MAX_ACTIVE_CHALLENGES_PER_SITE"
 	envAdminListen   = "EPOCHA_ADMIN_LISTEN"
 	envAdminKey      = "EPOCHA_ADMIN_KEY"
+	envPoolLow       = "EPOCHA_POOL_LOW_WATERMARK"
+	envPoolHigh      = "EPOCHA_POOL_HIGH_WATERMARK"
+	envPoolMaxRows   = "EPOCHA_POOL_MAX_ROWS"
+	envPoolWorkers   = "EPOCHA_POOL_WORKERS"
+	envPoolTTL       = "EPOCHA_POOL_QUESTION_TTL_SEC"
+	envPoolPollMs    = "EPOCHA_POOL_POLL_MS"
 )
 
 // TTL 上下界。上界不是形式主义：challenge/response 的有效期直接决定防重放账本里
@@ -107,6 +113,16 @@ type Config struct {
 	// 数值是未实测的 [目标]，取舍依据是 1 vCPU/50GB 机器上账本行的体积与扫描成本。
 	MaxActiveChallenges int
 	MaxActivePerSite    int
+
+	// 题池水位与节奏（DESIGN §8.3、§8.4）。数值沿用 §8.3 的公式取值，仍是 [目标]：
+	// 3A 没有在目标机上测过补题对 1 vCPU 的实际挤占，因此默认值保守（并发 1、每 10 题让出 CPU）。
+	PoolEnabled     bool
+	PoolLow         int
+	PoolHigh        int
+	PoolMaxRows     int
+	PoolWorkers     int
+	PoolQuestionTTL time.Duration
+	PoolPoll        time.Duration
 }
 
 // Load 解析命令行参数与环境变量。getenv 为 os.Getenv，测试里可注入。
@@ -141,6 +157,14 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 
 		MaxActiveChallenges: 10000,
 		MaxActivePerSite:    2000,
+
+		PoolEnabled:     true,
+		PoolLow:         50,
+		PoolHigh:        100,
+		PoolMaxRows:     20000,
+		PoolWorkers:     1,
+		PoolQuestionTTL: 4200 * time.Second,
+		PoolPoll:        2 * time.Second,
 	}
 	var err error
 	if c.MasterKey, err = readKey(getenv, envMasterKey); err != nil {
@@ -223,6 +247,45 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 	}
 	if c.MaxActivePerSite > c.MaxActiveChallenges {
 		return nil, fmt.Errorf("%w: 单站上限不得高于全局上限", ErrInvalid)
+	}
+	if v := strings.ToLower(getenv("EPOCHA_POOL_ENABLED")); v == "false" || v == "0" {
+		c.PoolEnabled = false
+	}
+	for _, p := range []struct {
+		name string
+		dst  *int
+	}{{envPoolLow, &c.PoolLow}, {envPoolHigh, &c.PoolHigh}, {envPoolMaxRows, &c.PoolMaxRows},
+		{envPoolWorkers, &c.PoolWorkers}} {
+		if n, ok, err := parseInt(getenv(p.name)); err != nil {
+			return nil, fmt.Errorf("%w: %s", ErrInvalid, p.name)
+		} else if ok {
+			*p.dst = n
+		}
+	}
+	if d, ok, err := parseDuration(getenv(envPoolTTL)); err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrInvalid, envPoolTTL)
+	} else if ok {
+		c.PoolQuestionTTL = d
+	}
+	if n, ok, err := parseInt(getenv(envPoolPollMs)); err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrInvalid, envPoolPollMs)
+	} else if ok {
+		if n < 100 {
+			return nil, fmt.Errorf("%w: %s 不得小于 100ms", ErrInvalid, envPoolPollMs)
+		}
+		c.PoolPoll = time.Duration(n) * time.Millisecond
+	}
+	if c.PoolLow < 1 || c.PoolHigh < c.PoolLow || c.PoolMaxRows < c.PoolHigh ||
+		c.PoolWorkers < 1 || c.PoolWorkers > 4 ||
+		c.PoolQuestionTTL < time.Second || c.PoolQuestionTTL > 24*time.Hour ||
+		c.PoolPoll < 100*time.Millisecond {
+		return nil, fmt.Errorf("%w: 题池参数不合法（水位须递增、上限≥高水位、并发 1..4、TTL 1s..24h、轮询 ≥100ms）", ErrInvalid)
+	}
+	// 题目必须比 challenge 晚过期，否则领题条件永远不成立、站点只会拿到 503。
+	// 这是配置层面的可诊断错误，不该留到运行时用错误码去暗示。
+	if c.PoolQuestionTTL <= c.ChallengeTTL {
+		return nil, fmt.Errorf("%w: 题目寿命(%s) 必须大于 challenge TTL(%s)，否则永远领不到题",
+			ErrInvalid, c.PoolQuestionTTL, c.ChallengeTTL)
 	}
 
 	// 站点配置是**可选的导入入口**：阶段 2 起 SQLite 才是权威数据源。
@@ -351,9 +414,10 @@ func readKey(getenv func(string) string, name string) ([]byte, error) {
 
 // SafeSummary 是可安全写入启动输出与日志的一行摘要。
 func (c *Config) SafeSummary() string {
-	return fmt.Sprintf("listen=%s admin_listen=%s db=%s site_imports=%d challenge_ttl=%s response_ttl=%s trust_proxy=%t ip_rpm=%d site_rpm=%d max_active=%d max_active_per_site=%d admin_key_present=%t",
+	return fmt.Sprintf("listen=%s admin_listen=%s db=%s site_imports=%d challenge_ttl=%s response_ttl=%s trust_proxy=%t ip_rpm=%d site_rpm=%d max_active=%d max_active_per_site=%d admin_key_present=%t pool=%t pool_low=%d pool_high=%d pool_max=%d pool_workers=%d pool_ttl=%s pool_poll=%s",
 		c.Listen, c.AdminListen, c.DBPath, len(c.Sites), c.ChallengeTTL, c.ResponseTTL, c.TrustProxy,
-		c.RateIPRPM, c.RateSiteRPM, c.MaxActiveChallenges, c.MaxActivePerSite, len(c.AdminKey) > 0)
+		c.RateIPRPM, c.RateSiteRPM, c.MaxActiveChallenges, c.MaxActivePerSite, len(c.AdminKey) > 0,
+		c.PoolEnabled, c.PoolLow, c.PoolHigh, c.PoolMaxRows, c.PoolWorkers, c.PoolQuestionTTL, c.PoolPoll)
 }
 
 func firstNonEmpty(vals ...string) string {

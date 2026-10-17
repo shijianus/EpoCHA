@@ -9,18 +9,23 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/shijianus/EpoCHA/internal/generator"
 	"github.com/shijianus/EpoCHA/internal/store"
 )
 
 // --- 视图 ---
 
 type siteView struct {
-	ID                 int64  `json:"id"`
-	Name               string `json:"name"`
-	SiteKey            string `json:"site_key"`
-	Enabled            bool   `json:"enabled"`
-	Version            int64  `json:"version"`
-	PowBits            uint8  `json:"pow_bits"`
+	ID      int64  `json:"id"`
+	Name    string `json:"name"`
+	SiteKey string `json:"site_key"`
+	Enabled bool   `json:"enabled"`
+	Version int64  `json:"version"`
+	PowBits uint8  `json:"pow_bits"`
+	// 验证模式与题目策略（阶段 3A）。generator_id 是公开标识，不含任何凭据。
+	VerifyMode         string `json:"verify_mode"`
+	GeneratorID        string `json:"generator_id,omitempty"`
+	Difficulty         int    `json:"difficulty"`
 	ChallengeTTL       int64  `json:"challenge_ttl_sec"`
 	ResponseTTL        int64  `json:"response_ttl_sec"`
 	RateIPRPM          int    `json:"rate_ip_rpm"`
@@ -33,6 +38,9 @@ func viewSite(s *store.Site) siteView {
 	return siteView{
 		ID: s.ID, Name: s.Name, SiteKey: s.SiteKey, Enabled: s.Enabled, Version: s.Version,
 		PowBits:            s.PowBits,
+		VerifyMode:         s.Policy.VerifyMode,
+		GeneratorID:        s.Policy.GeneratorID,
+		Difficulty:         s.Policy.Difficulty,
 		ChallengeTTL:       int64(s.Policy.ChallengeTTL / time.Second),
 		ResponseTTL:        int64(s.Policy.ResponseTTL / time.Second),
 		RateIPRPM:          s.Policy.RateIPRPM,
@@ -120,6 +128,9 @@ func decodeAdmin(w http.ResponseWriter, r *http.Request, dst any) bool {
 
 type createSiteRequest struct {
 	Name               string   `json:"name"`
+	VerifyMode         *string  `json:"verify_mode"`
+	GeneratorID        *string  `json:"generator_id"`
+	Difficulty         *int     `json:"difficulty"`
 	SiteKey            string   `json:"site_key"`
 	Origins            []string `json:"origins"`
 	PowBits            *uint8   `json:"pow_bits"`
@@ -131,12 +142,15 @@ type createSiteRequest struct {
 }
 
 type updateSiteRequest struct {
-	PowBits            *uint8 `json:"pow_bits"`
-	ChallengeTTL       *int64 `json:"challenge_ttl_sec"`
-	ResponseTTL        *int64 `json:"response_ttl_sec"`
-	RateIPRPM          *int   `json:"rate_ip_rpm"`
-	RateSiteRPM        *int   `json:"rate_site_rpm"`
-	AllowMissingOrigin *bool  `json:"allow_missing_origin"`
+	VerifyMode         *string `json:"verify_mode"`
+	GeneratorID        *string `json:"generator_id"`
+	Difficulty         *int    `json:"difficulty"`
+	PowBits            *uint8  `json:"pow_bits"`
+	ChallengeTTL       *int64  `json:"challenge_ttl_sec"`
+	ResponseTTL        *int64  `json:"response_ttl_sec"`
+	RateIPRPM          *int    `json:"rate_ip_rpm"`
+	RateSiteRPM        *int    `json:"rate_site_rpm"`
+	AllowMissingOrigin *bool   `json:"allow_missing_origin"`
 }
 
 type originsRequest struct {
@@ -153,7 +167,11 @@ type addAdminKeyRequest struct {
 
 // updateFrom 把请求里的可选项转成 store 的部分更新（nil 字段原样传下去 = 不改）。
 func updateFrom(req *updateSiteRequest) store.SiteUpdate {
-	u := store.SiteUpdate{}
+	u := store.SiteUpdate{
+		VerifyMode:  req.VerifyMode,
+		GeneratorID: req.GeneratorID,
+		Difficulty:  req.Difficulty,
+	}
 	if req.PowBits != nil {
 		u.PowBits = req.PowBits
 	}
@@ -243,7 +261,12 @@ func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request) {
 	policy := applyToUpdate(store.DefaultPolicy(), store.SiteUpdate{
 		PowBits: req.PowBits, ChallengeTTL: reqTTL(req.ChallengeTTL), ResponseTTL: reqTTL(req.ResponseTTL),
 		RateIPRPM: req.RateIPRPM, RateSiteRPM: req.RateSiteRPM, AllowMissingOrigin: req.AllowMissingOrigin,
+		VerifyMode: req.VerifyMode, GeneratorID: req.GeneratorID, Difficulty: req.Difficulty,
 	})
+	if err := s.checkModePolicy(policy.VerifyMode, policy.GeneratorID, policy.Difficulty); err != nil {
+		fail(w, http.StatusBadRequest, CodeBadRequest)
+		return
+	}
 	site, secret, err := s.db.CreateSite(r.Context(), req.Name, siteKey, policy)
 	if err != nil {
 		s.auditFail(r.Context(), r, "site.create", "site:"+sanitizeTarget(siteKey))
@@ -317,7 +340,11 @@ func (s *Server) handleUpdateSite(w http.ResponseWriter, r *http.Request) {
 		failFromErr(w, err)
 		return
 	}
-	_ = cur
+	next := applyToUpdate(cur.Policy, updateFrom(&req))
+	if err := s.checkModePolicy(next.VerifyMode, next.GeneratorID, next.Difficulty); err != nil {
+		fail(w, http.StatusBadRequest, CodeBadRequest)
+		return
+	}
 	site, err := s.db.UpdateSite(r.Context(), id, updateFrom(&req))
 	if err != nil {
 		s.auditFail(r.Context(), r, "site.update", "site:"+strconv.FormatInt(id, 10))
@@ -696,6 +723,15 @@ func reqTTL(sec *int64) *time.Duration {
 
 // applyToUpdate 用于创建路径：在默认策略上叠加显式给定的字段。
 func applyToUpdate(base store.SitePolicy, u store.SiteUpdate) store.SitePolicy {
+	if u.VerifyMode != nil {
+		base.VerifyMode = *u.VerifyMode
+	}
+	if u.GeneratorID != nil {
+		base.GeneratorID = *u.GeneratorID
+	}
+	if u.Difficulty != nil {
+		base.Difficulty = *u.Difficulty
+	}
 	if u.PowBits != nil {
 		base.PowBits = *u.PowBits
 	}
@@ -715,4 +751,85 @@ func applyToUpdate(base store.SitePolicy, u store.SiteUpdate) store.SitePolicy {
 		base.AllowMissingOrigin = *u.AllowMissingOrigin
 	}
 	return base
+}
+
+// --- 阶段 3A：模式、生成器与题池观测 ---
+
+// handleGenerators 返回本进程登记的题型与协议版本。
+// 管理面写站点时必须从这个列表里选，否则站点会指向一个运行时不存在的题型（只能拿 503）。
+func (s *Server) handleGenerators(w http.ResponseWriter, r *http.Request) {
+	out := []map[string]any{}
+	for _, id := range s.gens.IDs() {
+		g, err := s.gens.Lookup(id)
+		if err != nil {
+			continue
+		}
+		out = append(out, map[string]any{
+			"id": id, "version": g.Version(), "media": g.Media(),
+			// 生产用途标记：3A 只有工程基线题型，必须让运维看得见这一点
+			"production_ready": id != generator.ArithID,
+			"note":             noteForGenerator(id),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"generators": out, "max_difficulty": generator.MaxDifficulties})
+}
+
+func noteForGenerator(id string) string {
+	if id == generator.ArithID {
+		return "工程基线题型：题面可被脚本直接求值，不抗自动解题，仅用于验证题池与提交生命周期"
+	}
+	return ""
+}
+
+// handlePoolStatus 是**只读**水位观测。返回的全是计数与公开元数据：
+// 不含 verifier、不含答案、不含内部随机数，也不含题面文本。
+func (s *Server) handlePoolStatus(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.PoolStats(r.Context(), s.now())
+	if err != nil {
+		s.internal(w, "池统计", err)
+		return
+	}
+	buckets := make([]map[string]any, 0, len(rows))
+	for _, b := range rows {
+		buckets = append(buckets, map[string]any{
+			"generator_id": b.GeneratorID, "version": b.Version, "difficulty": b.Difficulty,
+			"ready": b.Ready, "assigned": b.Assigned, "terminal": b.Terminal, "total": b.Total,
+			"oldest_ready_expires": b.OldestReady,
+		})
+	}
+	body := map[string]any{"buckets": buckets}
+	if s.pool != nil {
+		st := s.pool.Stats()
+		body["worker"] = map[string]any{
+			"generated": st.Generated, "failed": st.Failed, "rejected": st.Rejected,
+			"last_error": st.LastErr, "last_tick": st.LastTick,
+			// 明确告诉调用方这些数会归零：它是可观测性，不是账本
+			"restart_resets": st.RestartResets,
+		}
+	} else {
+		body["worker"] = map[string]any{"enabled": false}
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+// checkModePolicy 在写入前验证模式与题型的组合：
+// 库里存一个本进程没登记的 generator_id，等于给站点配了一条只会返回 503 的策略。
+func (s *Server) checkModePolicy(mode, genID string, difficulty int) error {
+	if mode == "" || mode == store.ModePowOnly {
+		return nil
+	}
+	if mode != store.ModePowQuestion {
+		return errors.New("admin: 未知验证模式")
+	}
+	g, err := s.gens.Lookup(genID)
+	if err != nil {
+		return err
+	}
+	if difficulty < 1 || difficulty > generator.MaxDifficulties {
+		return errors.New("admin: 难度档越界")
+	}
+	if g.Version() == "" {
+		return errors.New("admin: 生成器缺少协议版本")
+	}
+	return nil
 }

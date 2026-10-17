@@ -23,14 +23,33 @@ var migration0001 string
 //go:embed migrations/0002_stage2.sql
 var migration0002 string
 
+//go:embed migrations/0003_stage3a.sql
+var migration0003 string
+
 // schemaVersion 是最后一条迁移对应的版本号，写入 meta 表。
-const schemaVersion = 2
+const schemaVersion = 3
 
 // retiredPrefix 是阶段 1 secret_mac 列被中和时加在摘要输入上的域分隔串（见 0002 注释）。
 const retiredPrefix = "epocha/v1|retired|"
 
-// MaxFailedAttempts 是一个 challenge 允许的失败兑换次数；达到即作废（DESIGN §3 失败策略）。
+// MaxFailedAttempts 是 pow_only 下一个 challenge 允许的失败兑换次数；达到即作废（DESIGN §3 失败策略）。
+// pow_question 不用它：**一次**有效答案尝试就终结（ADR-011 #3），两条路径的区别是刻意的。
 const MaxFailedAttempts = 3
+
+// 站点验证模式（阶段 3A）。迁移默认 pow_only，因此升级不会改变现有业务方看到的响应形状。
+const (
+	ModePowOnly     = "pow_only"
+	ModePowQuestion = "pow_question"
+)
+
+// 难度档与单题体积上限。上限是**预算**而非测量值：它的作用是让一条恶意或退化的题目
+// 无法把池撑爆，而不是"实测最优大小"。
+const (
+	MinDifficulty    = 1
+	MaxDifficulty    = 5
+	MaxPayloadBytes  = 4096
+	MaxVerifierBytes = 512
+)
 
 // purgeBatchRows 限制单轮清理的行数：清理跑在单写连接上，一次全表删除会在 1 vCPU 上
 // 长时间占住写入，"有界、可停止"比"一轮清干净"更重要。剩余行由下一轮处理。
@@ -77,16 +96,18 @@ type DB struct {
 
 // Challenge 是一次 challenge 的权威记录：PoW 参数以此行为准，不接受客户端自报。
 type Challenge struct {
-	ID         string
-	SiteID     int64
-	Origin     string // 签发时看到的规范化 Origin（''=无浏览器来源且站点放行）
-	PowSeed    []byte
-	PowBits    uint8
-	Status     string
-	Attempts   int
-	CreatedAt  time.Time
-	ExpiresAt  time.Time
-	RedeemedAt time.Time
+	ID          string
+	SiteID      int64
+	Mode        string // 签发快照：pow_only | pow_question
+	GeneratorID string // pow_question 的题面生成器；pow_only 为空
+	Origin      string // 签发时看到的规范化 Origin（''=无浏览器来源且站点放行）
+	PowSeed     []byte
+	PowBits     uint8
+	Status      string
+	Attempts    int
+	CreatedAt   time.Time
+	ExpiresAt   time.Time
+	RedeemedAt  time.Time
 }
 
 // Response 是一次成功兑换签发的短期令牌记录。
@@ -191,6 +212,7 @@ type migration struct {
 var migrations = []migration{
 	{version: 1, sql: migration0001},
 	{version: 2, sql: migration0002, data: migrateStage2Data},
+	{version: 3, sql: migration0003},
 }
 
 // SchemaVersion 返回当前库版本。
@@ -245,6 +267,13 @@ func NewID() (string, error) {
 // 写入与"活动 challenge 是否超限"在同一条语句内完成：这是签发侧的硬上限，
 // 限流器只控制速率、不控制存量，两者都不能单独保证 SQLite 活动记录有界。
 func (d *DB) InsertChallenge(ctx context.Context, c *Challenge, caps Caps) error {
+	_, err := d.IssueChallengeWithQuestion(ctx, c, caps, nil)
+	return err
+}
+
+// insertChallengeTx 是 challenge 落库的唯一实现（条件插入 + 存量判定在同一条语句内）。
+// mode 与 generator_id 是**签发快照**：站点之后改配置不影响已发出的这张挑战。
+func insertChallengeTx(ctx context.Context, tx *sql.Tx, c *Challenge, caps Caps, mode, gen string) error {
 	if c == nil || c.ID == "" || c.SiteID <= 0 || len(c.PowSeed) == 0 || c.ExpiresAt.IsZero() {
 		return fmt.Errorf("%w: challenge 字段不完整", ErrBadConfig)
 	}
@@ -252,13 +281,16 @@ func (d *DB) InsertChallenge(ctx context.Context, c *Challenge, caps Caps) error
 		return fmt.Errorf("%w: challenge 上限必须为正（全局=%d 单站=%d）",
 			ErrBadConfig, caps.MaxActive, caps.MaxActivePerSite)
 	}
-	res, err := d.h.ExecContext(ctx, `
-INSERT INTO challenges(id, site_id, pow_seed, pow_bits, status, attempts, created_at, expires_at, origin)
-SELECT ?,?,?,?,?,?,?,?,?
+	if mode != ModePowOnly && mode != ModePowQuestion {
+		return fmt.Errorf("%w: 未知验证模式 %q", ErrBadConfig, mode)
+	}
+	res, err := tx.ExecContext(ctx, `
+INSERT INTO challenges(id, site_id, pow_seed, pow_bits, status, attempts, created_at, expires_at, origin, mode, generator_id)
+SELECT ?,?,?,?,?,?,?,?,?,?,?
 WHERE (SELECT count(*) FROM challenges WHERE status=? AND expires_at>?) < ?
   AND (SELECT count(*) FROM challenges WHERE site_id=? AND status=? AND expires_at>?) < ?`,
 		c.ID, c.SiteID, c.PowSeed, int(c.PowBits), statusIssued, 0,
-		formatTime(c.CreatedAt.UTC()), formatTime(c.ExpiresAt.UTC()), c.Origin,
+		formatTime(c.CreatedAt.UTC()), formatTime(c.ExpiresAt.UTC()), c.Origin, mode, gen,
 		statusIssued, formatTime(c.CreatedAt.UTC()), caps.MaxActive,
 		c.SiteID, statusIssued, formatTime(c.CreatedAt.UTC()), caps.MaxActivePerSite)
 	if err != nil {
@@ -282,9 +314,10 @@ func (d *DB) Challenge(ctx context.Context, id string) (*Challenge, error) {
 		siteID   int64
 	)
 	err := d.h.QueryRowContext(ctx, `
-SELECT id, site_id, pow_seed, pow_bits, status, attempts, created_at, expires_at, redeemed_at, origin
+SELECT id, site_id, pow_seed, pow_bits, status, attempts, created_at, expires_at, redeemed_at, origin, mode, generator_id
 FROM challenges WHERE id=?`, id).
-		Scan(&c.ID, &siteID, &c.PowSeed, &c.PowBits, &status, &c.Attempts, &created, &expires, &redeemed, &c.Origin)
+		Scan(&c.ID, &siteID, &c.PowSeed, &c.PowBits, &status, &c.Attempts, &created, &expires, &redeemed,
+			&c.Origin, &c.Mode, &c.GeneratorID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -292,6 +325,9 @@ FROM challenges WHERE id=?`, id).
 		return nil, fmt.Errorf("store: 读 challenge: %w", err)
 	}
 	c.SiteID, c.Status = siteID, status
+	if c.Mode == "" {
+		c.Mode = ModePowOnly // 阶段 1/2 的行没有这一列的语义，读成 pow_only
+	}
 	if c.CreatedAt, err = parseTime(created); err != nil {
 		return nil, err
 	}
@@ -306,9 +342,40 @@ FROM challenges WHERE id=?`, id).
 	return c, nil
 }
 
-// Redeem 原子地把 issued 且未过期的 challenge 置为 redeemed，并在同一事务内签发 response。
-// 满足 ADR-004 的四条保证：条件更新、同事务、检查影响行数、由测试证明并发与重启语义。
+// Redeem 是 pow_only 的成功兑换路径（阶段 1/2 的行为，保持不变）。
 func (d *DB) Redeem(ctx context.Context, challengeID string, now time.Time, ttl time.Duration) (*Response, error) {
+	res, err := d.RedeemAttempt(ctx, challengeID, now, ttl, true)
+	if err != nil {
+		return nil, err
+	}
+	return res.Response, nil
+}
+
+// RedeemOutcome 是一次兑换尝试**提交之后**的结果。
+type RedeemOutcome int
+
+const (
+	// OutcomeIssued：challenge 置为 redeemed 并签发了一张 response。
+	OutcomeIssued RedeemOutcome = iota
+	// OutcomeWrongAnswer：答案错，challenge 已置为终态 invalid 并**已提交**。
+	// 这个值不是 error：把"答案错"实现成返回错误会让整笔事务回滚，challenge 回到 issued，
+	// 于是攻击者对同一道题可以无限重试（ADR-011 #2 明确要防的正是这个）。
+	OutcomeWrongAnswer
+)
+
+// RedeemResult 是 RedeemAttempt 的返回值。Response 仅在 OutcomeIssued 时非空。
+type RedeemResult struct {
+	Outcome  RedeemOutcome
+	Response *Response
+}
+
+// RedeemAttempt 原子地终结一次兑换：correct → redeemed + response；
+// !correct → invalid（终态）。两条分支都在同一个事务里**提交**。
+//
+// 同时把绑定的题池行置为 terminal（用后即焚，且 assigned 永不回 ready）。
+// pow_question 的 challenge 若找不到对应的 assigned 题行，一律 fail closed：
+// 那种状态说明绑定被破坏，绝不能签发 response。
+func (d *DB) RedeemAttempt(ctx context.Context, challengeID string, now time.Time, ttl time.Duration, correct bool) (*RedeemResult, error) {
 	if ttl <= 0 {
 		return nil, fmt.Errorf("%w: response TTL 必须为正", ErrBadConfig)
 	}
@@ -318,6 +385,39 @@ func (d *DB) Redeem(ctx context.Context, challengeID string, now time.Time, ttl 
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	var (
+		siteID int64
+		mode   string
+	)
+	err = tx.QueryRowContext(ctx, `SELECT site_id, mode FROM challenges WHERE id=?`, challengeID).Scan(&siteID, &mode)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotRedeemable
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: 读 challenge 状态: %w", err)
+	}
+
+	if !correct {
+		// 错误答案：条件置终态。status='issued' 是唯一的可终结状态——
+		// 已 redeemed / 已 invalid / 已过期都返回"不可兑换"，不给探测信号。
+		res, err := tx.ExecContext(ctx, `
+UPDATE challenges SET status=?, attempts=attempts+1 WHERE id=? AND status=?`,
+			statusInvalid, challengeID, statusIssued)
+		if err != nil {
+			return nil, fmt.Errorf("store: 终结错误答案: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return nil, ErrNotRedeemable
+		}
+		if err := burnQuestionTx(ctx, tx, challengeID, mode == ModePowQuestion, now); err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("store: 提交错误答案终结: %w", err)
+		}
+		return &RedeemResult{Outcome: OutcomeWrongAnswer}, nil
+	}
+
 	res, err := tx.ExecContext(ctx, `
 UPDATE challenges SET status=?, redeemed_at=?
 WHERE id=? AND status=? AND expires_at>?`,
@@ -325,11 +425,7 @@ WHERE id=? AND status=? AND expires_at>?`,
 	if err != nil {
 		return nil, fmt.Errorf("store: 条件更新 challenge: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return nil, fmt.Errorf("store: 读影响行数: %w", err)
-	}
-	if n != 1 {
+	if n, _ := res.RowsAffected(); n != 1 {
 		// 不存在、已兑换、已作废或已过期——对外一律同一结果，不给探测信号。
 		return nil, ErrNotRedeemable
 	}
@@ -337,13 +433,11 @@ WHERE id=? AND status=? AND expires_at>?`,
 	if err != nil {
 		return nil, err
 	}
+	if err := burnQuestionTx(ctx, tx, challengeID, mode == ModePowQuestion, now); err != nil {
+		return nil, err
+	}
 	created := now.UTC()
 	expires := created.Add(ttl)
-	var siteID int64
-	err = tx.QueryRowContext(ctx, `SELECT site_id FROM challenges WHERE id=?`, challengeID).Scan(&siteID)
-	if err != nil {
-		return nil, fmt.Errorf("store: 回读站点: %w", err)
-	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO responses(id, challenge_id, site_id, created_at, expires_at, used) VALUES(?,?,?,?,?,0)`,
 		rid, challengeID, siteID, formatTime(created), formatTime(expires)); err != nil {
@@ -352,11 +446,31 @@ INSERT INTO responses(id, challenge_id, site_id, created_at, expires_at, used) V
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("store: 提交兑换: %w", err)
 	}
-	return &Response{ID: rid, ChallengeID: challengeID, SiteID: siteID, CreatedAt: created, ExpiresAt: expires}, nil
+	return &RedeemResult{Outcome: OutcomeIssued,
+		Response: &Response{ID: rid, ChallengeID: challengeID, SiteID: siteID, CreatedAt: created, ExpiresAt: expires}}, nil
 }
 
-// FailAttempt 记录一次失败兑换：达到上限即作废该 challenge。
+// burnQuestionTx 把绑定到该 challenge 的题置为 terminal（提交后物理删除由清理任务负责）。
+// require=true（pow_question）时没有可终结的题行就是不变量破坏，返回错误让事务失败。
+// terminal_at 用调用方传入的 now，不是 time.Now()：全库的时间口径由注入时钟统一，
+// 否则测试无法确定性地断言终态时间，清理判定也会出现两个时钟源。
+func burnQuestionTx(ctx context.Context, tx *sql.Tx, challengeID string, require bool, now time.Time) error {
+	res, err := tx.ExecContext(ctx, `
+UPDATE pool SET status=?, terminal_at=? WHERE challenge_id=? AND status=?`,
+		PoolTerminal, formatTime(now.UTC()), challengeID, PoolAssigned)
+	if err != nil {
+		return fmt.Errorf("store: 题池终态化: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if require && n != 1 {
+		return fmt.Errorf("%w: pow_question 的 challenge 没有可终结的题行", ErrNotRedeemable)
+	}
+	return nil
+}
+
+// FailAttempt 记录 pow_only 下一次失败的 PoW 尝试：达到上限即作废该 challenge。
 // 与 Redeem 不同，这里不产生对外成功结果，因此允许非事务的单条条件更新。
+// pow_question **不用**这个方法：它的错误答案由 RedeemAttempt 在同一事务里终结（一次机会）。
 func (d *DB) FailAttempt(ctx context.Context, challengeID string) (attempts int, status string, err error) {
 	res, err := d.h.ExecContext(ctx, `
 UPDATE challenges
@@ -417,17 +531,24 @@ WHERE r.id=? AND r.site_id=?`, responseID, siteID).Scan(&v.ChallengeID, &created
 	return v, nil
 }
 
-// Purge 删除已消费或早已失效的账本行。防重放语义不依赖它——它只限制库体积。
-// 删除条件必须与外键相容：responses.challenge_id 引用 challenges.id，而"被兑换但尚未验证"
-// 的 response 其有效期可以晚于所属 challenge，此时删掉 challenge 会被外键挡下（阶段 1 实测报错）。
-// 因此 challenge 只在**没有任何 response 行再引用它**时删除；仍有效的 response 行一律保留。
-// 每批行数有上限：清理跑在单写连接上，1 vCPU 机器不能被一次全表删除长时间占住。
-func (d *DB) Purge(ctx context.Context, now time.Time) (responses, challenges int64, err error) {
+// Purge 分批清理账本与题池体积。防重放语义不依赖它——过期判定一律以时间戳即时生效。
+//
+// 删除顺序是这套清理唯一容易出错的地方，因此固定在一个函数里：
+//  1. responses（引用 challenges）
+//  2. pool（引用 challenges）
+//  3. challenges
+//
+// 任何"父表"行只要还有引用者就不能删（外键），否则清理任务会永久失败——阶段 1 复核的 D-1 就是这个坑。
+//
+// challenges 的删除条件是"已过期"，不再要求"非 issued"：被放弃的 issued 行若永不清理，
+// 池行与账本都会单调增长。删除过期行不削弱防重放——过期行本来就不可消费，
+// 而已消费行删除后重放会走到"记录不存在"，同样 fail closed（有测试钉住）。
+func (d *DB) Purge(ctx context.Context, now time.Time) (counts PurgeCounts, err error) {
 	limit := strconv.Itoa(purgeBatchRows)
 	ts := formatTime(now.UTC())
 	tx, err := d.h.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, 0, fmt.Errorf("store: 清理事务: %w", err)
+		return counts, fmt.Errorf("store: 清理事务: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -435,25 +556,41 @@ func (d *DB) Purge(ctx context.Context, now time.Time) (responses, challenges in
 DELETE FROM responses WHERE id IN (
   SELECT id FROM responses WHERE used=1 OR expires_at < ? LIMIT ?)`, ts, limit)
 	if err != nil {
-		return 0, 0, fmt.Errorf("store: 清理 responses: %w", err)
+		return counts, fmt.Errorf("store: 清理 responses: %w", err)
 	}
-	responses, _ = r1.RowsAffected()
+	counts.Responses, _ = r1.RowsAffected()
+
+	rp, err := tx.ExecContext(ctx, `
+DELETE FROM pool WHERE id IN (
+  SELECT id FROM pool WHERE status=? OR expires_at < ? LIMIT ?)`, PoolTerminal, ts, limit)
+	if err != nil {
+		return counts, fmt.Errorf("store: 清理题池: %w", err)
+	}
+	counts.Pool, _ = rp.RowsAffected()
 
 	r2, err := tx.ExecContext(ctx, `
 DELETE FROM challenges WHERE id IN (
   SELECT id FROM challenges
-  WHERE status<>? AND expires_at < ?
+  WHERE expires_at < ?
     AND NOT EXISTS (SELECT 1 FROM responses r WHERE r.challenge_id = challenges.id)
-  LIMIT ?)`, statusIssued, ts, limit)
+    AND NOT EXISTS (SELECT 1 FROM pool p WHERE p.challenge_id = challenges.id)
+  LIMIT ?)`, ts, limit)
 	if err != nil {
-		return responses, 0, fmt.Errorf("store: 清理 challenges: %w", err)
+		return counts, fmt.Errorf("store: 清理 challenges: %w", err)
 	}
-	challenges, _ = r2.RowsAffected()
+	counts.Challenges, _ = r2.RowsAffected()
 
 	if err := tx.Commit(); err != nil {
-		return 0, 0, fmt.Errorf("store: 提交清理: %w", err)
+		return counts, fmt.Errorf("store: 提交清理: %w", err)
 	}
-	return responses, challenges, nil
+	return counts, nil
+}
+
+// PurgeCounts 是单轮清理各表删除的行数（运维观察用，不含任何内容数据）。
+type PurgeCounts struct {
+	Responses  int64
+	Pool       int64
+	Challenges int64
 }
 
 // CountChallenges 供验收脚本与测试断言状态分布。

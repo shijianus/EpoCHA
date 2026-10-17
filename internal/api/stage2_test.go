@@ -548,7 +548,7 @@ func (h *harness) restart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(h.cfg, reopened, signer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv, err := New(h.cfg, reopened, signer, h.gens, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

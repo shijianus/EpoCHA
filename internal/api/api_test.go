@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/shijianus/EpoCHA/internal/config"
+	"github.com/shijianus/EpoCHA/internal/generator"
+	"github.com/shijianus/EpoCHA/internal/pool"
 	"github.com/shijianus/EpoCHA/internal/pow"
 	"github.com/shijianus/EpoCHA/internal/store"
 	"github.com/shijianus/EpoCHA/internal/token"
@@ -40,12 +42,21 @@ type harness struct {
 	db      *store.DB
 	dbPath  string
 	cfg     *config.Config
+	gens    *generator.Registry
 	logs    *bytes.Buffer
 	bodies  []string
+	bodiesM sync.Mutex // 并发测试里多路 goroutine 共用同一个 harness 记录响应体
 	clock   time.Time
 	siteA   *store.Site
 	siteB   *store.Site
 	cleanup []func()
+}
+
+// allBodies 是并发安全地取回全部响应体（按值扫描哨兵用）。
+func (h *harness) allBodies() string {
+	h.bodiesM.Lock()
+	defer h.bodiesM.Unlock()
+	return strings.Join(h.bodies, "\n")
 }
 
 func newHarness(t *testing.T, tune func(*config.Config)) *harness {
@@ -94,14 +105,16 @@ func newHarness(t *testing.T, tune func(*config.Config)) *harness {
 		t.Fatalf("NewSigner: %v", err)
 	}
 	log := slog.New(slog.NewTextHandler(h.logs, nil))
-	srv, err := New(cfg, db, signer, log)
+	gens := testRegistry(t, cfg.MasterKey)
+	srv, err := New(cfg, db, signer, gens, log)
 	if err != nil {
 		t.Fatalf("api.New: %v", err)
 	}
 	// 闭包必须每次读 h.clock：早期版本按值捕获，导致 setClock 完全无效、
 	// 过期相关测试全部假通过。
 	srv.now = func() time.Time { return h.clock }
-	h.srv = srv
+	h.srv, h.gens = srv, gens
+	_ = h.gens
 	h.cleanup = append(h.cleanup, func() { _ = db.Close() })
 	t.Cleanup(func() {
 		for _, f := range h.cleanup {
@@ -111,8 +124,86 @@ func newHarness(t *testing.T, tune func(*config.Config)) *harness {
 	return h
 }
 
+// testRegistry 只登记阶段 3A 的基线题型；verifier 密钥走与生产同一条派生路径。
+func testRegistry(t *testing.T, master []byte) *generator.Registry {
+	t.Helper()
+	r := generator.NewRegistry()
+	k := token.DerivePurpose(master, "qver")
+	g, err := generator.NewArithmeticBaseline(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Register(g); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// questionSite 建一个 pow_question 站点，并返回它的 secret（验证时要用**本站点**的凭据）。
+// 默认 harness 的两个站点是 pow_only，正好用来验回归。
+func (h *harness) questionSite(t *testing.T, name, siteKey string, difficulty int) (*store.Site, string) {
+	t.Helper()
+	mode := store.ModePowQuestion
+	site, secret, err := h.db.CreateSite(context.Background(), name, siteKey, store.SitePolicy{
+		PowBits: 12, VerifyMode: mode, GeneratorID: generator.ArithID, Difficulty: difficulty,
+		AllowMissingOrigin: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateSite: %v", err)
+	}
+	return site, secret
+}
+
+// fillPool 直接驱动一轮补题（测试不等后台节奏），并确认真的备到了题。
+func (h *harness) fillPool(t *testing.T, difficulty, n int) {
+	t.Helper()
+	cfg := pool.DefaultConfig()
+	cfg.LowWatermark = n
+	cfg.HighWatermark = n
+	cfg.BatchPerTick = n
+	cfg.MaxRows = 500
+	w, err := pool.New(h.db, h.gens, cfg, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := w.Tick(context.Background()); err != nil {
+			t.Fatalf("补题失败: %v", err)
+		}
+	}
+	spec := store.PoolSpec{GeneratorID: generator.ArithID, Version: "v1", Difficulty: difficulty}
+	got, err := h.db.ReadyCount(context.Background(), spec, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got < n {
+		t.Fatalf("备题不足：ready=%d，期望 ≥%d", got, n)
+	}
+}
+
+// verifierOf 从 challenge token 解出 cid，再读回该题的私有 verifier 字节。
+// 测试拿它**不是为了读答案**（verifier 是单向摘要，不可逆），而是为了得到一段必然唯一的
+// 高熵串，用按值扫描证明私有材料没有出现在任何响应或日志里（红线 5、11）。
+func (h *harness) verifierOf(t *testing.T, challengeToken string) []byte {
+	t.Helper()
+	signer, err := token.NewSigner(bytes.Repeat([]byte{0x5a}, 32), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := signer.Verify(token.PurposeChallenge, challengeToken, h.clock)
+	if err != nil {
+		t.Fatalf("解 challenge token: %v", err)
+	}
+	q, err := h.db.QuestionForChallenge(context.Background(), claims.CID)
+	if err != nil {
+		t.Fatalf("读绑定题目: %v", err)
+	}
+	return []byte(q.Verifier)
+}
+
 func (h *harness) setClock(d time.Duration) { h.clock = h.clock.Add(d) }
-func (h *harness) handler() http.Handler    { return h.srv.Handler() }
+
+func (h *harness) handler() http.Handler { return h.srv.Handler() }
 
 type reply struct {
 	status  int
@@ -151,7 +242,9 @@ func (h *harness) do(method, path string, body io.Reader, contentType, remoteAdd
 			h.t.Fatalf("%s %s 响应不是合法 JSON: %v / %q", method, path, err, raw)
 		}
 	}
+	h.bodiesM.Lock()
 	h.bodies = append(h.bodies, raw)
+	h.bodiesM.Unlock()
 	return reply{status: rec.Code, body: raw, keys: keys, got: got, headers: rec.Header()}
 }
 
@@ -189,6 +282,25 @@ func (r reply) hasCode(want string) bool {
 		}
 	}
 	return false
+}
+
+// assertKeys 校验一个嵌套对象的键集合（用于 pow / question 这类子对象）。
+func assertKeys(t *testing.T, obj map[string]any, want ...string) {
+	t.Helper()
+	got := make([]string, 0, len(obj))
+	for k := range obj {
+		got = append(got, k)
+	}
+	slices.Sort(got)
+	slices.Sort(want)
+	if len(got) != len(want) {
+		t.Fatalf("子对象 key 集合 = %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("子对象 key 集合 = %v, want %v", got, want)
+		}
+	}
 }
 
 func assertKeySet(t *testing.T, r reply, want ...string) {
@@ -281,44 +393,48 @@ func TestHappyPathFullFlow(t *testing.T) {
 
 func TestChallengeResponseShapeAndNoStore(t *testing.T) {
 	h := newHarness(t, nil)
-	rec := httptest.NewRecorder()
-	h.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/challenge",
-		jsonBody(t, map[string]string{"site_key": "sk-alpha", "lang": "zh-CN"})))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d", rec.Code)
+	r := h.postJSON("/api/challenge", map[string]string{"site_key": "sk-alpha", "lang": "zh-CN"})
+	if r.status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", r.status, r.body)
 	}
-	for k, want := range map[string]string{
-		"Cache-Control":          "no-store",
-		"X-Content-Type-Options": "nosniff",
-	} {
-		if got := rec.Header().Get(k); got != want {
+	// 阶段 3A 的响应键集合：mode 恒在，question 只在 pow_question 站点出现。
+	// 仍然不得出现任何暗示题库/风控存在的字段（ADR-005）。
+	assertKeySet(t, r, "token", "expires_in", "pow", "mode")
+	if r.str("mode") != store.ModePowOnly {
+		t.Fatalf("默认站点应是 pow_only，got %q", r.str("mode"))
+	}
+	if _, ok := r.got["question"]; ok {
+		t.Fatal("pow_only 站点不该带 question 字段")
+	}
+	if _, ok := r.got["challenge"]; ok {
+		t.Fatal("出现了 DESIGN 未定义的 challenge 字段")
+	}
+	if _, ok := r.got["scores"]; ok {
+		t.Fatal("出现了风控分数（阶段 3+ 才有）")
+	}
+	powObj, ok := r.got["pow"].(map[string]any)
+	if !ok {
+		t.Fatal("缺少 pow 对象")
+	}
+	assertKeys(t, powObj, "algo", "seed", "bits")
+	if powObj["algo"] != "sha256-prefix" {
+		t.Errorf("algo=%v", powObj["algo"])
+	}
+	if n := num(powObj["bits"]); n != 12 {
+		t.Errorf("bits = %d, want 12（站点配置）", n)
+	}
+	if e := num(r.got["expires_in"]); e != 60 {
+		t.Errorf("expires_in = %d, want 60", e)
+	}
+	for _, k := range []string{"Cache-Control", "X-Content-Type-Options", "Pragma"} {
+		want := map[string]string{"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Pragma": "no-cache"}[k]
+		if got := r.headers.Get(k); got != want {
 			t.Errorf("%s = %q, want %q", k, got, want)
 		}
 	}
-	var got map[string]any
-	dec := json.NewDecoder(bytes.NewReader(rec.Body.Bytes()))
-	dec.UseNumber()
-	if err := dec.Decode(&got); err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 3 {
-		t.Fatalf("阶段 1 响应必须只有 token/expires_in/pow 三个键，实际 %v", got)
-	}
-	p := got["pow"].(map[string]any)
-	if p["algo"] != "sha256-prefix" {
-		t.Errorf("algo = %v", p["algo"])
-	}
-	if bits := num(p["bits"]); bits != 12 {
-		t.Errorf("bits = %d, 站点配置为 12", bits)
-	}
-	if num(got["expires_in"]) != 60 {
-		t.Errorf("expires_in = %v", got["expires_in"])
-	}
-	// 阶段 1 不得出现题目字段
-	for _, banned := range []string{"challenge", "answer", "task", "asset_url", "score", "behavior"} {
-		if _, ok := got[banned]; ok {
-			t.Errorf("响应含未实现字段 %q：伪装存在题库/风控", banned)
-		}
+	// token 长度与形状
+	if len(r.str("token")) > 4096 || !strings.HasPrefix(r.str("token"), "v1.") {
+		t.Fatalf("token 形状异常：%d", len(r.str("token")))
 	}
 }
 
@@ -729,7 +845,7 @@ func TestReplayAfterServerRestart(t *testing.T) {
 		RateIPRPM: 100_000, RateSiteRPM: 100_000, RateMaxState: 4096,
 		MaxActiveChallenges: 10_000, MaxActivePerSite: 5_000,
 	}
-	srv2, err := New(cfg, reopened, signer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv2, err := New(cfg, reopened, signer, testRegistry(t, cfg.MasterKey), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

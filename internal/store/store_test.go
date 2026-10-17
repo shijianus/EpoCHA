@@ -616,12 +616,12 @@ func TestPurgeBoundsLedgerSize(t *testing.T) {
 	}
 	live := newChallenge(t, d, s.ID, time.Hour)
 
-	nr, nc, err := d.Purge(t.Context(), time.Now())
+	c, err := d.Purge(t.Context(), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if nr < 1 || nc < 1 {
-		t.Fatalf("清理行数 responses=%d challenges=%d", nr, nc)
+	if c.Responses < 1 || c.Challenges < 1 {
+		t.Fatalf("清理行数 responses=%d challenges=%d", c.Responses, c.Challenges)
 	}
 	if _, err := d.Challenge(t.Context(), live.ID); err != nil {
 		t.Fatalf("未过期的 issued challenge 不该被清理: %v", err)
@@ -657,7 +657,7 @@ func TestPurgeKeepsUnconsumedResponse(t *testing.T) {
 		t.Fatalf("Redeem: %v", err)
 	}
 	// now 落在 challenge 已过期、response 仍有效的窗口内
-	if _, _, err := d.Purge(t.Context(), base.Add(time.Minute)); err != nil {
+	if _, err := d.Purge(t.Context(), base.Add(time.Minute)); err != nil {
 		t.Fatalf("Purge 在 response 仍有效时失败: %v", err)
 	}
 	if _, err := d.ConsumeResponse(t.Context(), r.ID, s.ID, base.Add(2*time.Minute)); err != nil {
@@ -766,7 +766,7 @@ func TestPurgeFreesPagesNotFileShrink(t *testing.T) {
 		}
 	}
 	for i := 0; i < 20; i++ {
-		if _, _, err := d.Purge(t.Context(), time.Now()); err != nil {
+		if _, err := d.Purge(t.Context(), time.Now()); err != nil {
 			t.Fatalf("第 %d 轮清理失败: %v", i, err)
 		}
 	}

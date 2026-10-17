@@ -1,4 +1,6 @@
 SHELL := /bin/bash
+# 禁止构建过程下载或切换 Go 工具链（ADR-007）
+export GOTOOLCHAIN := local
 MODULE      := github.com/shijianus/EpoCHA
 BIN         := bin/epocha
 VERSION     := $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.0.0-dev)
@@ -39,11 +41,11 @@ run: build
 
 .PHONY: test
 test:
-	go test ./...
+	go test -count=1 ./...
 
 .PHONY: race
 race:
-	go test -race ./...
+	go test -race -count=1 ./...
 
 .PHONY: vet
 vet:

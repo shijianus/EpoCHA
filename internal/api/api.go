@@ -63,6 +63,7 @@ type Server struct {
 	now          func() time.Time
 	challengeTTL time.Duration
 	responseTTL  time.Duration
+	caps         store.Caps
 }
 
 // New 组装服务。限流器与代理裁决来自配置。
@@ -88,6 +89,7 @@ func New(cfg *config.Config, db *store.DB, signer *token.Signer, log *slog.Logge
 	return &Server{
 		db: db, signer: signer, src: src, ipLimit: ipLimit, siteLimit: siteLimit,
 		log: log, now: time.Now, challengeTTL: cfg.ChallengeTTL, responseTTL: cfg.ResponseTTL,
+		caps: store.Caps{MaxActive: cfg.MaxActiveChallenges, MaxActivePerSite: cfg.MaxActivePerSite},
 	}, nil
 }
 
@@ -109,7 +111,12 @@ func (s *Server) recoverMiddleware(next http.Handler) http.Handler {
 			if rec := recover(); rec != nil {
 				// 只记录路径与错误类型，不记录请求体（可能含 token）。
 				s.log.Error("panic", "path", r.URL.Path, "type", panicType(rec))
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"error-codes": []string{CodeInvalidRequest}})
+				w.Header().Del("Content-Length")
+				body := map[string]any{"error-codes": []string{CodeInvalidRequest}}
+				if r.URL.Path == "/siteverify" {
+					body = map[string]any{"success": false, "error-codes": []string{ErrInternalError}}
+				}
+				writeJSON(w, http.StatusInternalServerError, body)
 			}
 		}()
 		next.ServeHTTP(w, r)
@@ -176,15 +183,11 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 }
 
 // decodeJSON 严格解析：限制体积、禁止未知字段、限制总长度。
-func decodeJSON(r *http.Request, maxBytes int64, dst any) error {
+func decodeJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any) error {
 	defer r.Body.Close()
-	limited := io.LimitReader(r.Body, maxBytes+1)
-	body, err := io.ReadAll(limited)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBytes))
 	if err != nil {
 		return err
-	}
-	if len(body) > int(maxBytes) {
-		return errors.New("api: 请求体超限")
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()

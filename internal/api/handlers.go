@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,7 +47,7 @@ type redeemResponse struct {
 // handleChallenge 签发一次 PoW 挑战。阶段 1 不返回题目字段（DESIGN §10.1）。
 func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 	var req challengeRequest
-	if err := decodeJSON(r, maxBodyPublic, &req); err != nil {
+	if err := decodeJSON(w, r, maxBodyPublic, &req); err != nil {
 		s.reject(w, CodeInvalidRequest)
 		return
 	}
@@ -54,7 +55,9 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 		s.reject(w, CodeInvalidRequest)
 		return
 	}
-	if !s.allow(r, req.SiteKey, w) {
+	// 第一道只按来源地址限流：此时还不知道站点，若按调用方自报的 site_key 建条目，
+	// 随便编造 site_key 就能污染站点维度的限流状态。
+	if !s.allowIP(r, w) {
 		return
 	}
 	ctx := r.Context()
@@ -62,20 +65,24 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 	site, err := s.db.SiteByKey(ctx, req.SiteKey)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
-			s.internalError(w, "查站点", err)
+			s.internalError(w, r, "查站点", err)
 			return
 		}
 		s.reject(w, CodeInvalidRequest)
 		return
 	}
+	// 站点维度限流按库中站点 id 计数（不是自报字符串），且必须在写库之前。
+	if !s.allowSite(r, site.ID, w) {
+		return
+	}
 	params, err := pow.NewParams(site.PowBits)
 	if err != nil {
-		s.internalError(w, "生成 PoW 参数", err)
+		s.internalError(w, r, "生成 PoW 参数", err)
 		return
 	}
 	id, err := store.NewID()
 	if err != nil {
-		s.internalError(w, "生成 challenge id", err)
+		s.internalError(w, r, "生成 challenge id", err)
 		return
 	}
 	now := s.now().UTC()
@@ -83,8 +90,13 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 		ID: id, SiteID: site.ID, PowSeed: params.Seed, PowBits: site.PowBits,
 		CreatedAt: now, ExpiresAt: now.Add(s.challengeTTL),
 	}
-	if err := s.db.InsertChallenge(ctx, ch); err != nil {
-		s.internalError(w, "写入 challenge", err)
+	if err := s.db.InsertChallenge(ctx, ch, s.caps); err != nil {
+		if errors.Is(err, store.ErrCapExceeded) {
+			// 存量到顶：对外与限流同族，不透露内部原因（红线 8）。
+			s.rateLimited(w, time.Second)
+			return
+		}
+		s.internalError(w, r, "写入 challenge", err)
 		return
 	}
 	seedB64 := base64.RawURLEncoding.EncodeToString(params.Seed)
@@ -92,7 +104,7 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 		Sid: site.ID, CID: id, Exp: ch.ExpiresAt.Unix(), Bits: site.PowBits, Seed: seedB64,
 	}, now)
 	if err != nil {
-		s.internalError(w, "签名", err)
+		s.internalError(w, r, "签名", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, challengeResponse{
@@ -105,7 +117,7 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 // handleRedeem 校验 PoW 解并原子消费 challenge。
 func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 	var req redeemRequest
-	if err := decodeJSON(r, maxBodyPublic, &req); err != nil {
+	if err := decodeJSON(w, r, maxBodyPublic, &req); err != nil {
 		s.reject(w, CodeInvalidRequest)
 		return
 	}
@@ -113,7 +125,7 @@ func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 		s.reject(w, CodeInvalidRequest)
 		return
 	}
-	if !s.allow(r, "", w) {
+	if !s.allowIP(r, w) {
 		return
 	}
 	ctx := r.Context()
@@ -125,10 +137,13 @@ func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 		s.rejectChallenge(w, "")
 		return
 	}
+	if !s.allowSite(r, claims.Sid, w) {
+		return
+	}
 	ch, err := s.db.Challenge(ctx, claims.CID)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
-			s.internalError(w, "读 challenge", err)
+			s.internalError(w, r, "读 challenge", err)
 			return
 		}
 		s.rejectChallenge(w, claims.CID)
@@ -151,7 +166,7 @@ func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok {
 		if _, _, ferr := s.db.FailAttempt(ctx, ch.ID); ferr != nil && !errors.Is(ferr, store.ErrNotFound) {
-			s.internalError(w, "记录失败尝试", ferr)
+			s.internalError(w, r, "记录失败尝试", ferr)
 			return
 		}
 		s.rejectChallenge(w, ch.ID)
@@ -160,7 +175,7 @@ func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.db.Redeem(ctx, ch.ID, now, s.responseTTL)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotRedeemable) {
-			s.internalError(w, "兑换", err)
+			s.internalError(w, r, "兑换", err)
 			return
 		}
 		s.rejectChallenge(w, ch.ID)
@@ -171,7 +186,7 @@ func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 		Exp: resp.ExpiresAt.Unix(),
 	}, now)
 	if err != nil {
-		s.internalError(w, "签名", err)
+		s.internalError(w, r, "签名", err)
 		return
 	}
 	// 成功结果在事务提交之后才返回（DESIGN D12）。
@@ -183,12 +198,12 @@ func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 
 // handleSiteverify 返回 reCAPTCHA 风格 JSON。业务错误同样 HTTP 200（reCAPTCHA 语义）。
 func (s *Server) handleSiteverify(w http.ResponseWriter, r *http.Request) {
-	form, err := parseVerifyBody(r)
+	form, err := parseVerifyBody(w, r)
 	if err != nil {
 		verifyFail(w, ErrBadRequest)
 		return
 	}
-	if !s.allowIPOnly(r, w) {
+	if !s.allowIP(r, w) {
 		return
 	}
 	ctx := r.Context()
@@ -207,7 +222,7 @@ func (s *Server) handleSiteverify(w http.ResponseWriter, r *http.Request) {
 	site, err := s.db.FindSiteBySecret(ctx, secret)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
-			s.internalError(w, "查站点", err)
+			s.internalError(w, r, "查站点", err)
 			return
 		}
 		verifyFail(w, ErrInvalidInputSecret)
@@ -233,7 +248,7 @@ func (s *Server) handleSiteverify(w http.ResponseWriter, r *http.Request) {
 			verifyFail(w, ErrTimeoutOrDuplicate)
 			return
 		}
-		s.internalError(w, "消费 response", err)
+		s.internalError(w, r, "消费 response", err)
 		return
 	}
 	// 消费成功后才读一次状态；异常时返回内部错误而不是假成功。
@@ -263,8 +278,17 @@ func (s *Server) rejectChallenge(w http.ResponseWriter, cid string) {
 	writeJSON(w, http.StatusBadRequest, map[string]any{"error-codes": []string{CodeInvalidChallenge}})
 }
 
-func (s *Server) internalError(w http.ResponseWriter, what string, err error) {
+// internalError 按端点选择错误码族：/siteverify 是 reCAPTCHA 契约面，服务端故障只能用
+// 唯一扩展码 internal-error 随 5xx 返回，业务方据此判断"验证未完成"而不是"验证失败"
+// （DESIGN §10.1）。响应保持 {success:false, error-codes:[...]} 的文档形状，让调用方的
+// 解析器不必为 5xx 特例处理缺失字段。/api/* 用自有码集，不引入该码。
+func (s *Server) internalError(w http.ResponseWriter, r *http.Request, what string, err error) {
 	s.log.Error("内部错误", "where", what, "err", errKind(err))
+	if r.URL.Path == "/siteverify" {
+		writeJSON(w, http.StatusInternalServerError,
+			map[string]any{"success": false, "error-codes": []string{ErrInternalError}})
+		return
+	}
 	writeJSON(w, http.StatusInternalServerError, map[string]any{"error-codes": []string{CodeInvalidRequest}})
 }
 
@@ -281,28 +305,29 @@ func errKind(err error) string {
 		return "consumed"
 	case errors.Is(err, store.ErrBadConfig):
 		return "bad-config"
+	case errors.Is(err, store.ErrCapExceeded):
+		return "cap-exceeded"
 	default:
 		return "unspecified"
 	}
 }
 
-func (s *Server) allow(r *http.Request, siteKey string, w http.ResponseWriter) bool {
-	key := risk.Key(s.src.ClientIP(r))
-	if !s.ipLimit.Allow("ip:" + key) {
-		s.rateLimited(w, s.ipLimit.RetryAfter("ip:"+key))
-		return false
-	}
-	if siteKey != "" && !s.siteLimit.Allow("site:"+siteKey) {
-		s.rateLimited(w, s.siteLimit.RetryAfter("site:"+siteKey))
+// allowIP 是来源地址维度限流，任何端点的第一道闸门。
+func (s *Server) allowIP(r *http.Request, w http.ResponseWriter) bool {
+	key := "ip:" + risk.Key(s.src.ClientIP(r))
+	if !s.ipLimit.Allow(key) {
+		s.rateLimited(w, s.ipLimit.RetryAfter(key))
 		return false
 	}
 	return true
 }
 
-func (s *Server) allowIPOnly(r *http.Request, w http.ResponseWriter) bool {
-	key := risk.Key(s.src.ClientIP(r))
-	if !s.ipLimit.Allow("ip:" + key) {
-		s.rateLimited(w, s.ipLimit.RetryAfter("ip:"+key))
+// allowSite 是站点维度限流，key 取库中的站点 id 而不是调用方自报的 site_key：
+// 用自报字符串作 key，随机编造的 site_key 就能挤掉真实站点的限流状态（阶段 1 复核发现）。
+func (s *Server) allowSite(r *http.Request, siteID int64, w http.ResponseWriter) bool {
+	key := "site:" + strconv.FormatInt(siteID, 10)
+	if !s.siteLimit.Allow(key) {
+		s.rateLimited(w, s.siteLimit.RetryAfter(key))
 		return false
 	}
 	return true
@@ -316,14 +341,11 @@ func (s *Server) rateLimited(w http.ResponseWriter, retry time.Duration) {
 }
 
 // parseVerifyBody 同时支持 form 与 JSON；只读白名单字段，其余忽略（reCAPTCHA 客户端会带额外字段）。
-func parseVerifyBody(r *http.Request) (map[string]string, error) {
+func parseVerifyBody(w http.ResponseWriter, r *http.Request) (map[string]string, error) {
 	defer r.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyVerify+1))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyVerify))
 	if err != nil {
 		return nil, err
-	}
-	if len(body) > maxBodyVerify {
-		return nil, errors.New("api: siteverify 请求体超限")
 	}
 	out := map[string]string{}
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
@@ -367,5 +389,3 @@ func writeVerifySuccess(w http.ResponseWriter, challengeTS time.Time, hostname s
 	}
 	writeJSON(w, http.StatusOK, body)
 }
-
-var _ = strings.TrimSpace

@@ -121,7 +121,8 @@ func serve(ctx context.Context, cfg *config.Config, ln net.Listener, stdout io.W
 	case <-ctx.Done():
 		log.Info("收到退出信号，开始优雅关闭")
 	case err := <-httpErr:
-		close(purgeDone)
+		// 不在这里 close(purgeDone)：清理 goroutine 会在 ctx 取消后自行关闭，
+		// 手动关一次再被 defer 关第二次就是 close of closed channel。
 		return fmt.Errorf("HTTP 服务: %w", err)
 	}
 

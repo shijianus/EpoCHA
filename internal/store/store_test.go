@@ -13,6 +13,9 @@ import (
 
 func testPepper() []byte { return []byte(strings.Repeat("p", 32)) }
 
+// testCaps 是测试用的宽松存量上限；封顶行为由 TestActiveChallengeCapBoundsLedger 专门验证。
+var testCaps = Caps{MaxActive: 10000, MaxActivePerSite: 5000}
+
 // newDB 在 t.TempDir() 里开一个独立库；t.Cleanup 负责关闭。
 func newDB(t *testing.T) *DB {
 	t.Helper()
@@ -41,6 +44,13 @@ func mustSite(t *testing.T, d *DB, name string) *Site {
 
 func newChallenge(t *testing.T, d *DB, siteID int64, ttl time.Duration) *Challenge {
 	t.Helper()
+	c := newChallengeCaps(t, d, siteID, ttl, testCaps)
+	return c
+}
+
+// newChallengeCaps 用指定上限签发一条 challenge，便于测试存量封顶行为。
+func newChallengeCaps(t *testing.T, d *DB, siteID int64, ttl time.Duration, caps Caps) *Challenge {
+	t.Helper()
 	id, err := NewID()
 	if err != nil {
 		t.Fatal(err)
@@ -48,7 +58,7 @@ func newChallenge(t *testing.T, d *DB, siteID int64, ttl time.Duration) *Challen
 	now := time.Now().UTC()
 	c := &Challenge{ID: id, SiteID: siteID, PowSeed: []byte("0123456789abcdef"), PowBits: 12,
 		CreatedAt: now, ExpiresAt: now.Add(ttl)}
-	if err := d.InsertChallenge(t.Context(), c); err != nil {
+	if err := d.InsertChallenge(t.Context(), c, caps); err != nil {
 		t.Fatalf("InsertChallenge: %v", err)
 	}
 	return c
@@ -212,7 +222,7 @@ func TestNewIDUnique(t *testing.T) {
 func TestChallengeValidationAndNotFound(t *testing.T) {
 	d := newDB(t)
 	s := mustSite(t, d, "alpha")
-	if err := d.InsertChallenge(t.Context(), &Challenge{ID: "x"}); !errors.Is(err, ErrBadConfig) {
+	if err := d.InsertChallenge(t.Context(), &Challenge{ID: "x"}, testCaps); !errors.Is(err, ErrBadConfig) {
 		t.Error("字段不完整应拒绝")
 	}
 	if _, err := d.Challenge(t.Context(), "missing"); !errors.Is(err, ErrNotFound) {
@@ -477,13 +487,17 @@ func TestTwoHandlesConsumeSameResponse(t *testing.T) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	wins := 0
+	errs := []error{}
 	run := func(d *DB) {
 		defer wg.Done()
-		if _, err := d.ConsumeResponse(t.Context(), r.ID, s.ID, time.Now()); err == nil {
-			mu.Lock()
+		_, err := d.ConsumeResponse(t.Context(), r.ID, s.ID, time.Now())
+		mu.Lock()
+		if err == nil {
 			wins++
-			mu.Unlock()
+		} else {
+			errs = append(errs, err)
 		}
+		mu.Unlock()
 	}
 	wg.Add(2)
 	go run(a)
@@ -491,6 +505,12 @@ func TestTwoHandlesConsumeSameResponse(t *testing.T) {
 	wg.Wait()
 	if wins != 1 {
 		t.Fatalf("两个句柄并发消费成功 %d 次，应为 1", wins)
+	}
+	// 失败方必须拿到受控哨兵，而不是裸的驱动/约束错误文本：调用方据此决定对外错误码。
+	for _, err := range errs {
+		if !errors.Is(err, ErrConsumed) {
+			t.Fatalf("竞争失败方应得到 ErrConsumed，got %v", err)
+		}
 	}
 }
 
@@ -557,6 +577,77 @@ func TestPurgeBoundsLedgerSize(t *testing.T) {
 	}
 }
 
+// TestPurgeKeepsUnconsumedResponse 覆盖一条真实时间线：challenge 在被兑换时已接近过期，
+// 其签发的 response TTL 长于 challenge 剩余寿命。此时清理任务若先删 challenge，
+// 要么被外键挡下（Purge 直接失败），要么让仍然有效的 response 无法完成验证。
+// 期望：清理不报错，且未消费的 response 之后仍可成功验证。
+func TestPurgeKeepsUnconsumedResponse(t *testing.T) {
+	d := newDB(t)
+	s := mustSite(t, d, "alpha")
+
+	base := time.Now().UTC()
+	id, err := NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &Challenge{ID: id, SiteID: s.ID, PowSeed: []byte("0123456789abcdef"), PowBits: 12,
+		CreatedAt: base, ExpiresAt: base.Add(10 * time.Second)}
+	if err := d.InsertChallenge(t.Context(), c, testCaps); err != nil {
+		t.Fatal(err)
+	}
+	r, err := d.Redeem(t.Context(), id, base.Add(5*time.Second), time.Hour)
+	if err != nil {
+		t.Fatalf("Redeem: %v", err)
+	}
+	// now 落在 challenge 已过期、response 仍有效的窗口内
+	if _, _, err := d.Purge(t.Context(), base.Add(time.Minute)); err != nil {
+		t.Fatalf("Purge 在 response 仍有效时失败: %v", err)
+	}
+	if _, err := d.ConsumeResponse(t.Context(), r.ID, s.ID, base.Add(2*time.Minute)); err != nil {
+		t.Fatalf("清理后仍然有效的 response 验证失败: %v", err)
+	}
+}
+
+// TestActiveChallengeCapBoundsLedger 验证签发侧的存量封顶：活动（issued 且未过期）行数
+// 达到上限后写入被拒，而过期行不再占用额度、作废行不计入。
+// 这条上限是"challenge 签发不能无限扩大 SQLite"的保证——限流器只控制速率，不控制存量。
+func TestActiveChallengeCapBoundsLedger(t *testing.T) {
+	d := newDB(t)
+	a := mustSite(t, d, "alpha")
+	b := mustSite(t, d, "bravo")
+
+	caps := Caps{MaxActive: 3, MaxActivePerSite: 2}
+	for range 2 {
+		newChallengeCaps(t, d, a.ID, time.Hour, caps)
+	}
+	if err := d.InsertChallenge(t.Context(), &Challenge{
+		ID: "over-site", SiteID: a.ID, PowSeed: []byte("0123456789abcdef"), PowBits: 12,
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().Add(time.Hour).UTC(),
+	}, caps); !errors.Is(err, ErrCapExceeded) {
+		t.Fatalf("单站活动量超上限应 ErrCapExceeded，got %v", err)
+	}
+	// 另一个站点还能签 1 条，签满全局 3 条后同样被拒
+	newChallengeCaps(t, d, b.ID, time.Hour, caps)
+	if err := d.InsertChallenge(t.Context(), &Challenge{
+		ID: "over-global", SiteID: b.ID, PowSeed: []byte("0123456789abcdef"), PowBits: 12,
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().Add(time.Hour).UTC(),
+	}, caps); !errors.Is(err, ErrCapExceeded) {
+		t.Fatalf("全局活动量超上限应 ErrCapExceeded，got %v", err)
+	}
+
+	// 过期与作废的行不占额度：把上面 2 条 alpha challenge 置为已过期后即可继续签发
+	if _, err := d.h.ExecContext(t.Context(),
+		`UPDATE challenges SET expires_at=? WHERE site_id=? AND expires_at>?`,
+		formatTime(time.Now().Add(-time.Minute).UTC()), a.ID, formatTime(time.Now().UTC())); err != nil {
+		t.Fatal(err)
+	}
+	ch := &Challenge{ID: "after-expire", SiteID: a.ID, PowSeed: []byte("0123456789abcdef"), PowBits: 12,
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().Add(time.Hour).UTC()}
+	if err := d.InsertChallenge(t.Context(), ch, caps); err != nil {
+		t.Fatalf("过期行不应继续占用额度: %v", err)
+	}
+}
+
 func TestForeignKeysEnforced(t *testing.T) {
 	d := newDB(t)
 	_, err := d.h.ExecContext(t.Context(), `
@@ -598,3 +689,57 @@ func TestCheckConstraints(t *testing.T) {
 
 // readFile 用于按值扫描 DB 文件（路径始终来自 t.TempDir()，不含外部输入）。
 func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
+
+// TestPurgeFreesPagesNotFileShrink 把一条容易被误解的事实钉在测试里：
+// 清理删除的是**行**，SQLite 只把页放进空闲链供后续复用，文件不会因此自动变小。
+// 声称"删除行 ⇒ 数据库文件缩小"是错的；真正收缩需要 VACUUM——本专案不在清理任务里做它，
+// 那会让单写连接长时间独占，而 50GB 磁盘预算下复用空闲页已经足够。
+func TestPurgeFreesPagesNotFileShrink(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "epocha.db")
+	d, err := Open(t.Context(), path, testPepper())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := mustSite(t, d, "alpha")
+	for range 400 {
+		c := newChallenge(t, d, s.ID, -time.Minute)
+		if _, err := d.h.ExecContext(t.Context(),
+			`UPDATE challenges SET status=? WHERE id=?`, statusRedeemed, c.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 20; i++ {
+		if _, _, err := d.Purge(t.Context(), time.Now()); err != nil {
+			t.Fatalf("第 %d 轮清理失败: %v", i, err)
+		}
+	}
+	if n, err := d.CountChallenges(t.Context(), statusRedeemed); err != nil || n != 0 {
+		t.Fatalf("清理后仍剩 %d 条 redeemed challenge (err %v)", n, err)
+	}
+	if _, err := d.h.ExecContext(t.Context(), `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatal(err)
+	}
+	emptied, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fresh := filepath.Join(t.TempDir(), "fresh.db")
+	fd, err := Open(t.Context(), fresh, testPepper())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fd.h.ExecContext(t.Context(), `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatal(err)
+	}
+	fs, err := os.Stat(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 断言的是"没有缩小回空库"：这正是"删行不等于缩文件"的表现。
+	if emptied.Size() <= fs.Size() {
+		t.Fatalf("删空账本后文件缩回了空库大小（%d ≤ %d）：说明实现里发生了本不该有的收缩/重建",
+			emptied.Size(), fs.Size())
+	}
+	t.Logf("行已删空：文件 %d 字节，空库 %d 字节——差异是待复用的空闲页", emptied.Size(), fs.Size())
+}

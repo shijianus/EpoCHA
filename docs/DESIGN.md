@@ -212,7 +212,8 @@ K(purpose, kid) = HMAC-SHA256(master, "epocha/v1|" + purpose + "|" + kid)     //
 PoW 参数以 **DB 行为权威**再校验一次（纵深防御：即使密钥泄露导致伪造 token，参数与站点仍受库内记录约束）。
 
 payload 字段（阶段 1 实现）：`typ`(`chal`|`resp`)、`kid`、`sid`(站点 id，硬绑定)、`cid`(challenge id)、
-`rid`(仅 resp，response id)、`iat`、`exp`(Unix 秒)；`chal` 额外带 `bits`、`seed`(base64url)。未知字段一律拒绝，payload ≤4KB。
+`rid`(仅 resp，response id)、`iat`、`exp`(Unix 秒)；`chal` 额外带 `bits`、`seed`(base64url)。未知字段一律拒绝。
+实现取 **token 总长 ≤4096B、payload ≤2048B**（比本文原先写的"payload ≤4KB"更严，复核后按取严者固化）。
 验证顺序：总长度上限 → 分段解析 → kid ∈ {current, previous} → **常数时间比 tag** → `DisallowUnknownFields` 解 payload →
 `typ`/purpose 匹配 → `exp`/`iat` 时钟窗口 → `sid` 与请求站点一致 → 业务层原子消费。任何一步失败对外都是同一族错误码，不区分原因。
 轮换：`kid` 允许同时存在 current + previous（`--master-key-previous`），旧 token 在 TTL 内自然过期。
@@ -335,9 +336,18 @@ worker         = 单个后台 goroutine，priority=让出 CPU（每补 10 题 sl
 决策：`score < risk_threshold` → 签发 response；中间带 → 提高难度重出题（`harder`）；更高 → `deny`。
 **题型淘汰分级（ADR-006）**：统计信号只产生"候选降权"告警 + 人工确认入口；自动降权要求"高通过率 **且** 极低时延 **且** 样本充足"同时成立；
 自动下线要求连续多窗口且不被更高优先级信号反驳。**禁止仅凭通过率判定题型被机器破解并自动下线。**
-限流：内存令牌桶按 `ip` 与 `site_key` 两维，状态条目有硬上限（阶段 1 默认 8192，可配）+ 定期清理与超额淘汰，
-否则攻击者可用随机源地址撑爆 1GB 内存；超限 `429 + Retry-After`。持久封禁（阶段 2+ 可选）写 `meta` 中的 ban 列表，避免重启清零。
+限流：内存令牌桶按 `ip` 与**站点 id**（不是自报的 `site_key` 字符串，见 ADR-009）两维，状态条目有硬上限
+（默认 8192，可配）+ 定期清理与超额淘汰，否则攻击者可用随机源地址撑爆 1GB 内存；超限 `429 + Retry-After`。
+持久封禁（阶段 2+ 可选）写 `meta` 中的 ban 列表，避免重启清零。
 **阶段 1 的限流就是这个有界实现**，不含打分。
+
+**速率与存量是两个正交的量**（ADR-009）：限流器控制"多快"，控制不了"库里同时有多少"。
+`/api/challenge` 的写入与"活动 challenge 是否超限"必须在**同一条 SQL** 内判定
+（`INSERT … SELECT … WHERE (SELECT count(*) …) < limit`），上限由 `EPOCHA_MAX_ACTIVE_CHALLENGES`（默认 10000 `[目标]`）
+与 `EPOCHA_MAX_ACTIVE_CHALLENGES_PER_SITE`（默认 2000 `[目标]`）给出；到顶对外表现为 429，不返回 5xx 也不假成功。
+清理任务（每轮 500 行）与它是两件事：清理**删除行**，但 SQLite 只是把页放进空闲链，
+**文件不会因此自动缩小**（有测试记录 155648 vs 空库 57344 字节）；收缩需要 `VACUUM`，本版不做。
+TTL 有 `[1s, 1h]` 上下界——有效期长度直接决定防重放账本必须保留多久，不设上界等于允许一条配置让库永久增长。
 
 ## 10. API 契约
 
@@ -593,4 +603,9 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
   `internal/store/migrations/`（`go:embed` 只能嵌入本包子树）。验收期间修掉四个真实缺陷：token tag 比较误将 base64 文本与解码字节相比；
   限流 `RetryAfter` 使用真实时钟而非注入时钟；devclient 随机起点可能为负导致提交非法 nonce（改为复用 `internal/pow` 判定）；
   `serve()` 用 `fmt.Fprintf` 与 slog 并发写同一 writer 触发数据竞争（启动信息统一走 slog）。
+- 2026-10-17 **v2.2（阶段 1 安全复核，见 `docs/reviews/STAGE1-REVIEW.md`）**：修复 6 个真实缺陷——
+  `Purge` 与外键冲突导致清理永久失败；`/siteverify` 服务端故障误用 `invalid-request`（应为唯一扩展码 `internal-error` + 5xx）；
+  站点维度限流按自报 `site_key` 计数可被污染（改按站点 id）；签发缺少**存量**上限（新增 `Caps` 与两个环境变量）；
+  TTL 无上界（新增 `[1s,1h]`）；`serve()` 错误分支 `close(purgeDone)` 与 goroutine 自身 defer 双关。
+  §9 补"速率 vs 存量"的区分与"删除行 ≠ 文件缩小"，§6 把 payload 上限按实现取严者（2048B）写死。新增 ADR-009。
 - 2026-10-17 **v2（阶段 1 前的设计校正）**：ADR-001 Cloudflare 事实更正与边缘定位改述；ADR-002 题库安全论证拆为 M1–M4 四指标并撤回"随机性 ⇒ 抗 AI"的推论；ADR-003 payload/verifier 分离、取消强制 HMAC 精确匹配；ADR-004 一次性消费的四条保证与实现手段分离（删除"单连接/`BEGIN IMMEDIATE` 是唯一合法实现"，纠正 `sql.Tx` 嵌套 BEGIN 错误）；ADR-005 防重放持久化提前到阶段 1（含新增 §5.1 实际 schema）；ADR-006 数字标注 `[目标]/[估算]/[实测]`、淘汰改分级、安全状态提交后才返回成功；ADR-007 `modernc.org/sqlite` 锁 v1.46.1 与 `GOTOOLCHAIN=local`；ADR-008 两处措辞收紧。**原始错误表述只在 `docs/DECISIONS.md` 留存。**

@@ -174,3 +174,34 @@ SQL 读 5000 万行/天、SQL 写 10 万行/天、存储 5 GB。因此"必须付
   已标注 `[估算]`，并要求阶段 3 用自己的基线测量替换该数（ADR-002 第 4 指标）。
 - `deploy/cloudflare/README.md` 与 `DESIGN §12` 里"绝不做/绝不承担"的绝对措辞按 ADR-001 改为"本版不在边缘承载权威状态"，
   保留工程理由，删除错误的平台断言。
+
+---
+
+## ADR-009 限流控制速率，控件存在量的是另一件事（阶段 1 复核新增）
+
+**背景**：阶段 1 复核检查"challenge 签发能不能无限扩大 SQLite"时，实现只有内存令牌桶（按 `ip` 与 `site_key` 两维），
+文档 §9 也把它写成滥用防护的全部。
+
+**问题**：三层错误。
+1. **速率 ≠ 存量**。把 rpm 配得再低，只要攻击者有足够多源地址（IPv6 / 代理池），库里同时存在的活动 challenge 行数
+   就没有上界——限流器保护 CPU，保护不了 50GB 磁盘和 `count(*)` 的扫描成本。
+2. **站点维度按自报字符串计数**。`site:<调用方传入的 site_key>` 让任何人能为不存在的站点创建限流条目；
+   状态条目到硬上限后按最旧淘汰，于是**真实站点的计数会被反复冲掉并归零**——防护反向变成绕过口。
+3. **清理任务与外键冲突**。`Purge` 先删 responses（`used=1 OR 过期`）再删 challenges（`status<>'issued' AND 过期`），
+   但"被兑换、尚未验证、且 response TTL 长于 challenge 剩余寿命"的组合下，删 challenge 触发
+   `FOREIGN KEY constraint failed`（实测报错），清理从此永久失败、账本只增不减。
+
+**现在的立场**：
+- **速率**与**存量**分别设界，且存量判定必须在写入的同一条 SQL 内完成（与 ADR-004 的"条件状态转移"同一手法）：
+  `INSERT INTO challenges … SELECT … WHERE (SELECT count(*) FROM challenges WHERE status='issued' AND expires_at>?) < ?`，
+  全局与单站两个条件同时判定，`RowsAffected != 1` 即 `ErrCapExceeded`，对外折叠为 429。
+- 站点维度限流的 key 一律取**库中站点 id**；未知 site_key 只消耗来源地址维度的额度，不创建站点条目。
+- `Purge` 必须与外键相容：challenge 仅在**没有任何 response 行再引用它**时删除；每批行数有上限（500）；
+  两条删除放同一事务。清理永远不删除"仍有效的未消费 response"——防重放窗口的长度由 TTL 决定，不由清理任务决定。
+- **删除行不等于文件缩小**：SQLite 只把页放进空闲链。任何"库体积受控"的表述必须区分行数与字节数，
+  且这一事实由测试固定（`TestPurgeFreesPagesNotFileShrink`）。收缩需 `VACUUM`，本版不做（单写连接长时间独占）。
+- TTL 必须有上界：有效期直接等于"为了防重放必须保留多久"，无上限的配置项就是无上限的磁盘增长器。
+
+**影响**：DESIGN §9（新增"速率与存量"段）、§5.1（Purge 语义）、§6（payload 上限按实现取严者 2048B）、
+§14-6/§14-9；`internal/store`（`Caps`、`ErrCapExceeded`、`Purge`）、`internal/api`（限流顺序、错误码族）、
+`internal/config`（4 个新校验/配置项）、`cmd/server`（purge 关闭路径）。

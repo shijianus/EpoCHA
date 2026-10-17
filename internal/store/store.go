@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -25,6 +26,17 @@ const schemaVersion = 1
 
 // MaxFailedAttempts 是一个 challenge 允许的失败兑换次数；达到即作废（DESIGN §3 失败策略）。
 const MaxFailedAttempts = 3
+
+// purgeBatchRows 限制单轮清理的行数：清理跑在单写连接上，一次全表删除会在 1 vCPU 上
+// 长时间占住写入，"有界、可停止"比"一轮清干净"更重要。剩余行由下一轮处理。
+const purgeBatchRows = 500
+
+// Caps 是签发侧的存量上限。它与限流器是两个量：限流控制速率，Caps 控制数据库里同时
+// 存在的活动 challenge 行数——缺了后者，攻击者用足够多的源地址仍能持续扩大账本。
+type Caps struct {
+	MaxActive        int // 全局 issued 且未过期的 challenge 上限
+	MaxActivePerSite int // 单站点同上
+}
 
 const (
 	statusIssued   = "issued"
@@ -41,8 +53,12 @@ var (
 	ErrConsumed       = errors.New("store: response 已被消费或过期")
 	ErrBadConfig      = errors.New("store: 参数不合法")
 	ErrSchemaConflict = errors.New("store: 数据库版本比程序新")
+	ErrCapExceeded    = errors.New("store: 活动 challenge 已达上限")
 
-	timeLayout = time.RFC3339Nano
+	// timeLayout 用固定 9 位小数（不裁剪尾零）：账本里的过期判定是 SQL 内的字符串比较，
+	// 只有定宽格式才能让字典序与时间序一致。time.RFC3339Nano 会裁掉尾随零，
+	// 使 "…:03Z" 与 "…:03.5Z" 的比较落到 'Z' vs '.' 上。
+	timeLayout = "2006-01-02T15:04:05.000000000Z07:00"
 )
 
 // DB 是账本句柄。
@@ -294,17 +310,31 @@ func NewID() (string, error) {
 }
 
 // InsertChallenge 以 status=issued 落库。PoW 参数由此成为服务端权威记录。
-func (d *DB) InsertChallenge(ctx context.Context, c *Challenge) error {
+// 写入与"活动 challenge 是否超限"在同一条语句内完成：这是签发侧的硬上限，
+// 限流器只控制速率、不控制存量，两者都不能单独保证 SQLite 活动记录有界。
+func (d *DB) InsertChallenge(ctx context.Context, c *Challenge, caps Caps) error {
 	if c == nil || c.ID == "" || c.SiteID <= 0 || len(c.PowSeed) == 0 || c.ExpiresAt.IsZero() {
 		return fmt.Errorf("%w: challenge 字段不完整", ErrBadConfig)
 	}
-	_, err := d.h.ExecContext(ctx, `
+	if caps.MaxActive <= 0 || caps.MaxActivePerSite <= 0 {
+		return fmt.Errorf("%w: challenge 上限必须为正（全局=%d 单站=%d）",
+			ErrBadConfig, caps.MaxActive, caps.MaxActivePerSite)
+	}
+	res, err := d.h.ExecContext(ctx, `
 INSERT INTO challenges(id, site_id, pow_seed, pow_bits, status, attempts, created_at, expires_at)
-VALUES(?,?,?,?,?,?,?,?)`,
+SELECT ?,?,?,?,?,?,?,?
+WHERE (SELECT count(*) FROM challenges WHERE status=? AND expires_at>?) < ?
+  AND (SELECT count(*) FROM challenges WHERE site_id=? AND status=? AND expires_at>?) < ?`,
 		c.ID, c.SiteID, c.PowSeed, int(c.PowBits), statusIssued, 0,
-		formatTime(c.CreatedAt.UTC()), formatTime(c.ExpiresAt.UTC()))
+		formatTime(c.CreatedAt.UTC()), formatTime(c.ExpiresAt.UTC()),
+		statusIssued, formatTime(c.CreatedAt.UTC()), caps.MaxActive,
+		c.SiteID, statusIssued, formatTime(c.CreatedAt.UTC()), caps.MaxActivePerSite)
 	if err != nil {
 		return fmt.Errorf("store: 写入 challenge: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		// 全局或单站活动量已达上限：拒绝继续扩大账本，对外表现为限流。
+		return ErrCapExceeded
 	}
 	return nil
 }
@@ -456,18 +486,41 @@ WHERE r.id=? AND r.site_id=?`, responseID, siteID).Scan(&v.ChallengeID, &created
 }
 
 // Purge 删除已消费或早已失效的账本行。防重放语义不依赖它——它只限制库体积。
-// 返回删除行数；调用顺序必须先 responses 后 challenges（外键约束）。
+// 删除条件必须与外键相容：responses.challenge_id 引用 challenges.id，而"被兑换但尚未验证"
+// 的 response 其有效期可以晚于所属 challenge，此时删掉 challenge 会被外键挡下（阶段 1 实测报错）。
+// 因此 challenge 只在**没有任何 response 行再引用它**时删除；仍有效的 response 行一律保留。
+// 每批行数有上限：清理跑在单写连接上，1 vCPU 机器不能被一次全表删除长时间占住。
 func (d *DB) Purge(ctx context.Context, now time.Time) (responses, challenges int64, err error) {
-	r1, err := d.h.ExecContext(ctx, `DELETE FROM responses WHERE used=1 OR expires_at < ?`, formatTime(now.UTC()))
+	limit := strconv.Itoa(purgeBatchRows)
+	ts := formatTime(now.UTC())
+	tx, err := d.h.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, fmt.Errorf("store: 清理事务: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	r1, err := tx.ExecContext(ctx, `
+DELETE FROM responses WHERE id IN (
+  SELECT id FROM responses WHERE used=1 OR expires_at < ? LIMIT ?)`, ts, limit)
 	if err != nil {
 		return 0, 0, fmt.Errorf("store: 清理 responses: %w", err)
 	}
 	responses, _ = r1.RowsAffected()
-	r2, err := d.h.ExecContext(ctx, `DELETE FROM challenges WHERE status<>? AND expires_at < ?`, statusIssued, formatTime(now.UTC()))
+
+	r2, err := tx.ExecContext(ctx, `
+DELETE FROM challenges WHERE id IN (
+  SELECT id FROM challenges
+  WHERE status<>? AND expires_at < ?
+    AND NOT EXISTS (SELECT 1 FROM responses r WHERE r.challenge_id = challenges.id)
+  LIMIT ?)`, statusIssued, ts, limit)
 	if err != nil {
 		return responses, 0, fmt.Errorf("store: 清理 challenges: %w", err)
 	}
 	challenges, _ = r2.RowsAffected()
+
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("store: 提交清理: %w", err)
+	}
 	return responses, challenges, nil
 }
 
@@ -483,9 +536,14 @@ func (d *DB) CountChallenges(ctx context.Context, status string) (int, error) {
 
 func formatTime(t time.Time) string { return t.Format(timeLayout) }
 
+// parseTime 兼容两种写法：本版本定宽写出，阶段 1 的行可能是 RFC3339Nano 裁剪过尾零的。
+// 只回退一次格式、不做"猜时间"的宽容解析——字符串损坏仍必须报错而不是当成零点。
 func parseTime(s string) (time.Time, error) {
 	t, err := time.Parse(timeLayout, s)
 	if err != nil {
+		if t2, err2 := time.Parse(time.RFC3339Nano, s); err2 == nil {
+			return t2.UTC(), nil
+		}
 		return time.Time{}, fmt.Errorf("store: 时间格式损坏 %q: %w", s, err)
 	}
 	return t.UTC(), nil

@@ -301,3 +301,46 @@ func TestTrustProxyParsing(t *testing.T) {
 		t.Fatalf("空网段应传下去由下游校验: %+v", c2)
 	}
 }
+
+// TestTTLUpperBoundAndActiveCaps 覆盖阶段 1 复核补上的两项边界：
+// TTL 上界（有效期长度直接决定防重放账本必须保留多久）与活动 challenge 存量上限。
+func TestTTLUpperBoundAndActiveCaps(t *testing.T) {
+	env := baseEnv(t)
+	env[envChalTTL] = "86400"
+	if _, err := Load(nil, envMap(env)); !errors.Is(err, ErrInvalid) {
+		t.Fatal("challenge TTL 超过上界（1h）应拒绝：否则一条配置就能让账本永久增长")
+	}
+
+	env = baseEnv(t)
+	c, err := Load(nil, envMap(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MaxActiveChallenges <= 0 || c.MaxActivePerSite <= 0 ||
+		c.MaxActivePerSite > c.MaxActiveChallenges {
+		t.Fatalf("默认存量上限不合法: %+v", c)
+	}
+
+	env = baseEnv(t)
+	env[envMaxActive] = "50"
+	env[envMaxActiveSite] = "20"
+	c, err = Load(nil, envMap(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MaxActiveChallenges != 50 || c.MaxActivePerSite != 20 {
+		t.Fatalf("存量上限未生效: %d/%d", c.MaxActiveChallenges, c.MaxActivePerSite)
+	}
+
+	for _, bad := range []struct{ global, site string }{
+		{"0", "10"}, {"-1", "10"}, {"10", "0"}, {"10", "20"},
+		{"2000000", "10"}, {"abc", "10"},
+	} {
+		env := baseEnv(t)
+		env[envMaxActive] = bad.global
+		env[envMaxActiveSite] = bad.site
+		if _, err := Load(nil, envMap(env)); !errors.Is(err, ErrInvalid) {
+			t.Errorf("全局=%q 单站=%q 应拒绝，got %v", bad.global, bad.site, err)
+		}
+	}
+}

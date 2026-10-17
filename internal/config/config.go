@@ -36,6 +36,17 @@ const (
 	envRateIP        = "EPOCHA_RATE_IP_RPM"
 	envRateSite      = "EPOCHA_RATE_SITE_RPM"
 	envRateStates    = "EPOCHA_RATE_MAX_STATES"
+	envMaxActive     = "EPOCHA_MAX_ACTIVE_CHALLENGES"
+	envMaxActiveSite = "EPOCHA_MAX_ACTIVE_CHALLENGES_PER_SITE"
+)
+
+// TTL 上下界。上界不是形式主义：challenge/response 的有效期直接决定防重放账本里
+// "必须保留以防重放"的窗口长度，配成几天等于把库变成永久增长器。
+const (
+	minTTL     = time.Second
+	maxTTL     = time.Hour
+	minMaxRows = 1
+	maxMaxRows = 1_000_000
 )
 
 var (
@@ -74,6 +85,13 @@ type Config struct {
 	RateIPRPM    int
 	RateSiteRPM  int
 	RateMaxState int
+
+	// MaxActiveChallenges 与 MaxActivePerSite 是**存量**上限，与限流（速率）正交：
+	// 攻击者只要有足够多的源地址就能绕过速率限制，但绕不过"库里同时只允许这么多活动
+	// challenge"。缺了这一条，/api/challenge 可以无限扩大 SQLite（DESIGN §14-6/§14-9）。
+	// 数值是未实测的 [目标]，取舍依据是 1 vCPU/50GB 机器上账本行的体积与扫描成本。
+	MaxActiveChallenges int
+	MaxActivePerSite    int
 }
 
 // Load 解析命令行参数与环境变量。getenv 为 os.Getenv，测试里可注入。
@@ -103,6 +121,9 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 		RateIPRPM:    60,
 		RateSiteRPM:  300,
 		RateMaxState: 8192,
+
+		MaxActiveChallenges: 10000,
+		MaxActivePerSite:    2000,
 	}
 	var err error
 	if c.MasterKey, err = readKey(getenv, envMasterKey); err != nil {
@@ -131,8 +152,11 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 	} else if ok {
 		c.ResponseTTL = d
 	}
-	if c.ChallengeTTL < time.Second || c.ResponseTTL < time.Second {
-		return nil, fmt.Errorf("%w: TTL 必须 ≥1s", ErrInvalid)
+	if c.ChallengeTTL < minTTL || c.ResponseTTL < minTTL {
+		return nil, fmt.Errorf("%w: TTL 必须 ≥%s", ErrInvalid, minTTL)
+	}
+	if c.ChallengeTTL > maxTTL || c.ResponseTTL > maxTTL {
+		return nil, fmt.Errorf("%w: TTL 必须 ≤%s（有效期越长，防重放账本必须保留的窗口越长）", ErrInvalid, maxTTL)
 	}
 
 	switch strings.ToLower(getenv(envTrustProxy)) {
@@ -165,6 +189,23 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 	}
 	if c.RateIPRPM <= 0 || c.RateSiteRPM <= 0 || c.RateMaxState <= 0 {
 		return nil, fmt.Errorf("%w: 限流参数必须为正", ErrInvalid)
+	}
+	if n, ok, err := parseInt(getenv(envMaxActive)); err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrInvalid, envMaxActive)
+	} else if ok {
+		c.MaxActiveChallenges = n
+	}
+	if n, ok, err := parseInt(getenv(envMaxActiveSite)); err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrInvalid, envMaxActiveSite)
+	} else if ok {
+		c.MaxActivePerSite = n
+	}
+	if c.MaxActiveChallenges < minMaxRows || c.MaxActivePerSite < minMaxRows ||
+		c.MaxActiveChallenges > maxMaxRows || c.MaxActivePerSite > maxMaxRows {
+		return nil, fmt.Errorf("%w: 活动 challenge 上限须在 %d..%d", ErrInvalid, minMaxRows, maxMaxRows)
+	}
+	if c.MaxActivePerSite > c.MaxActiveChallenges {
+		return nil, fmt.Errorf("%w: 单站上限不得高于全局上限", ErrInvalid)
 	}
 
 	sitesPath := firstNonEmpty(*sites, getenv(envSites))
@@ -256,8 +297,9 @@ func readKey(getenv func(string) string, name string) ([]byte, error) {
 
 // SafeSummary 是可安全写入启动输出与日志的一行摘要。
 func (c *Config) SafeSummary() string {
-	return fmt.Sprintf("listen=%s db=%s sites=%d challenge_ttl=%s response_ttl=%s trust_proxy=%t ip_rpm=%d site_rpm=%d",
-		c.Listen, c.DBPath, len(c.Sites), c.ChallengeTTL, c.ResponseTTL, c.TrustProxy, c.RateIPRPM, c.RateSiteRPM)
+	return fmt.Sprintf("listen=%s db=%s sites=%d challenge_ttl=%s response_ttl=%s trust_proxy=%t ip_rpm=%d site_rpm=%d max_active=%d max_active_per_site=%d",
+		c.Listen, c.DBPath, len(c.Sites), c.ChallengeTTL, c.ResponseTTL, c.TrustProxy,
+		c.RateIPRPM, c.RateSiteRPM, c.MaxActiveChallenges, c.MaxActivePerSite)
 }
 
 func firstNonEmpty(vals ...string) string {

@@ -59,6 +59,7 @@ func newHarness(t *testing.T, tune func(*config.Config)) *harness {
 		},
 		ChallengeTTL: time.Minute, ResponseTTL: time.Minute,
 		RateIPRPM: 100_000, RateSiteRPM: 100_000, RateMaxState: 4096,
+		MaxActiveChallenges: 10_000, MaxActivePerSite: 5_000,
 	}
 	if tune != nil {
 		tune(cfg)
@@ -705,6 +706,7 @@ func TestReplayAfterServerRestart(t *testing.T) {
 		DBPath: h.dbPath, MasterKey: bytes.Repeat([]byte{0x5a}, 32), Pepper: testPepper,
 		ChallengeTTL: time.Minute, ResponseTTL: time.Minute,
 		RateIPRPM: 100_000, RateSiteRPM: 100_000, RateMaxState: 4096,
+		MaxActiveChallenges: 10_000, MaxActivePerSite: 5_000,
 	}
 	srv2, err := New(cfg, reopened, signer, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
@@ -901,4 +903,108 @@ func redact(v string) string {
 		return "<short>"
 	}
 	return v[:3] + "…"
+}
+
+// TestDatabaseFailureFailsClosed 覆盖红线 12：库故障时不得返回成功。
+// 关掉句柄是最省事的故障注入——所有读写都会失败。
+func TestDatabaseFailureFailsClosed(t *testing.T) {
+	h := newHarness(t, nil)
+	tok, nonce := h.challengeOK(t, "sk-alpha")
+	resp := h.redeemOK(t, tok, nonce)
+
+	if err := h.db.Close(); err != nil {
+		t.Fatalf("关闭库以注入故障: %v", err)
+	}
+	if r := h.postJSON("/api/challenge", map[string]string{"site_key": "sk-alpha"}); r.status != http.StatusInternalServerError {
+		t.Fatalf("库故障时签发必须 5xx，实际 %d %s", r.status, r.body)
+	}
+	if r := h.postJSON("/api/redeem", map[string]string{"token": tok, "pow_nonce": nonce}); r.status != http.StatusInternalServerError {
+		t.Fatalf("库故障时兑换必须 5xx，实际 %d %s", r.status, r.body)
+	}
+	r := h.postJSON("/siteverify", map[string]string{"secret": sentinelSecret, "response": resp})
+	if r.status != http.StatusInternalServerError {
+		t.Fatalf("库故障时验证必须 5xx，实际 %d %s", r.status, r.body)
+	}
+	if strings.Contains(r.body, `"success":true`) {
+		t.Fatalf("库故障竟返回 success=true: %s", r.body)
+	}
+	// fail closed 还要求"重放不会因故障而成功"：同一个 token 再验一次仍是 5xx，不是 200/true。
+	if r2 := h.postJSON("/siteverify", map[string]string{"secret": sentinelSecret, "response": resp}); r2.status != http.StatusInternalServerError {
+		t.Fatalf("故障期间重放应继续 5xx，实际 %d %s", r2.status, r2.body)
+	}
+}
+
+// TestSiteverifyUsesRecaptchaErrorFamily 固定错误码族边界（DESIGN §10.1）：
+// /siteverify 的服务端故障只能出现唯一扩展码 internal-error；/api/* 不得出现该码。
+func TestSiteverifyUsesRecaptchaErrorFamily(t *testing.T) {
+	h := newHarness(t, nil)
+	tok, nonce := h.challengeOK(t, "sk-alpha")
+	resp := h.redeemOK(t, tok, nonce)
+	if err := h.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	vr := h.postJSON("/siteverify", map[string]string{"secret": sentinelSecret, "response": resp})
+	if !vr.hasCode(ErrInternalError) {
+		t.Fatalf("/siteverify 内部错误应返回 internal-error，got %v (%s)", vr.codes(), vr.body)
+	}
+	assertKeySet(t, vr, "error-codes", "success")
+
+	rd := h.postJSON("/api/redeem", map[string]string{"token": tok, "pow_nonce": nonce})
+	if rd.hasCode(ErrInternalError) {
+		t.Fatalf("/api/redeem 不得使用 reCAPTCHA 扩展码，got %v", rd.codes())
+	}
+	if !rd.hasCode(CodeInvalidRequest) {
+		t.Fatalf("/api/redeem 内部错误应是 invalid-request，got %v", rd.codes())
+	}
+}
+
+// TestChallengeCapReturnsRateLimited 验证存量上限触发时对外表现为限流，而不是 5xx 或假成功。
+func TestChallengeCapReturnsRateLimited(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) {
+		c.MaxActivePerSite = 1
+		c.MaxActiveChallenges = 100
+	})
+	if r := h.postJSON("/api/challenge", map[string]string{"site_key": "sk-alpha"}); r.status != http.StatusOK {
+		t.Fatalf("首签应成功，got %d %s", r.status, r.body)
+	}
+	r := h.postJSON("/api/challenge", map[string]string{"site_key": "sk-alpha"})
+	if r.status != http.StatusTooManyRequests || !r.hasCode(CodeRateLimited) {
+		t.Fatalf("活动量到顶应 429 rate-limited，got %d %s", r.status, r.body)
+	}
+	if r.headers.Get("Retry-After") == "" {
+		t.Error("429 必须带 Retry-After")
+	}
+	// 另一个站点在单站额度内仍可签发（说明封顶是存量而非全局禁用）
+	if r2 := h.postJSON("/api/challenge", map[string]string{"site_key": "sk-bravo"}); r2.status != http.StatusOK {
+		t.Fatalf("另一站点应可签发，got %d %s", r2.status, r2.body)
+	}
+}
+
+// TestUnknownSiteKeysDoNotPolluteSiteLimiter 是阶段 1 复核发现的真实问题的回归测试：
+// 站点维度限流曾经按调用方自报的 site_key 计数，攻击者随机编造 site_key 就能挤掉
+// 真实站点的限流状态、使其计数不断归零。现在必须按库中站点 id 计数。
+func TestUnknownSiteKeysDoNotPolluteSiteLimiter(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) {
+		c.RateSiteRPM = 2
+		c.RateMaxState = 64
+	})
+	for i := 0; i < 40; i++ {
+		r := h.postJSON("/api/challenge", map[string]string{"site_key": "sk-bogus-" + strconv.Itoa(i)})
+		if r.status != http.StatusBadRequest {
+			t.Fatalf("未知 site_key 应 400，got %d %s", r.status, r.body)
+		}
+	}
+	if n := h.srv.siteLimit.Len(); n != 0 {
+		t.Fatalf("未知 site_key 不得创建站点维度限流条目，现有 %d 条", n)
+	}
+	// 真实站点仍然只有 2 次/分钟：伪造流量没有把它的服务桶冲掉
+	for i := 0; i < 2; i++ {
+		if r := h.postJSON("/api/challenge", map[string]string{"site_key": "sk-alpha"}); r.status != http.StatusOK {
+			t.Fatalf("第 %d 次合法签发应放行，got %d %s", i+1, r.status, r.body)
+		}
+	}
+	if r := h.postJSON("/api/challenge", map[string]string{"site_key": "sk-alpha"}); r.status != http.StatusTooManyRequests {
+		t.Fatalf("超出站点 RPM 应 429，got %d %s", r.status, r.body)
+	}
 }

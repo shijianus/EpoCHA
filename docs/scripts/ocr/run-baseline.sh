@@ -22,7 +22,8 @@ OUT="${EPOCHA_OCR_OUT:-$ROOT/eval-out/ocr-$(date -u +%Y%m%dT%H%M%SZ)}"
 MODE="${1:-all}"
 IMAGE="epocha-ocr-eval:stage4b"
 CHARSET="ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # 与 generator.TextImageCharset 同一套字符
-PER_SET="${EPOCHA_OCR_N:-100}"               # 每档样本数（题目要求 ≥100）
+PER_SET="${EPOCHA_OCR_N:-100}"               # 正式基线每档样本数（要求 ≥100）
+PER_TUNE="${EPOCHA_OCR_TUNE_N:-40}"          # 调参每档样本数：候选参数要跑 4 组，不必都吃满 100
 DIFFS=(1 3 5)                                 # 低 / 中 / 高三个渲染档位
 BIN="$OUT/bin"
 DISK_MIN_MB="${EPOCHA_OCR_DISK_MIN_MB:-700}"  # 磁盘预算：低于此值先停下来问，不要写满 /
@@ -75,12 +76,12 @@ gen_set() {
 
 # run_eval <label> <psm> <oem> <whitelist> <set> <difficulty>；结果追加到 $OUT/results.txt
 run_eval() {
-  local label="$1" psm="$2" oem="$3" wl="$4" set="$5" diff="$6"
+  local label="$1" psm="$2" oem="$3" wl="$4" set="$5" diff="$6" want="${7:-$PER_SET}"
   local key="$set-d$diff"
   [[ -n "${GT[$key]:-}" && -n "${STAGE[$key]:-}" ]] || fail "样本集 $key 还没生成"
   local nf
   nf=$(find "${STAGE[$key]}" -name 'sample-*.png' | wc -l)
-  (( nf == PER_SET )) || fail "暂存目录 $key 里有 $nf 张，期望 $PER_SET 张"
+  (( nf == want )) || fail "暂存目录 $key 里有 $nf 张，期望 $want 张"
   log "  ▶ $label / $key（$nf 张，psm=$psm oem=$oem whitelist=${#wl} 字符）"
   local rc=0
   EPOCHA_OCR_STAGE="${STAGE[$key]}" EPOCHA_OCR_PSM="$psm" EPOCHA_OCR_OEM="$oem" EPOCHA_OCR_WHITELIST="$wl" \
@@ -106,33 +107,40 @@ run_eval() {
 # psm=8 是单字符，需要逐字切分——我们没有做逐字裁剪，所以列出来只做对照，不当候选。
 tune() {
   : >"$OUT/results.txt"
-  for d in "${DIFFS[@]}"; do gen_set dev "$d" "$PER_SET"; done
+  for d in "${DIFFS[@]}"; do gen_set dev "$d" "$PER_TUNE"; done
   log "第一步：在 dev 集上比候选参数（holdout 此阶段完全不参与）"
   for cfg in "psm7-oem3-wl:7:3:$CHARSET" "psm6-oem3-wl:6:3:$CHARSET" "psm7-oem1-wl:7:1:$CHARSET" "psm7-oem1-nowl:7:1:"; do
     IFS=: read -r name psm oem wl <<<"$cfg"
-    for d in "${DIFFS[@]}"; do run_eval "$name" "$psm" "$oem" "$wl" dev "$d"; done
+    for d in "${DIFFS[@]}"; do run_eval "$name" "$psm" "$oem" "$wl" dev "$d" "$PER_TUNE"; done
   done
   log "候选参数比较结果（完整见 $OUT/results.txt）："
   cat "$OUT/results.txt"
 }
 
 # ---- 固定参数跑正式基线 ----
-# FINAL_* 三个常量是**在 dev 上比较之后**定下来的，见 docs/STAGE4B.md §4。
-# 改它们必须同时改文档里那句话，否则"holdout 只跑一次"就成了空话。
-FINAL_LABEL="${EPOCHA_OCR_FINAL_LABEL:-psm7-oem1-wl}"
-FINAL_PSM="${EPOCHA_OCR_FINAL_PSM:-7}"
-FINAL_OEM="${EPOCHA_OCR_FINAL_OEM:-1}"
+# FINAL_* 是**只看 dev**（每档 40 张，见 tune 阶段）比较后定下来的，比较表：
+#   配置              d1      d3      d5
+#   psm7-oem3-wl      97.50%  27.50%   0.00%
+#   psm6-oem3-wl      97.50%  37.50%   0.00%   ← 选它（dev 上最强）
+#   psm7-oem1-wl      97.50%  27.50%   0.00%
+#   psm7-oem1-nowl    95.00%   7.50%   0.00%
+# 为什么必须选**最强**的一组而不是随便一组：基线要回答的是"一台 commodity OCR 最多能读成什么样"。
+# 故意留一个弱配置会让数字好看，那正是 §五 禁止的方向。
+# 注意白名单是**帮忙**的（把输出空间限制到题目字符集），所以带白名单反而更强；
+# 不用白名单那一档 d3 只有 7.5%，不能拿它当"OCR 读不出来"的证据。
+# 改这三个常量必须同时改 docs/STAGE4B.md 里的那句"选定于 dev"，否则"holdout 只看一次"就是空话。
+FINAL_LABEL="${EPOCHA_OCR_FINAL_LABEL:-psm6-oem3-wl}"
+FINAL_PSM="${EPOCHA_OCR_FINAL_PSM:-6}"
+FINAL_OEM="${EPOCHA_OCR_FINAL_OEM:-3}"
 FINAL_WL="${EPOCHA_OCR_FINAL_WL:-$CHARSET}"
 
 final() {
   [[ -s "$OUT/results.txt" ]] || : >"$OUT/results.txt"
   log "第二步：固定参数 dev + holdout（label=$FINAL_LABEL psm=$FINAL_PSM oem=$FINAL_OEM）"
-  for d in "${DIFFS[@]}"; do
-    [[ -n "${GT["dev-d$d"]:-}" ]] || gen_set dev "$d" "$PER_SET"
-    gen_set holdout "$d" "$PER_SET"
-  done
-  for d in "${DIFFS[@]}"; do run_eval "$FINAL_LABEL-fixed" "$FINAL_PSM" "$FINAL_OEM" "$FINAL_WL" dev "$d"; done
-  for d in "${DIFFS[@]}"; do run_eval "$FINAL_LABEL-final" "$FINAL_PSM" "$FINAL_OEM" "$FINAL_WL" holdout "$d"; done
+  for d in "${DIFFS[@]}"; do gen_set dev "$d" "$PER_SET"; done
+  for d in "${DIFFS[@]}"; do gen_set holdout "$d" "$PER_SET"; done
+  for d in "${DIFFS[@]}"; do run_eval "$FINAL_LABEL-devfixed" "$FINAL_PSM" "$FINAL_OEM" "$FINAL_WL" dev "$d" "$PER_SET"; done
+  for d in "${DIFFS[@]}"; do run_eval "$FINAL_LABEL-holdout" "$FINAL_PSM" "$FINAL_OEM" "$FINAL_WL" holdout "$d" "$PER_SET"; done
   log "正式基线结果："
   grep -A 7 -E "^== $FINAL_LABEL-(fixed|final)" "$OUT/results.txt" || cat "$OUT/results.txt"
 }

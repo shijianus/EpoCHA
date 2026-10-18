@@ -33,6 +33,9 @@ help:
 	@echo "make stage3b-check 视觉题 + 图片资产 + 预览 + 评测 端到端验收（阶段 3B，含 check 与前三阶段）"
 	@echo "make eval-samples 生成离线评测样本（dev 调参集 + holdout 验收集，输出 eval-out/ 不入库）"
 	@echo "make ocr-baseline 用本机离线 OCR 跑基线（无工具时二进制退出码 3=BLOCKED；注意 make 自身只会给 0 或 2）"
+	@echo "make ocr-container 构建隔离 OCR 评测容器（仅开发期；记录镜像与模型指纹）"
+	@echo "make ocr-baseline-real 阶段 4B 真实基线：dev 调参 + dev/holdout 正式测量（需先 ocr-container）"
+	@echo "make blindtest     一条命令起人工可读性盲测（临时密钥/库/端口，页面导出无凭据 CSV/JSON）"
 	@echo "make run          以临时 DB 启动（仅本地调试）"
 
 .PHONY: build
@@ -117,6 +120,12 @@ stage2-check:
 stage4a-check:
 	@bash docs/scripts/stage4a.sh
 
+.PHONY: stage4b-check
+# 4B 自己的工程项（评分口径、容器隔离实证、盲测守卫）+ 一次 stage4a.sh：
+# 回归与浏览器套件各只跑一遍，不把同一套 -race 再跑第二遍。
+stage4b-check:
+	@bash docs/scripts/stage4b.sh
+
 .PHONY: widget-checks
 widget-checks:
 	@node --check web/widget/v1.js
@@ -153,6 +162,23 @@ eval-samples:
 .PHONY: ocr-baseline
 ocr-baseline:
 	@bash docs/scripts/ocr-baseline.sh
+
+# OCR 评测容器：官方 ubuntu 基础镜像 + 官方仓库的 tesseract，只用于开发期测量。
+# 生产服务与生产镜像**不**依赖它（AGENTS：纯 Go、无外部二进制）。
+.PHONY: ocr-container
+ocr-container:
+	@docker build --platform linux/arm64 -t epocha-ocr-eval:stage4b docs/scripts/ocr/
+	@docker run --rm --entrypoint cat --network none epocha-ocr-eval:stage4b /TOOL_FINGERPRINT.txt
+
+# 真实 OCR 基线（阶段 4B）：dev 调参 + dev/holdout 正式测量。需要 make ocr-container 先建好镜像。
+# 识别阶段 --network none、样本只读挂载、ground truth 从不进容器。
+.PHONY: ocr-baseline-real
+ocr-baseline-real:
+	@bash docs/scripts/ocr/run-baseline.sh all
+
+.PHONY: blindtest
+blindtest:
+	@bash docs/scripts/blindtest.sh
 
 .PHONY: tidy
 tidy:

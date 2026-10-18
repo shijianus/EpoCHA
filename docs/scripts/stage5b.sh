@@ -845,11 +845,17 @@ fi
 
 # --- 第 3 步：候选构建清单（受支持范围＝B 路径）---
 log "第 3 步：部署候选清单（必需＝B 路径；A 路径与未验证平台归为可选项）"
+# 候选清单**只有绑到干净提交才有意义**：dirty 树上的 SHA 不属于任何可检出的提交，
+# 拿它当"部署候选"就是给一个不存在的版本做保证。本轮实测撞过一次（跑门禁的同时改了文档），
+# 所以这里不是"记录一下工作树状态"，而是一条硬判据。
+GIT_STATUS="$(git status --porcelain)"
+WT=clean
+if [[ -n "$GIT_STATUS" ]]; then WT=dirty; fi
 LDFLAGS_TEXT="$(make -n build 2>/dev/null | grep -o '\-ldflags .*' | head -n1 || true)"
 {
   echo "生成时间: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "源码 commit: $(git rev-parse HEAD)  describe: $(git describe --tags --always --dirty 2>/dev/null || echo dev)"
-  echo "工作树: $(if [[ -z $(git status --porcelain) ]]; then echo clean; else echo dirty; fi)"
+  echo "工作树: $WT"
   # 宿主默认 CGO_ENABLED 与镜像构建用的值**分开记**：宿主有 gcc 时默认是 1，
   # 而 scratch 运行时要求 0（5A 的实测教训）。写成一个笼统的"CGO_ENABLED=0"就是失准。
   echo "宿主 go 默认: GOOS=$(go env GOOS) GOARCH=$(go env GOARCH) CGO_ENABLED=$(go env CGO_ENABLED) GOTOOLCHAIN=$(go env GOTOOLCHAIN)"
@@ -882,7 +888,13 @@ if [[ -f "$BIN/epocha-ops" ]]; then
   # 含当前 commit 的清单如果再提交进仓库就成了自引用循环（一改代码清单就过期）。
   mkdir -p deploy/docker/.prebuilt
   cp "$LOGS/manifest.txt" deploy/docker/.prebuilt/candidate-manifest.txt
-  pass "候选清单已落盘（commit / 工作树状态 / Go / GOOS-ARCH / CGO / 构建路径 / 两份进镜像二进制的 SHA-256 / 本地镜像 ID 与标签 / schema / 实测 uid）：deploy/docker/.prebuilt/candidate-manifest.txt"
+  if [[ "$WT" == "dirty" ]]; then
+    # 这些 SHA 属于"这个提交 + 一堆没提交的东西"，也就是**任何检出都拿不到**的那个版本。
+    # 判 FAIL 而不是记一行备注：候选清单的全部价值就在于它能绑定一个可复现的提交。
+    fail "候选清单在工作树 **dirty** 时生成，SHA 无法绑定干净提交。未提交改动：$(printf '%s' "$GIT_STATUS" | tr '\n' ' ' | cut -c1-200) ⇒ 先提交（或还原），再重新出候选"
+  else
+    pass "候选清单已落盘并绑定干净提交 $(git rev-parse --short HEAD)（commit／Go／GOOS-ARCH／CGO／构建路径／两份进镜像二进制 SHA-256／本地镜像 ID 与标签／schema／实测 uid）：deploy/docker/.prebuilt/candidate-manifest.txt"
+  fi
 else
   req_notrun "候选清单的二进制与镜像部分" "第 2 步没执行（磁盘不足）⇒ 清单无法绑定真实产物；释放磁盘后 bash docs/scripts/stage5b.sh"
 fi

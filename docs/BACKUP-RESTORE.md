@@ -174,6 +174,10 @@ epocha-ops restore ... --rotate-pepper
 
 恢复**永远**在隔离目录里做，产物是新文件；当前工作库逐字节不动（演练里用 sha256 前后对账证明）。
 
+> 下面的 `docker compose …` 是 `DEPLOYMENT` §4 里那个形状的简写（`-f $EP/compose.yml
+> --project-directory $EP --env-file $EP/.env`）。两种写法都行，但**一段命令里只能用一种**：
+> 工作目录决定了 compose 找哪个 `.env`、绑定挂载里的 `./data` 解析到哪里。
+
 ```bash
 # 0) 停服。恢复期间不接收业务流量——这是流程的一部分，不是建议。
 docker compose stop

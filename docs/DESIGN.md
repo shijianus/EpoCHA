@@ -1260,7 +1260,8 @@ CSP 禁 Worker 明确失败、键盘-only 完成一题、请求面与凭据面�
   只有前两个存在 ⇒ 不得宣称抵御恶意替换。
 - 候选清单：**第一版正式支持范围只有 B 路径**（宿主静态编译 + named build context 装配，ADR-017），
   A 路径（容器内编译）保持**可选、NOT_RUN**——这是缩小支持范围，不是把它写成通过。
-  清单必须绑定**干净提交**（`git status --porcelain` 为空时构建），含源码 commit、工作树状态、Go 版本、
+  清单必须绑定**干净提交**（`git status --porcelain` 为空时构建；门禁第 3 步把这条变成硬判据——
+  工作树非空 ⇒ 必需项 FAIL，因为"记录一下状态"在实测中出现过"清单是 dirty 而所有断言全绿"），含源码 commit、工作树状态、Go 版本、
   `GOOS/GOARCH/CGO_ENABLED`、编译参数与构建路径、两份进镜像二进制的 SHA-256、
   本地镜像 ID 与标签（**不**冒充 registry digest）、schema 版本、已测试的 uid/gid、未验证范围。
   清单作为**构建产物**落在忽略目录（`deploy/docker/.prebuilt/candidate-manifest.txt`），不入库：

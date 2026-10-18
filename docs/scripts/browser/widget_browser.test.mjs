@@ -8,13 +8,22 @@
 // 答案表只落在临时目录。题面图片按**字节**匹配到答案，不靠文件名（文件名与答案的对应关系
 // 本身就是一种出口）。生产 API/页面没有任何"返回答案"的路径。
 //
-// 环境变量（缺失即抛错退出，不静默跳过）：
-//   BIDI_WS              ws://127.0.0.1:PORT/session
-//   EPOCHA_API           http://127.0.0.1:PORT       epocha 服务
-//   EXAMPLE_URL          http://127.0.0.1:PORT/      exampleapp，CSP=blob
-//   EXAMPLE_NOWORKER_URL http://127.0.0.1:PORT/      exampleapp，CSP worker-src 'none'
-//   SEED_JSON            devseed 答案表；SEED_DIR 它的 PNG 目录
-//   SITE_KEY             演示站点 site_key
+// 环境变量（**全部缺失即抛错退出，不静默跳过**）：
+//   BIDI_WS                ws://127.0.0.1:PORT/session
+//   EPOCHA_API             http://127.0.0.1:PORT       epocha 服务
+//   EXAMPLE_URL            http://127.0.0.1:PORT/      exampleapp，CSP=blob
+//   EXAMPLE_NOWORKER_URL   http://127.0.0.1:PORT/      exampleapp，CSP worker-src 'none'
+//   SEED_JSON              devseed 答案表；SEED_DIR 它的 PNG 目录
+//   SITE_KEY               演示站点 site_key
+//   EXAMPLE_HARD_URL       http://127.0.0.1:PORT/      exampleapp，bits=20 站点
+//   HARD_SITE_KEY          高难度演示站点 site_key
+//   EXAMPLE_WORKERFILE_URL http://127.0.0.1:PORT/      exampleapp，CSP worker-src 'self'（方案 B）
+//   EXAMPLE_TTL_URL        http://127.0.0.1:PORT/      exampleapp，response_ttl=2s 站点
+//   TTL_SITE_KEY           短 TTL 演示站点 site_key
+//
+// 为什么这些是硬要求而不是 skip：一条**必需**交互因为编排没给齐变量就"跳过并算过"，
+// 比直接失败更危险（门禁会绿在错误的原因上）。真正的外部条件不足只有 375px 视口那一项，
+// 它由 Firefox BiDi 的能力边界决定，用 skip 表达并由 stage4a.sh 换算成 BLOCKED。
 
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -34,6 +43,11 @@ const NOWORKER_URL = need("EXAMPLE_NOWORKER_URL");
 const SEED_JSON = need("SEED_JSON");
 const SEED_DIR = need("SEED_DIR");
 const SITE_KEY = need("SITE_KEY");
+const HARD_URL = need("EXAMPLE_HARD_URL");
+const HARD_SITE_KEY = need("HARD_SITE_KEY");
+const WORKERFILE_URL = need("EXAMPLE_WORKERFILE_URL");
+const TTL_URL = need("EXAMPLE_TTL_URL");
+const TTL_SITE_KEY = need("TTL_SITE_KEY");
 
 if (!existsSync(SEED_JSON)) throw new Error(`答案表不存在：${SEED_JSON}`);
 const seeds = JSON.parse(readFileSync(SEED_JSON, "utf8"));
@@ -359,15 +373,14 @@ test("reset 与 destroy：清空 token/输入、移除 DOM 与隐藏字段、注
   assert.equal(await bidi.evaluate(c, `EpoCHA.ids().length`), 0, "destroy 之后注册表应为空");
 });
 
-test("计算超时是真实约束：高难度站点上 powTimeoutMs 到点即明确失败，不去兑换",
-  { skip: process.env.EXAMPLE_HARD_URL ? false : "没给 EXAMPLE_HARD_URL" }, async () => {
-  const c = await openPage(process.env.EXAMPLE_HARD_URL);
+test("计算超时是真实约束：高难度站点上 powTimeoutMs 到点即明确失败，不去兑换", async () => {
+  const c = await openPage(HARD_URL);
   await waitFirstState(c, "ready");
   // 在同一个高难度页面（bits=20，浏览器要算上百万次）上再挂一个**超时预算只有 400ms** 的实例。
   // 用公开配置面制造超时，而不是靠运气让 1ms 定时器抢在一次几毫秒的求解前面。
   const id2 = await bidi.evaluateJSON(c, `(()=>{
     const d=document.createElement('div'); d.id='wto'; document.body.appendChild(d);
-    return EpoCHA.render(d, {apiBase: ${JSON.stringify(EPOCHA_API)}, siteKey: ${JSON.stringify(process.env.HARD_SITE_KEY)},
+    return EpoCHA.render(d, {apiBase: ${JSON.stringify(EPOCHA_API)}, siteKey: ${JSON.stringify(HARD_SITE_KEY)},
       language:'zh-CN', fieldName:'', powTimeoutMs: 400});
   })()`);
   await bidi.waitUntil(c, `EpoCHA.state(${JSON.stringify(id2)})==='ready'`, { timeoutMs: 40000, label: "预算实例进入 ready" });
@@ -385,8 +398,8 @@ test("计算超时是真实约束：高难度站点上 powTimeoutMs 到点即明
   await bidi.evaluate(c, `EpoCHA.destroy(${JSON.stringify(id2)})`);
 });
 
-test("高难度站点：取消正在进行的计算不会晚到生效", { skip: process.env.EXAMPLE_HARD_URL ? false : "没给 EXAMPLE_HARD_URL" }, async () => {
-  const c = await openPage(process.env.EXAMPLE_HARD_URL);
+test("高难度站点：取消正在进行的计算不会晚到生效", async () => {
+  const c = await openPage(HARD_URL);
   await waitFirstState(c, "ready");
   const id = (await probeState(c)).ids[0];
   const { answer } = await answerOfCurrent(c);
@@ -490,9 +503,8 @@ test("手机宽度（375px）不产生横向溢出", async (t) => {
   assert.ok(over.docScroll <= over.inner + 1, `页面出现横向滚动：${JSON.stringify(over)}`);
 });
 
-test("方案 B：同源 worker 文件路径可用（该页 CSP 禁 blob:，能过就说明确实走的是文件）",
-  { skip: process.env.EXAMPLE_WORKERFILE_URL ? false : "没给 EXAMPLE_WORKERFILE_URL" }, async () => {
-  const c = await openPage(process.env.EXAMPLE_WORKERFILE_URL);
+test("方案 B：同源 worker 文件路径可用（该页 CSP 禁 blob:，能过就说明确实走的是文件）", async () => {
+  const c = await openPage(WORKERFILE_URL);
   await waitFirstState(c, "ready");
   const { answer } = await answerOfCurrent(c);
   // 这个档位下 CSP 是 `worker-src 'self'`：Blob worker 必然被拒（实测过），
@@ -536,16 +548,15 @@ test("页面与组件的请求面：只打 /api/challenge 与 /api/redeem，不�
   assert.ok(html.includes(SITE_KEY), "页面应包含公开的 site_key");
 });
 
-test("过期时清空 token 与隐藏字段（客户端倒计时跟着服务端的 response_ttl）",
-  { skip: process.env.EXAMPLE_TTL_URL ? false : "没给 EXAMPLE_TTL_URL" }, async () => {
-  const c = await openPage(process.env.EXAMPLE_TTL_URL);
+test("过期时清空 token 与隐藏字段（客户端倒计时跟着服务端的 response_ttl）", async () => {
+  const c = await openPage(TTL_URL);
   await waitFirstState(c, "ready");
   // 这个演示站点的 response_ttl_sec=2（服务端权威），所以客户端必须在 2 秒后自己作废。
   const id = await bidi.evaluateJSON(c, `(()=>{
     const f=document.createElement('form'); document.body.appendChild(f);
     const d=document.createElement('div'); f.appendChild(d);
     window.__expired = 0;
-    return EpoCHA.render(d, {apiBase: ${JSON.stringify(EPOCHA_API)}, siteKey: ${JSON.stringify(process.env.TTL_SITE_KEY)},
+    return EpoCHA.render(d, {apiBase: ${JSON.stringify(EPOCHA_API)}, siteKey: ${JSON.stringify(TTL_SITE_KEY)},
       language:'zh-CN', fieldName:'ttl_response',
       onExpired: function () { window.__expired++; }});
   })()`);

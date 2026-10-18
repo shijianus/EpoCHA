@@ -63,7 +63,7 @@ go run ./cmd/exampleapp --listen 127.0.0.1:8091 --api http://127.0.0.1:8080 \
 |---|---|---|
 | 后端/组件工程测试 | **PASS** | `go test -race` 全绿；`internal/api` 新增 site_key 一致性 3 个测试；`web/widget` 6 个测试（含两份 worker 拷贝防漂移、危险构造扫描）；`cmd/exampleapp` 13 个测试（含 fail-closed、超时、写入失败不缓存成功）；`internal/pow` 共享向量测试 |
 | 跨实现一致性 | **PASS** | `node --test` 用 worker 的原始字节在 `vm` 里断言与 Go 生成的同一份向量一致（7 项） |
-| 浏览器交互测试 | **PASS**（14 项：13 pass + 1 skip） | 真实 Firefox + WebDriver BiDi（零第三方驱动）：闭环、答错终结、一次性重放、多实例与隐藏字段、晚到响应、reset/destroy、计算超时预算、高难度取消、**过期清空 token 与隐藏字段**（用 `response_ttl_sec=2` 的演示站点，客户端倒计时跟着服务端 TTL）、CSP 禁 Worker、键盘-only、请求面、凭据面 |
+| 浏览器交互测试 | **PASS**（声明 14 条 = 13 项真实执行 + 1 项 skip） | 真实 Firefox + WebDriver BiDi（零第三方驱动）：闭环、答错终结、一次性重放、多实例与隐藏字段、晚到响应、reset/destroy、计算超时预算、高难度取消、**过期清空 token 与隐藏字段**（用 `response_ttl_sec=2` 的演示站点，客户端倒计时跟着服务端 TTL）、CSP 禁 Worker、**方案 B 同源 worker 文件**、键盘-only、请求面、凭据面 |
 | 移动端 375px 无横向溢出 | **BLOCKED** | Firefox BiDi 没有可用的视口设置命令；node:test 以 `skip` 表达（不是通过）。需人工在真机或 DevTools 响应式模式下确认 |
 | OCR 效果测量 | **BLOCKED** | 沿用 3B：本机无离线 OCR、未获授权安装/下载 ⇒ M4 未知 |
 | 人工可读性 | **NOT_RUN** | 4A 没有新的人工参与数据；盲测入口仍在 `cmd/preview` |
@@ -80,7 +80,7 @@ iframe 方案未采用（直接 Shadow DOM 挂载），因此也不存在"换 Or
 | 浏览器 SHA-256 吞吐 | **422,833 次/秒**（200,000 次耗时 473 ms） | Dedicated Worker 内的纯 JS 实现；`crypto.subtle` 逐次摘要的形态在预览里只有 2–4k 次/秒量级，那才是选它的原因 |
 | bits=12 求解 | 451 次 / **4–6 ms** | 单个 challenge 的样本，不是分布结论 |
 | bits=12 提交→verified 墙钟 | **103–145 ms** | 含 PoW + 一次 localhost 往返 + 判分事务 |
-| bits=20 提交→verified 墙钟 | 五次采样 **309 / 1,551 / 1,862 / 4,064 / 8,991 ms** | 第一个解出现在第几次是几何分布，加上同机负载不同 ⇒ 只当量级证据：**bits=20 在浏览器端已经是"秒级到十秒级"**。这条直接反对两件事：把任何单次采样当常量，以及把服务端难度往上抬（1vCPU 的真实目标机上会更糟）|
+| bits=20 提交→verified 墙钟 | 六次采样 **309 / 1,551 / 1,862 / 3,938 / 4,064 / 8,991 ms** | 第一个解出现在第几次是几何分布，加上同机负载不同 ⇒ 只当量级证据：**bits=20 在浏览器端已经是"秒级到十秒级"**。这条直接反对两件事：把任何单次采样当常量，以及把服务端难度往上抬（1vCPU 的真实目标机上会更糟）|
 | 服务二进制 | 10,944,804 B（3B 是 10,813,732 B） | +128 KB 是 widget 与 worker 两份内嵌文本 |
 | 示例后端进程 | VmRSS / VmHWM / Threads 见 `make stage4a-check` 输出 | 功能闭环形状，**不是**稳态；RSS 断言只用 100MB 目标线兜底 |
 
@@ -105,6 +105,15 @@ iframe 方案未采用（直接 Shadow DOM 挂载），因此也不存在"换 Or
 门禁的嵌套问题也一并修掉：`make stage4a-check` 只跑 `docs/scripts/stage4a.sh`，
 脚本内部把 `fmt-check / vet / race / size / secret-scan / widget-size / stage1 / stage2 / stage3a / stage3b`
 **各跑一次**并逐条打印退出码——同一套 `-race` 不再被跑四遍。
+
+**"绿在错误的原因上"的第三道口子（本轮堵上）**：浏览器用例原先按"`EXAMPLE_HARD_URL` 有没有给"
+决定高难度取消、方案 B 同源 worker 文件、过期清空 token 这三条**必需**交互跑不跑，
+而 `stage4a.sh` 原先只判断"日志里有没有 skip"、再把任意一条 skip 一律当成 375px 那一项。
+两者叠加的结果是：编排少给一个环境变量 ⇒ 三条必需交互没执行 ⇒ 门禁照样 PASS。
+现在 (a) 这些变量在测试文件里是**硬要求**（缺失即抛错退出，不静默跳过）；
+(b) 脚本按测试文件的 `^test(` **声明条数对账**：`pass + skipped` 必须等于声明数，
+skip 超过 1 条、或唯一那条不是 375px，都判 FAIL。
+外部条件不足只剩 375px 视口一项，它由 BiDi 的能力边界决定，用 `t.skip` 表达并换算成 BLOCKED。
 
 ## 6. 本轮由"真实浏览器"抓到、curl 层永远看不到的缺陷
 

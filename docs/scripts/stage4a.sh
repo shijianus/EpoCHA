@@ -38,6 +38,9 @@ N_BLOCKED=0
 N_NOTRUN=0
 RUST_LOG_TARGET="$WORK/epocha.log"
 BIDI_PORT="${EPOCHA_BIDI_PORT:-9333}"
+# 浏览器必需验收是否**真实执行过**。没执行过就不能把整轮当通过——脚本开头写的退出码契约
+# 要求这种情况退非 0，而 "blocked" 只是给它正确的分类标签，不是放行的理由。
+BROWSER_RAN=0
 
 log()  { printf '[stage4a] %s\n' "$*"; }
 pass()    { STEP=$((STEP+1)); N_PASS=$((N_PASS+1)); printf '[stage4a] PASS %d: %s\n' "$STEP" "$*"; }
@@ -188,7 +191,7 @@ log "第六步：受控注入 50 道题（答案只落在临时目录；浏览�
 SEED_JSON="$WORK/seed/seeded-answers.json"
 [[ -f "$SEED_JSON" ]] || fail "没有生成答案表"
 SEED_COUNT="$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))))' "$SEED_JSON")"
-[[ "$SEED_COUNT" == "50" ]] || fail "注入条数 = $SEED_COUNT，期望 30"
+[[ "$SEED_COUNT" == "50" ]] || fail "注入条数 = $SEED_COUNT，期望 50"
 pass "受控注入 $SEED_COUNT 道视觉题（图片与答案成对；生产 API 无答案出口）"
 
 log "第七步：site_key 一致性（预检一站、实际操作另一站必须被拒）"
@@ -239,6 +242,9 @@ curl -fsS http://127.0.0.1:8391/healthz >/dev/null || fail "示例应用 1 没�
 curl -fsS http://127.0.0.1:8392/healthz >/dev/null || fail "示例应用 2 没起来：$(tail -n 5 "$APP2_LOG")"
 curl -fsS http://127.0.0.1:8393/healthz >/dev/null || fail "示例应用 3 没起来：$(tail -n 5 "$APP3_LOG")"
 curl -fsS http://127.0.0.1:8394/healthz >/dev/null || fail "示例应用 4 没起来：$(tail -n 5 "$APP4_LOG")"
+# 短 TTL 档现在是浏览器"过期清空 token"用例的**硬**依赖：这里不单独确认，
+# 它挂掉时会晚一步表现为浏览器失败，排查方向被指错。
+curl -fsS http://127.0.0.1:8396/healthz >/dev/null || fail "示例应用 6（短 TTL 站点）没起来：$(tail -n 5 "$APP6_LOG")"
 
 csp1="$(curl -sSI http://127.0.0.1:8391/ | grep -i '^content-security-policy' || true)"
 printf '%s' "$csp1" | grep -q "worker-src blob:" || fail "app1 CSP 缺 worker-src blob: → $csp1"
@@ -286,7 +292,7 @@ pass "验证服务不可达 ⇒ 503 且不放行（示例应用自己的 Go 测�
 
 log "第十一步：WebDriver BiDi 真实浏览器验收（零第三方驱动）"
 if ! command -v firefox >/dev/null 2>&1; then
-  blocked "浏览器交互验收：本机没有 Firefox，无法用 BiDi 驱动 ⇒ 整批交互项未执行"
+  blocked "浏览器交互验收：本机没有 Firefox，无法用 BiDi 驱动 ⇒ 整批交互项未执行（本轮不算验收通过）"
 elif ! node --version >/dev/null 2>&1; then
   fail "没有 node，无法运行 BiDi 测试与向量测试（工程项，不是外部条件）"
 else
@@ -302,7 +308,7 @@ else
     sleep 0.2
   done
   if [[ $up -eq 0 ]]; then
-    blocked "浏览器交互验收：Firefox 远程端点没起来（日志：$(tail -n 3 "$WORK/firefox.log")）"
+    blocked "浏览器交互验收：Firefox 远程端点没起来（日志：$(tail -n 3 "$WORK/firefox.log")）⇒ 本轮不算验收通过"
   else
     log "  Firefox BiDi：$(grep -o 'WebDriver BiDi listening.*' "$WORK/firefox.log" | head -n1)"
     set +e
@@ -315,15 +321,36 @@ else
       node --test docs/scripts/browser/widget_browser.test.mjs 2>&1 | tee "$WORK/browser.log"
     browser_rc=${PIPESTATUS[0]}
     set -e
-    # node:test 的 skip 是"这条没执行"，不是"这条过了"：必须换算成 BLOCKED 计数。
-    SKIPPED=0
-    if grep -qE "^# skipped [1-9]" "$WORK/browser.log"; then SKIPPED=1; fi
-    if [[ $SKIPPED -gt 0 ]]; then
+    [[ $browser_rc -eq 0 ]] || { tail -n 40 "$WORK/browser.log"; fail "浏览器交互验收未通过（node --test 退出码 $browser_rc）"; }
+
+    # node:test 的 skip 是"这条没执行"，不是"这条过了"。这里**逐项核对跳过了什么**：
+    # 原先只判断"有没有 skip"，然后把任何一条都当成 375px 那一项——于是"高难度取消"
+    # "方案 B 同源 worker 文件""过期清空 token"这三条必需交互只要没跑，门禁照样绿。
+    # 现在这三条的编排变量已改成硬要求（缺失即抛错），此处再钉一道身份与数量。
+    SKIP_COUNT="$(awk '/^# skipped /{print $3}' "$WORK/browser.log")" || SKIP_COUNT=0
+    PASS_COUNT="$(awk '/^# pass /{print $3}' "$WORK/browser.log")" || PASS_COUNT=0
+    SKIP_COUNT="${SKIP_COUNT:-0}"; PASS_COUNT="${PASS_COUNT:-0}"
+    case "$SKIP_COUNT$PASS_COUNT" in (*[!0-9]*|'') fail "读不到 node:test 的 pass/skipped 计数（报告格式变了？）";; esac
+    # "pass 计数够多"不等于"必需项都跑了"：一条用例改名后没被收集、或整条被注释掉，
+    # skipped 仍是 1、门禁仍绿，只是少测了一项。所以按**声明数**核账：
+    # 文件里 `^test(` 有几条，pass + skip 就必须等于几条，且 skip 只能是 375px 那一项。
+    DECLARED="$(grep -c '^test(' docs/scripts/browser/widget_browser.test.mjs || true)"
+    DECLARED="${DECLARED:-0}"
+    case "$DECLARED" in (''|*[!0-9]*) fail "读不到浏览器用例的声明条数";; esac
+    [[ $DECLARED -gt 0 ]] || fail "浏览器用例文件里一条 test 都没声明"
+    [[ $((PASS_COUNT + SKIP_COUNT)) -eq $DECLARED ]] \
+      || fail "浏览器用例对不上账：声明 $DECLARED 条，实测 pass=$PASS_COUNT + skipped=$SKIP_COUNT ⇒ 有必需交互没被执行"
+    if [[ $SKIP_COUNT -gt 1 ]]; then
+      fail "浏览器用例跳过 $SKIP_COUNT 项：必需交互必须逐项真实执行，只有 375px 视口一项允许换算成 BLOCKED"
+    fi
+    if [[ $SKIP_COUNT -eq 1 ]]; then
+      grep -q "375px 宽度检查未执行" "$WORK/browser.log" \
+        || fail "跳过的那一条不是 375px 视口检查 ⇒ 有必需交互没跑，不能算通过"
       grep -E "BLOCKED" "$WORK/browser.log" | sed 's/^/  /'
       blocked "浏览器交互项之一未执行：Firefox BiDi 不提供视口设置命令 ⇒ 375px 移动端无横向溢出没被测到（需人工确认）"
     fi
-    [[ $browser_rc -eq 0 ]] || { tail -n 40 "$WORK/browser.log"; fail "浏览器交互验收未通过（node --test 退出码 $browser_rc）"; }
-    pass "真实浏览器闭环与六项交互断言全部通过（Node 内置 WebSocket + Firefox BiDi，退出码 $browser_rc）"
+    BROWSER_RAN=1
+    pass "真实浏览器交互断言：$DECLARED 条用例全数对账（$PASS_COUNT 项真实执行通过、$SKIP_COUNT 项换算 BLOCKED），Node 内置 WebSocket + Firefox BiDi，退出码 $browser_rc"
   fi
 fi
 
@@ -414,5 +441,15 @@ notrun "人工可读性：本轮未执行（4A 没有新的人工参与数据；
 notrun "widget 完整无障碍合规（音频/非视觉等价通道）：本阶段只交付视觉通道，缺口记录在 docs/WIDGET.md"
 
 log "工程项 $N_PASS 项 PASS；BLOCKED $N_BLOCKED；NOT_RUN $N_NOTRUN"
+# 浏览器必需验收是阶段 4A 的**必需**项，不是加分项：跑不起来时上面已经如实记了 BLOCKED，
+# 但整轮不能退 0——否则"没有 Firefox 的机器"会把没做浏览器验收的轮次报成通过。
+# 结论口径也必须跟着实际执行走：原先这里无条件打印"真实浏览器交互 = PASS"，
+# 于是同一次运行先说 PASS 又退 1，正是"PASS：某项未测"的混合表达。
+if [[ $BROWSER_RAN -ne 1 ]]; then
+  log "结论口径：本轮**未**取得浏览器交互证据 ⇒ 阶段 4A 浏览器必需验收为 BLOCKED，不声称组件闭环已在浏览器中通过。"
+  log "本脚本**不**声称抗 AI/抗 OCR，也**不**等于阶段 4 完成。"
+  printf '[stage4a] 结果: 浏览器必需验收本轮**没有真实执行**（见上面的 BLOCKED）⇒ 退出码 1\n' >&2
+  exit 1
+fi
 log "结论口径：widget 与业务接入的工程闭环 + 真实浏览器交互 = PASS；OCR 效果 BLOCKED；人工可读性 NOT_RUN。"
 log "本脚本**不**声称抗 AI/抗 OCR，也**不**等于阶段 4 完成（正式 widget 的其余项在 4B）。"

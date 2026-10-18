@@ -217,3 +217,61 @@ func TestLimiterConcurrentAccess(t *testing.T) {
 		t.Fatalf("状态数 = %d，应为 1", l.Len())
 	}
 }
+
+// TestLimiterWindowIsNotPerSecond 是阶段 5B 抓到的真实缺陷的回归测试。
+//
+// 配置项叫 EPOCHA_RATE_IP_RPM / rate_site_rpm，`RetryAfter` 也按 windowSize(=1 分钟) 报剩余时间，
+// 但窗口分桶一度是 `now().Unix()`（**每秒**一个桶）。后果不是"计数误差"，而是限流比声称的松 60 倍：
+// 60 RPM 实际允许 60 次/秒 ≈ 3600 次/分钟。
+//
+// 旧的 TestLimiterBasicWindows 检测不到它：它把时钟一次推进整个 windowSize，
+// 那一秒当然也变了桶。这里必须推进"1 秒但不足一个窗口"，才分得开两种语义。
+func TestLimiterWindowIsNotPerSecond(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	l := newTestLimiter(t, 3, 100)
+	l.now = func() time.Time { return now }
+
+	for i := 1; i <= 3; i++ {
+		if !l.Allow("k") {
+			t.Fatalf("第 %d 次应放行", i)
+		}
+	}
+	if l.Allow("k") {
+		t.Fatal("前置不成立：第 4 次竟然被放行")
+	}
+	// 推进 1 秒：分钟窗口**没走完**，配额不得恢复。
+	now = now.Add(time.Second)
+	if l.Allow("k") {
+		t.Errorf("推进 1 秒后配额被重置——窗口其实是 1 秒，而配置与 RetryAfter 都按 1 分钟声称（rpm=%d 实际等于 %.0f 次/分钟）",
+			l.rpm, float64(l.rpm)*60)
+	}
+	// 走到窗口边界才允许恢复。
+	now = now.Add(windowSize)
+	if !l.Allow("k") {
+		t.Error("跨过一个完整窗口后应恢复放行")
+	}
+}
+
+// TestLimiterBucketBoundaryIsStable 钉住"同一个窗口内不论跨几秒都算同一窗口"：
+// 分桶必须按窗口对齐，不能按墙上时钟的秒数对齐（后者还会让窗口在 59 秒与 1 秒之间抖动）。
+func TestLimiterBucketBoundaryIsStable(t *testing.T) {
+	l := newTestLimiter(t, 2, 100)
+	// 从一个窗口的中后段开始，跨过秒边界但仍处于同一分钟窗口。
+	start := time.Unix(1_700_000_059, 0)
+	now := start
+	l.now = func() time.Time { return now }
+	if !l.Allow("k") || !l.Allow("k") {
+		t.Fatal("前两次应在配额内")
+	}
+	if l.Allow("k") {
+		t.Error("第 3 次应被限流")
+	}
+	now = start.Add(30 * time.Second) // 仍在同一窗口内（该窗口从 :00 起算）
+	if l.Allow("k") {
+		t.Error("同一窗口内的 30 秒之后配额不应恢复")
+	}
+	now = start.Add(windowSize) // 整窗口滚动
+	if !l.Allow("k") {
+		t.Error("整窗口滚动后应恢复")
+	}
+}

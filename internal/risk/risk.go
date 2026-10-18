@@ -88,7 +88,7 @@ func (l *Limiter) RetryAfter(key string) time.Duration {
 		return 0
 	}
 	// 用注入的时钟而非 time.Since：限流的窗口判定必须与 Allow 同一时间源。
-	elapsed := l.now().Sub(time.Unix(c.bucket, 0))
+	elapsed := l.now().Sub(bucketStart(c.bucket))
 	if elapsed >= windowSize {
 		return 0
 	}
@@ -108,7 +108,21 @@ func (l *Limiter) Evictions() int {
 	return l.evictions
 }
 
-func (l *Limiter) bucket() int64 { return l.now().Unix() }
+// bucket 返回**按窗口对齐**的窗口序号，不是墙上时钟的秒数。
+//
+// 这是一次真实缺陷的修复：这里曾经是 `now().Unix()`，而 windowSize 是一分钟——
+// 于是计数器每秒就换窗口，"60 RPM"实际允许 60 次/秒（≈3600 次/分钟），
+// 而配置名、RetryAfter 与 DESIGN §9 说的都是一分钟窗口。限流这类控件最怕的就是
+// "代码里的语义比文档松一个数量级"，而且它只会体现在真实负载下，单测推进整个窗口时看不出来。
+func (l *Limiter) bucket() int64 {
+	return l.now().Unix() / int64(windowSize/time.Second)
+}
+
+// bucketStart 把一个窗口序号换回它的起始时刻（RetryAfter 需要的是"这个窗口什么时候开始"）。
+// 少了这一步、直接把序号当 Unix 秒用，窗口就会变成 1970 年附近的一个时间点。
+func bucketStart(bucket int64) time.Time {
+	return time.Unix(bucket*int64(windowSize/time.Second), 0)
+}
 
 // ensureRoom 在插入新 key 前腾出空间：先清掉过期窗口，仍满则淘汰最旧窗口。
 // 被淘汰的 key 只是重新计数，不会造成"攻击者占满状态就永久封禁合法用户"的反向效果。

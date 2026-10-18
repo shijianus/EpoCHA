@@ -3,6 +3,8 @@ bin/
 /devclient
 /server
 /epocha
+/loadtest
+/epocha-ops
 *.test
 *.db
 *.db-wal

@@ -15,13 +15,18 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -630,47 +635,196 @@ func TestVerifyDetectsTamperedBackup(t *testing.T) {
 // 前者防止两份真相（服务正在写账本的同时另一个进程改 admin_keys），
 // 后者防止新凭据进 shell 历史、CI 日志或容器 stdout。
 
-func deadLoopbackURL(t *testing.T) string {
-	t.Helper()
-	srv := httptest.NewServer(http.NotFoundHandler())
-	u := srv.URL
-	srv.Close()
-	return u
-}
-
-func TestAdminRecoverRefusesWhileServiceAnswers(t *testing.T) {
+// TestAdminRecoverRefusesWhileLockHeldByAnotherProcess 是本轮的核心断言：
+// 判据是数据目录上的排他锁，不是端口。测试里同时开一个"看起来像管理面"的 HTTP 服务
+// 在**别的端口**上答话，用来证明配错端口、管理面没起、地址换了这些情形
+// 都不会让离线恢复挤进去（阶段 5A 的探活实现恰恰会在这些情形下放行）。
+func TestAdminRecoverRefusesWhileLockHeldByAnotherProcess(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "epocha.db")
 	oldKey := "ak_" + strings.Repeat("a", 64)
 	seedDB(t, dbPath, oldKey)
 	sum := fileSum(t, dbPath)
 
-	var alive int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		atomic.AddInt32(&alive, 1)
+	// 真实进程持锁；cleanup 会定向 kill 这个 pid。
+	startChild(t, roleHolder, map[string]string{roleDB: dbPath})
+	decoy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
-	defer srv.Close()
+	defer decoy.Close()
 
 	env := map[string]string{"EPOCHA_PEPPER": testPepperB64}
 	keyFile := filepath.Join(dir, "new-admin")
 	var out, errb bytes.Buffer
-	rc := run(context.Background(), []string{"admin-recover", "--db", dbPath, "--key-file", keyFile,
-		"--admin-base-url", srv.URL}, getenvOf(env), &out, &errb)
+	rc := run(context.Background(), []string{"admin-recover", "--db", dbPath, "--key-file", keyFile},
+		getenvOf(env), &out, &errb)
 	if rc != 1 {
-		t.Fatalf("服务仍在应答时 admin-recover 退出码 = %d，期望 1: %s", rc, errb.String())
+		t.Fatalf("有真实进程持锁时 admin-recover 退出码 = %d，期望 1: %s", rc, errb.String())
 	}
-	if atomic.LoadInt32(&alive) == 0 {
-		t.Error("没有做探活检查就拒绝了")
+	if !strings.Contains(errb.String(), "停服") || !strings.Contains(errb.String(), "已被另一个进程占用") {
+		t.Errorf("拒绝文案没有说明是运行锁冲突: %s", errb.String())
 	}
 	if got := fileSum(t, dbPath); got != sum {
-		t.Error("被拒绝的恢复仍然改了库")
+		t.Error("被拒绝的 admin-recover 仍然改了库")
 	}
 	if _, err := os.Stat(keyFile); !os.IsNotExist(err) {
-		t.Error("被拒绝的恢复留下了凭据文件")
+		t.Error("被拒绝的 admin-recover 留下了凭据文件")
 	}
-	if !strings.Contains(errb.String(), "停服") {
-		t.Errorf("拒绝文案没有说明前置条件: %s", errb.String())
+	// 服务侧（持锁方）不该因为这次尝试被改动：旧凭据仍然有效。
+	d, err := store.Open(context.Background(), dbPath, testPepper)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := d.MatchAdminKey(context.Background(), oldKey, time.Now()); err != nil {
+		t.Errorf("被拒绝的恢复把存量管理凭据也弄坏了: %v", err)
+	}
+	_ = d.Close()
+}
+
+// TestAdminRecoverSucceedsAfterHolderExit 证明锁的失效方向是对的：
+// 持锁进程退出（正常或被 SIGKILL）后不需要任何"清理陈旧锁"动作。
+func TestAdminRecoverSucceedsAfterHolderExit(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "epocha.db")
+	seedDB(t, dbPath, "ak_"+strings.Repeat("k", 64))
+	env := map[string]string{"EPOCHA_PEPPER": testPepperB64}
+
+	holder := startChild(t, roleHolder, map[string]string{roleDB: dbPath})
+	rc := run(context.Background(), []string{"admin-recover", "--db", dbPath,
+		"--key-file", filepath.Join(dir, "k1")}, getenvOf(env), &bytes.Buffer{}, &bytes.Buffer{})
+	if rc != 1 {
+		t.Fatalf("持锁期间退出码 = %d，期望 1", rc)
+	}
+	stopChild(t, holder)
+
+	for attempt := range 3 {
+		rc = run(context.Background(), []string{"admin-recover", "--db", dbPath,
+			"--key-file", filepath.Join(dir, fmt.Sprintf("k%d", attempt+2))},
+			getenvOf(env), &bytes.Buffer{}, &bytes.Buffer{})
+		if rc == 0 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond) // 收割是异步的：给内核一点时间
+	}
+	t.Fatal("持锁进程退出后仍取不到锁")
+}
+
+// TestBackupDoesNotNeedTheLock 是反向断言：在线一致性备份**不**要求停服。
+// 如果哪天有人"顺手"给 backup 也加上锁，这条会红——那会把备份变成没人愿意按频率做的事。
+func TestBackupDoesNotNeedTheLock(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "epocha.db")
+	seedDB(t, dbPath, "ak_"+strings.Repeat("m", 64))
+	dest := filepath.Join(dir, "backups")
+	if err := os.MkdirAll(dest, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// 服务在跑（另一个进程持有数据目录锁）的情况下，在线备份必须照常成功。
+	startChild(t, roleHolder, map[string]string{roleDB: dbPath})
+
+	env := map[string]string{"EPOCHA_PEPPER": testPepperB64}
+	var out, errb bytes.Buffer
+	rc := run(context.Background(), []string{"backup", "--db", dbPath, "--dest", dest},
+		getenvOf(env), &out, &errb)
+	if rc != 0 {
+		t.Fatalf("服务在跑时在线备份应成功（rc=%d）: %s", rc, errb.String())
+	}
+	if !strings.Contains(out.String(), "备份完成") {
+		t.Errorf("备份输出不如预期: %s", out.String())
+	}
+}
+
+// TestRestoreRefusesWhenOutDirIsInUse 覆盖"隔离恢复被写成就地恢复"这个手滑：
+// out-dir 正被某个服务用作数据目录 ⇒ 拒绝，且不产生任何文件。
+func TestRestoreRefusesWhenOutDirIsInUse(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "epocha.db")
+	adminKey := "ak_" + strings.Repeat("n", 64)
+	seedDB(t, dbPath, adminKey)
+	bkDir := filepath.Join(dir, "backups")
+	if err := os.MkdirAll(bkDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"EPOCHA_PEPPER": testPepperB64, "EPOCHA_ADMIN_KEY": adminKey}
+	g := getenvOf(env)
+	var out, errb bytes.Buffer
+	if rc := run(context.Background(), []string{"backup", "--db", dbPath, "--dest", bkDir}, g, &out, &errb); rc != 0 {
+		t.Fatalf("backup: %d %s", rc, errb.String())
+	}
+	name := backupNameFromOutput(t, out.String())
+
+	// 让"数据目录正在被用"这件事由真实进程持锁来表达。
+	holder := startChild(t, roleHolder, map[string]string{roleDB: dbPath})
+	args := []string{"restore", "--backup", filepath.Join(bkDir, name+".db"),
+		"--manifest", filepath.Join(bkDir, name+".manifest.json"), "--out-dir", dir}
+	out.Reset()
+	errb.Reset()
+	if rc := run(context.Background(), args, g, &out, &errb); rc != 1 {
+		t.Fatalf("out-dir 正在被服务使用时 restore 退出码 = %d，期望 1: %s", rc, errb.String())
+	}
+	if !strings.Contains(errb.String(), "恢复输出目录正被某个服务用作数据目录") {
+		t.Errorf("拒绝文案没有点出就地恢复的风险: %s", errb.String())
+	}
+	// 除了 seedDB 自己的 epocha.db，恢复不得在该目录留下产物。
+	if _, err := os.Stat(filepath.Join(dir, "epocha.db")); err != nil {
+		t.Fatalf("工作库不见了: %v", err)
+	}
+	stopChild(t, holder)
+
+	// 同一份备份、换个隔离目录就应当成功——证明刚才拦住它的是"目录正在被用"这把锁，
+	// 不是备份文件本身、也不是 out-dir 的权限。
+	iso := filepath.Join(dir, "isolated")
+	if err := os.MkdirAll(iso, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errb.Reset()
+	args2 := []string{"restore", "--backup", filepath.Join(bkDir, name+".db"),
+		"--manifest", filepath.Join(bkDir, name+".manifest.json"), "--out-dir", iso}
+	if rc := run(context.Background(), args2, g, &out, &errb); rc != 0 {
+		t.Fatalf("释放锁后恢复到隔离目录应成功（rc=%d）: %s", rc, errb.String())
+	}
+	if _, err := os.Stat(filepath.Join(iso, "epocha.db")); err != nil {
+		t.Errorf("隔离恢复没有产出文件: %v", err)
+	}
+}
+
+// TestTwoAdminRecoverProcessesRace 是两个真实进程抢同一数据集：
+// 恰好一个成功；失败方不得留下凭据文件，也不得改库。
+func TestTwoAdminRecoverProcessesRace(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "epocha.db")
+	seedDB(t, dbPath, "ak_"+strings.Repeat("p", 64))
+	sum := fileSum(t, dbPath)
+
+	// 同一个进程内先拿到锁的那一方会赢；这里用两个**子进程**保证是真的跨进程竞态。
+	a := startChild(t, roleRecover, map[string]string{
+		roleDB: dbPath, "EPOCHA_PEPPER": testPepperB64, "EPOCHA_KEYFILE": filepath.Join(dir, "ra"),
+	})
+	b := startChild(t, roleRecover, map[string]string{
+		roleDB: dbPath, "EPOCHA_PEPPER": testPepperB64, "EPOCHA_KEYFILE": filepath.Join(dir, "rb"),
+	})
+	rcA, okA := waitChild(a, 20*time.Second)
+	rcB, okB := waitChild(b, 20*time.Second)
+	if !okA || !okB {
+		t.Fatalf("恢复子进程没收尾（A=%v B=%v）", okA, okB)
+	}
+	if rcA == 0 && rcB == 0 {
+		t.Fatal("两个 admin-recover 都成功了——管理凭据被写了两遍")
+	}
+	if rcA != 0 && rcB != 0 {
+		t.Fatalf("两个 admin-recover 都失败了（A=%d B=%d）", rcA, rcB)
+	}
+	if got := fileSum(t, dbPath); got == sum {
+		t.Error("赢家没有改库（说明两条路径都没真的执行）")
+	}
+	// 输家不得留下凭据文件。
+	loser := "ra"
+	if rcA == 0 {
+		loser = "rb"
+	}
+	if _, err := os.Stat(filepath.Join(dir, loser)); !os.IsNotExist(err) {
+		t.Errorf("输家留下了凭据文件 %s", loser)
 	}
 }
 
@@ -683,8 +837,7 @@ func TestAdminRecoverWritesKeyFileAndTakesEffect(t *testing.T) {
 	env := map[string]string{"EPOCHA_PEPPER": testPepperB64}
 	keyFile := filepath.Join(dir, "new-admin")
 	var out, errb bytes.Buffer
-	rc := run(context.Background(), []string{"admin-recover", "--db", dbPath, "--key-file", keyFile,
-		"--admin-base-url", deadLoopbackURL(t)}, getenvOf(env), &out, &errb)
+	rc := run(context.Background(), []string{"admin-recover", "--db", dbPath, "--key-file", keyFile}, getenvOf(env), &out, &errb)
 	if rc != 0 {
 		t.Fatalf("admin-recover 退出码 = %d: %s", rc, errb.String())
 	}
@@ -736,11 +889,12 @@ func TestAdminRecoverGuardsItsOwnInputs(t *testing.T) {
 	if rc := run(context.Background(), []string{"admin-recover", "--db", dbPath}, getenvOf(env), &out, &errb); rc != 2 {
 		t.Errorf("缺 --key-file 退出码 = %d，期望 2", rc)
 	}
-	// 非 loopback 的探测目标：拒绝，而不是把运维命令变成一次对外请求。
+	// 端口探测这个入口已经不存在了：判据是锁。留下这条断言是为了防止有人"顺手"把它加回来——
+	// 一个可以指向任意地址的 flag 会让互斥重新变成一次可选的对外请求。
 	if rc := run(context.Background(), []string{"admin-recover", "--db", dbPath,
-		"--key-file", filepath.Join(dir, "k"), "--admin-base-url", "http://10.0.0.9:8081"},
+		"--key-file", filepath.Join(dir, "k"), "--admin-base-url", "http://127.0.0.1:8081"},
 		getenvOf(env), &out, &errb); rc != 2 {
-		t.Errorf("非 loopback 探测目标退出码 = %d，期望 2", rc)
+		t.Errorf("--admin-base-url 已废除，仍被接受（退出码 %d，期望 2 用法错误）", rc)
 	}
 	// 凭据文件已存在 ⇒ 拒绝覆盖（覆盖一个可能正在被使用的凭据不可逆）。
 	existing := filepath.Join(dir, "exists")
@@ -748,7 +902,7 @@ func TestAdminRecoverGuardsItsOwnInputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	if rc := run(context.Background(), []string{"admin-recover", "--db", dbPath,
-		"--key-file", existing, "--admin-base-url", deadLoopbackURL(t)}, getenvOf(env), &out, &errb); rc != 1 {
+		"--key-file", existing}, getenvOf(env), &out, &errb); rc != 1 {
 		t.Errorf("已存在凭据文件的退出码 = %d，期望 1", rc)
 	}
 	if b, _ := os.ReadFile(existing); string(b) != "do-not-overwrite" {
@@ -761,11 +915,140 @@ func TestAdminRecoverGuardsItsOwnInputs(t *testing.T) {
 	out.Reset()
 	errb.Reset()
 	if rc := run(context.Background(), []string{"admin-recover", "--db", dbPath,
-		"--key-file", filepath.Join(dir, "k2"), "--admin-base-url", deadLoopbackURL(t)},
+		"--key-file", filepath.Join(dir, "k2")},
 		getenvOf(map[string]string{}), &out, &errb); rc != 1 {
 		t.Errorf("缺 pepper 退出码 = %d，期望 1", rc)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "k2")); !os.IsNotExist(err) {
 		t.Error("失败的恢复留下了凭据文件")
+	}
+}
+
+// --- 真实子进程工装（跨进程互斥的证据）---
+//
+// 与 cmd/server 的那一组同构：重新执行本测试二进制，用 EPOCHA_TEST_ROLE 分派角色。
+// 锁的意义在进程边界上，只在同一个进程里测它证明不了运维场景。
+
+const (
+	roleEnv     = "EPOCHA_TEST_ROLE"
+	roleDB      = "EPOCHA_TEST_DB"
+	roleKeyFile = "EPOCHA_KEYFILE"
+	roleHolder  = "holder"  // 只持有数据目录锁
+	roleRecover = "recover" // 真跑一次 admin-recover
+)
+
+func TestMain(m *testing.M) {
+	switch os.Getenv(roleEnv) {
+	case roleHolder:
+		l, err := store.AcquireDataLock(os.Getenv(roleDB))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "role-holder: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("locked")
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGTERM, os.Interrupt)
+		<-sig
+		_ = l.Close()
+		os.Exit(0)
+	case roleRecover:
+		env := func(k string) string {
+			if v, ok := os.LookupEnv(k); ok {
+				return v
+			}
+			return ""
+		}
+		rc := run(context.Background(),
+			[]string{"admin-recover", "--db", env(roleDB), "--key-file", env(roleKeyFile)},
+			env, os.Stdout, os.Stderr)
+		os.Exit(rc)
+	default:
+		os.Exit(m.Run())
+	}
+}
+
+type child struct {
+	cmd  *exec.Cmd
+	out  *os.File
+	rc   int
+	exit chan struct{}
+}
+
+func startChild(t *testing.T, role string, env map[string]string) *child {
+	t.Helper()
+	logPath := filepath.Join(t.TempDir(), role+".log")
+	f, err := os.Create(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe)
+	cmd.Env = os.Environ()
+	cmd.Env = append(cmd.Env, roleEnv+"="+role)
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	cmd.Stdout = f
+	cmd.Stderr = f
+	if err := cmd.Start(); err != nil {
+		_ = f.Close()
+		t.Fatalf("启动 %s 子进程: %v", role, err)
+	}
+	c := &child{cmd: cmd, out: f, rc: -999, exit: make(chan struct{})}
+	go func() {
+		err := cmd.Wait()
+		switch {
+		case err == nil:
+			c.rc = 0
+		default:
+			var ee *exec.ExitError
+			if errors.As(err, &ee) {
+				c.rc = ee.ExitCode()
+			} else {
+				c.rc = -2
+			}
+		}
+		close(c.exit)
+	}()
+	// 等 holder 真的把锁拿到，否则"竞争"测试可能测的是两个都没开始跑的进程。
+	if role == roleHolder {
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if b, err := os.ReadFile(logPath); err == nil && strings.Contains(string(b), "locked") {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	t.Cleanup(func() {
+		// 只 kill 本测试启动的这个 pid。
+		_ = c.cmd.Process.Kill()
+		select {
+		case <-c.exit:
+		case <-time.After(5 * time.Second):
+			t.Errorf("子进程 (pid %d) 没被收割", c.cmd.Process.Pid)
+		}
+		_ = c.out.Close()
+	})
+	return c
+}
+
+func waitChild(c *child, timeout time.Duration) (int, bool) {
+	select {
+	case <-c.exit:
+		return c.rc, true
+	case <-time.After(timeout):
+		return 0, false
+	}
+}
+
+func stopChild(t *testing.T, c *child) {
+	t.Helper()
+	_ = c.cmd.Process.Signal(syscall.SIGTERM)
+	if _, ok := waitChild(c, 10*time.Second); !ok {
+		t.Fatalf("持锁子进程在 SIGTERM 后 10s 内没退出")
 	}
 }

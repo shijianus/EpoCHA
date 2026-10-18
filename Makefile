@@ -41,6 +41,7 @@ help:
 	@echo "make build-ops    构建运维二进制到 bin/epocha-ops（备份/校验/恢复/探针/容器内管理）"
 	@echo "make docker-image 规范构建：在容器内编译（需 registry 访问 + ≥2GB 可用磁盘给 Go 模块与编译中间产物）"
 	@echo "make docker-image-local 同一份 Dockerfile 的运行时层，用宿主已编译的二进制填 toolchain 阶段"
+	@echo "make stage5b-check 运行互斥（flock）、就地恢复拒绝、候选清单与 5 分钟持续演练（docs/STAGE5B.md）"
 	@echo "make stage5a-check 部署包 + 备份恢复 + 容器语义 + 资源限额 的真实演练（会动 Docker，见 docs/STAGE5A.md）"
 	@echo "make loadtest ARGS=\"--base URL --site-key KEY --requests N\"  有界负载实测（需服务已在跑 + EPOCHA_SITE_SECRET）"
 
@@ -180,6 +181,13 @@ stage4a-check:
 # 回归与浏览器套件各只跑一遍，不把同一套 -race 再跑第二遍。
 stage4b-check:
 	@bash docs/scripts/stage4b.sh
+
+.PHONY: stage5b-check
+# 5B 的门禁：运行锁的真实进程测试、容器/宿主共享同一把锁、就地恢复拒绝、
+# 候选构建清单，以及约 5 分钟的节流持续演练。回归只跑一次 -race ./...，不重跑 5A 的整套演练。
+# 退出码同样是三态：0=全 PASS、1=有 FAIL、3=无失败但有 BLOCKED/NOT_RUN。
+stage5b-check:
+	@bash docs/scripts/stage5b.sh
 
 .PHONY: stage5a-check
 # 5A 的门禁**不**嵌套其它总门禁：脚本内部跑一次 stage3b-check 承担回归，其余逐项是

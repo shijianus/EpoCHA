@@ -91,6 +91,20 @@ func serve(ctx context.Context, cfg *config.Config, ln, adminLn net.Listener, st
 		defer func() { _ = adminLn.Close() }()
 	}
 
+	// 运行锁必须在 store.Open（含迁移）**之前**取得，并且只能在 db.Close **之后**释放。
+	// defer 是 LIFO，所以这一条必须注册在 db.Close 的 defer 之前——顺序写反了会出现
+	// "锁已释放、库还开着"的窗口，那正好是离线运维能挤进来的缝。
+	lock, err := store.AcquireDataLock(cfg.DBPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if lerr := lock.Close(); lerr != nil {
+			log.Error("释放运行锁", "err", lerr)
+		}
+	}()
+	log.Info("运行锁已持有", "path", lock.Path())
+
 	db, err := store.Open(ctx, cfg.DBPath, cfg.Pepper)
 	if err != nil {
 		return fmt.Errorf("打开数据库: %w", err)

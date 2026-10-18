@@ -8,9 +8,9 @@
 `/siteverify` 采用 reCAPTCHA **风格**的契约（`secret`/`response`/`remoteip` → `success`/`challenge_ts`/`hostname`/`error-codes`），
 **不声称无条件兼容所有现成 SDK**（v2/v3 的额外参数未实现）。
 
-## 当前实现进度（阶段 1、2、3A、3B、4A、4B、5A 已完成，2026-10-18）
+## 当前实现进度（阶段 1、2、3A、3B、4A、4B、5A、5B 已完成，2026-10-18）
 已实现：`config`、`store`（三条增量迁移 0001/0002/0003 + 原子条件消费 + 题池绑定）、`pow`、`token`
-（`chal`/`resp`/`qver` 三把域分隔密钥）、`risk`（有界令牌桶 + 代理信任裁决）、`api`（`/api/challenge`、`/api/redeem`、
+（`chal`/`resp`/`qver` 三把域分隔密钥）、`risk`（有界固定窗口计数器 + 代理信任裁决）、`api`（`/api/challenge`、`/api/redeem`、
 `/siteverify`、`/healthz`）、`admin`（站点与凭据生命周期、来源策略、模式/生成器配置、`/api/admin/generators` 与
 `/api/admin/pool` 只读观测，独立监听器）、`generator`（生成器契约 + `arithmetic-baseline-v1`）、
 `pool`（后台预生成 worker：水位迟滞、有界批次、CPU 让步、指数退避）、`cmd/server`（优雅关闭 + worker 生命周期）、
@@ -63,6 +63,14 @@ CSP 四档 blob/worker-file/no-worker/none；默认 loopback 强制）、
 (2) 旧快照**不**保持备份之后的消费/撤销/停用状态 ⇒ 恢复必须把快照里所有"还能被接受的东西"一次性失效
 （challenges 终态、responses/pool/site_secrets/admin_keys 清空、sites 全禁用、装入新的管理凭据），
 并用**新的** master 启动且**不设** `EPOCHA_MASTER_KEY_PREVIOUS`。容器化与恢复演练验收通过**不等于**题型抗 AI/抗 OCR 通过。
+**5B 新增**：`internal/store/lock.go`（数据目录的 `flock(LOCK_EX|LOCK_NB)` 排他锁：非阻塞、锁文件**永不删除**、
+不是 PID 文件）；服务在 `store.Open`（含迁移）**前**持有、`db.Close` **后**释放；`cmd/ops` 的 `admin-recover`（按 `--db`）
+与 `restore`（按 `--out-dir`）取同一把锁，`--admin-base-url` 探活 flag 已删除；`backup`/`verify` **明确不取锁**
+（在线一致性快照允许与服务并发）；`ErrLockHeld`（被占用 → 先停服）与 `ErrLockAccess`（uid/挂载不对 → 换身份）分族；
+`cmd/loadtest --pace` 节流；`cmd/server`/`cmd/ops` 的**真实子进程**互斥测试；`docs/STAGE5B.md`、`make stage5b-check`。
+**5B 的两条口径**：(1) `flock` 是建议锁，只约束按规矩办事的进程——同等文件权限下绕开本仓库代码直接开库的程序
+不受它阻止，不得把它写成防恶意本地进程的机制；(2) "备份可信"只包含 checksum 与 `integrity_check` 两件事，
+manifest **无签名** ⇒ 不得宣称抵御恶意替换（备份目录的可写者就是备份内容的作者），也不得宣称快照具有保密性。
 
 **尚未实现**：题型权重与多生成器选择、风险打分、自动淘汰、非视觉等价通道（音频等）、
 widget 的 `fallback_base` 与多站点配置面、阶段 4 的人工验收项（"题型人工各过 5 次"、辅助技术实测）、
@@ -72,9 +80,11 @@ widget 的 `fallback_base` 与多站点配置面、阶段 4 的人工验收项�
 且 `arithmetic-baseline-v1` 的答案**可由公开 payload 程序化推出**——不得在响应或文档里把它说成抗 AI/抗 OCR 题型，
 也不得用"随机实例多"论证安全性（DESIGN §8.4、ADR-011、红线 14）。
 阶段边界与验收：`make stage1-check` / `stage2-check` / `stage3a-check` / `stage3b-check` / `stage4a-check` / `stage4b-check` / `stage5a-check`；
-标签只打 `stage-3a-done`、`stage-3b-done`、`stage-4a-done`、`stage-4b-done`、`stage-5a-done`，**不打 `stage-3-done`、`stage-4-done`、`stage-5-done`**
+标签只打 `stage-3a-done`、`stage-3b-done`、`stage-4a-done`、`stage-4b-done`、`stage-5a-done`、`stage-5b-done`，**不打 `stage-3-done`、`stage-4-done`、`stage-5-done`**
 （第三层风险打分不存在；阶段 4 的人工验收项与非视觉通道仍未做；阶段 5 的后台页面/统计/淘汰不存在）。
 `make stage5a-check` 的退出码是**三态**：0=全 PASS、1=有 FAIL、3=无失败但有 BLOCKED/NOT_RUN（部署与恢复演练没跑完就不是验收通过，"文件都写好了"不算）。
+`make stage5b-check` 用同一套三态退出码。5B 的完成标签还额外要求：**跨进程与跨容器的互斥演练、恢复失败边界、
+持续演练**都实际跑过；A 路径（容器内编译）保留 NOT_RUN 不算失败，但也不能被写成通过。
 
 ## 硬性技术约束
 - **只用 Go，纯 Go 依赖，禁止 cgo**。禁止引入 JVM、MongoDB、Postgres、Redis、外部二进制（ImageMagick/fontconfig/headless chrome）。
@@ -132,6 +142,10 @@ widget 的 `fallback_base` 与多站点配置面、阶段 4 的人工验收项�
     管理面必须保持 `experimental:true` + `production_ready:false`，评测通过也**不等于**生产安全认证。
     **不得**用"用了 CSPRNG / 字体随机 / 噪声 / HMAC / 多步骤"或"题面组合数很大"直接证明抗 AI；3 次尝试下 M3 累计 >10% 的题型不得启用。
 15. 不得仅凭通过率判定题型被机器破解并自动下线；淘汰必须分级（候选告警 + 人工确认，多信号同时成立才自动降权，ADR-006）。
+16. **离线写这条数据目录的操作必须取 `internal/store/lock.go` 的排他锁**（`admin-recover` 按 `--db`、恢复到数据目录的 `restore` 按 `--out-dir`），
+    服务自身在迁移前持有、关库后释放。HTTP 探活、端口可达性、PID 文件都**不是**可接受的替代判据（ADR-015）。
+    反过来：**不要给 `backup`/`verify` 加锁**——在线一致性快照的正确语义是允许与服务并发，强制停服会让按频率备份变得不可持续。
+    锁文件永不删除；冲突一律非阻塞拒绝，并区分"被占用 → 先停服"与"锁文件不可写 → 换到与数据目录属主同 uid"。
 
 ## 目录约定
 `cmd/{server,devclient,devseed,preview,evalgen,evalocr,exampleapp,blindtest,ops,loadtest}`、
@@ -207,6 +221,9 @@ stage1/2/3a/3b 各跑一次并逐条记录退出码）/ `make browser-check`（�
 - 不要跳过 hook、不要 `--no-verify`、不要 force push。
 - 不要在未运行 `go test -race -count=1 ./...` 的情况下声称测试通过；UI/widget（阶段 4）无法浏览器实测时**必须明说"人工验证项未完成"**。
 - 不要把未实测的数字写成事实；遵守 `[目标]` / `[估算]` / `[实测]` 标注约定（ADR-006）。
+- 不要把"只有 checksum"说成"能证明备份来自我们"，也不要把 `flock` 说成"能挡住同等权限的本地恶意进程"；
+  机制提供了什么、没提供什么，按 `docs/BACKUP-RESTORE.md` §2 的四维表与 ADR-015 的边界陈述。
+- 不要把测试工装里的高限流/演示凭据/已知答案数据写进部署配置；测量实例的配置只在演练脚本里显式给出。
 - 不要用"PASS：某项未测"这类混合表达。工程项只有 **PASS/FAIL**；外部条件不足是 **BLOCKED**；本轮没做是 **NOT_RUN**。
   测"阻塞检测逻辑"通过 ≠ 效果评测通过，两者必须在报告与脚本里分列。
 - 不要假定包装层原样透传退出码：实测 `go run` 把任何非 0 折叠成 **1**（真实码只留在 stderr 的 `exit status N`），

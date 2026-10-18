@@ -109,7 +109,8 @@ func usage(w io.Writer) {
   check    [--base-url <URL>] [--path /readyz]  就绪/存活探针，非 200 即退出码 1（容器健康检查用）
   admin    <METHOD> <PATH> [--body-file F]  向管理监听器发一次带 Bearer 的请求（容器内 loopback）
   admin-recover --db <路径> --key-file <新凭据文件>
-                                  撤销库里全部有效管理凭据并登记一把新的（**必须先停服**；
+                                  撤销库里全部有效管理凭据并登记一把新的（**必须先停服**——
+                                  判据是数据目录上的排他锁，不是端口探测；
                                   这是"最后一把管理凭据被撤销"导致锁死的唯一受控出口）
   version
 
@@ -120,6 +121,10 @@ func usage(w io.Writer) {
 
 // --- backup ---
 
+// backup 生成在线一致性快照。它**不**取数据目录的运行锁，这是有意的：
+// VACUUM INTO 走的是只读连接（readOnlyDSN）+ SQLite 自己的快照语义，
+// 与服务并发是它设计上支持的形状；强制停服反而会把"备份"变成一件没人愿意天天做的事。
+// 需要停服的是**写入类**离线操作（restore 写进数据目录、admin-recover 改 admin_keys）。
 func backup(ctx context.Context, args []string, getenv func(string) string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -207,6 +212,18 @@ func restore(ctx context.Context, args []string, getenv func(string) string, std
 	if fs.NArg() != 0 {
 		return fmt.Errorf("%w: restore 不接受位置参数：%v", errUsage, fs.Args())
 	}
+	// 恢复写的是 --out-dir 里的新文件。对**那个目录**取同一把排他锁，覆盖的正是要防的情形：
+	// out-dir 恰好是某个服务正在使用的数据目录（"隔离恢复"被写成"就地恢复"是最常见的手滑）。
+	// 恢复进真正的隔离目录时这把锁不会与任何人冲突——它的成本是一次 flock，不是停机。
+	lock, err := store.AcquireDirLock(*outDir)
+	if err != nil {
+		if errors.Is(err, store.ErrLockHeld) {
+			return fmt.Errorf("恢复输出目录正被某个服务用作数据目录；换一个隔离目录，或先停服（%w）", err)
+		}
+		return err
+	}
+	defer func() { _ = lock.Close() }()
+
 	pepper, err := config.LoadPepper(getenv)
 	if err != nil {
 		return err
@@ -400,8 +417,7 @@ func adminRecover(ctx context.Context, args []string, getenv func(string) string
 	fs.SetOutput(io.Discard)
 	dbPath := fs.String("db", "", "SQLite 文件路径（默认取 "+envDB+"）")
 	keyFile := fs.String("key-file", "", "新管理凭据写入的文件（必须不存在；0600）")
-	adminBase := fs.String("admin-base-url", defaultAdminBase, "管理监听器地址（用于探活：它还能答话就说明服务在跑）")
-	if err := fs.Parse(hoistFlags(args)); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("%w: admin-recover: %s", errUsage, err)
 	}
 	if *dbPath == "" {
@@ -413,17 +429,18 @@ func adminRecover(ctx context.Context, args []string, getenv func(string) string
 	if fs.NArg() != 0 {
 		return fmt.Errorf("%w: admin-recover 不接受位置参数：%v", errUsage, fs.Args())
 	}
-	// 探活：任何 HTTP 响应（含 401）都说明服务正在用这个库。停服是前置条件，不是建议——
-	// 一边有服务在写账本、一边离线改管理凭据，就是两份真相。
-	// 与 admin 子命令同一条边界：只允许 loopback。这条探测的用途是"我本机那个服务还在不在"，
-	// 把它指向远端地址既没有意义，也会让一条运维命令变成一次对外请求。
-	u, err := url.Parse(*adminBase)
-	if err != nil || u.Host == "" || !isLoopbackHost(u.Hostname()) {
-		return fmt.Errorf("%w: admin-recover 的 --admin-base-url 必须是 loopback 地址（当前 %s）", errUsage, *adminBase)
+	// 停服是前置条件，而"停没停"的**权威判据是数据目录上的排他锁**，不是 HTTP 探活。
+	// 阶段 5A 这里探的是管理端口：地址配错、管理面没挂、服务换了监听形状，
+	// 任何一条都会让"检查通过"变成"根本没检查"，然后离线改库照样执行。
+	// 现在与服务争同一把锁：拿不到就拒绝，不等待，也不降级成"看起来没人在用"。
+	lock, err := store.AcquireDataLock(*dbPath)
+	if err != nil {
+		if errors.Is(err, store.ErrLockHeld) {
+			return fmt.Errorf("先停服再恢复管理访问（%w）", err)
+		}
+		return err
 	}
-	if alive, _ := probeStatus(*adminBase + "/api/admin/whoami"); alive {
-		return fmt.Errorf("管理监听器 %s 仍在应答：先停服（docker compose stop）再恢复管理访问", *adminBase)
-	}
+	defer func() { _ = lock.Close() }()
 	pepper, err := config.LoadPepper(getenv)
 	if err != nil {
 		return err
@@ -472,21 +489,6 @@ func adminRecover(ctx context.Context, args []string, getenv func(string) string
 	fmt.Fprintln(stdout, "下一步：把这个文件放到 EPOCHA_ADMIN_KEY_FILE 指向的路径（0600、属主=容器 uid），再启动服务。")
 	fmt.Fprintln(stdout, "注意：旧的凭据已全部撤销；恢复期间不要接收业务流量。")
 	return nil
-}
-
-// probeStatus 只回答"有没有 HTTP 响应"，不回显状态码之外的任何信息。
-// 401 也算"在应答"：它证明监听器活着，而这正是我们要拒绝的情况。
-func probeStatus(u string) (bool, int) {
-	client := &http.Client{Timeout: checkTimeout}
-	resp, err := client.Get(u)
-	if err != nil {
-		return false, 0
-	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		_ = resp.Body.Close()
-	}()
-	return true, resp.StatusCode
 }
 
 // readRequestBody 读请求体：--body-file 优先，否则 stdin；一律有上限（红线 6）。

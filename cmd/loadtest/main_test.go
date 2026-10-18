@@ -260,3 +260,57 @@ func stubServer(t *testing.T, hits *[4]int32, verifyFails *int32, bits uint8) *h
 	})
 	return httptest.NewServer(mux)
 }
+
+// 节流是给"持续演练"用的：没有它，150 次闭环会在 1 秒内打完，
+// 那样量到的峰值既不代表 1C1G 上的稳态，也观察不到内存/WAL/题池随时间的变化。
+func TestPaceThrottlesWorkers(t *testing.T) {
+	srv := stubVerifyServer(t, &[4]int32{}, pow.MinBits)
+	defer srv.Close()
+
+	o := &options{base: srv.URL, siteKey: "s", secret: "sk_" + strings.Repeat("e", 64),
+		concurrency: 1, requests: 4, timeout: 5 * time.Second, pace: 120 * time.Millisecond}
+	c := &client{base: o.base, http: &http.Client{Timeout: o.timeout}}
+	s := drive(context.Background(), c, o, time.Now)
+	if s.OK != 4 {
+		t.Fatalf("ok = %d，期望 4（错误：%s）", s.OK, s.errClasses())
+	}
+	// 4 次闭环、每次之后睡 120ms ⇒ 至少 3×120ms。
+	// 用"至少"而不是"约等于"：睡眠只会因调度变长，不会变短。
+	if s.wall < 3*120*time.Millisecond {
+		t.Errorf("wall = %s，比节拍下限 360ms 还短——节流没生效", s.wall)
+	}
+	if s.wall > 3*120*time.Millisecond+2*time.Second {
+		t.Errorf("wall = %s，远超预期，节流像是变成了等待", s.wall)
+	}
+
+	// pace=0 必须仍然是"尽可能快"（5A 的容量测量依赖这个行为）。
+	// 判据用**相对**值：同样形状的负载去掉节流后必须明显快于节流的下限（3×120ms）。
+	// 写绝对毫秒数是错的——8 次带 PoW 与 HTTP 往返的闭环在 -race 下本来就要一百多毫秒，
+	// 那不是"仍在睡"，是真实工作（本轮实测把这条误判成回归）。
+	o2 := &options{base: srv.URL, siteKey: "s", secret: o.secret, concurrency: 2, requests: 8, timeout: 5 * time.Second}
+	s2 := drive(context.Background(), c, o2, time.Now)
+	if s2.wall >= 3*120*time.Millisecond {
+		t.Errorf("pace=0 时 wall = %s，已达到节流 3×120ms 的下限，看起来仍在睡", s2.wall)
+	}
+}
+
+func TestPaceArgValidationAndReporting(t *testing.T) {
+	good := map[string]string{"EPOCHA_SITE_SECRET": "sk_" + strings.Repeat("f", 64)}
+	if _, err := parseArgs([]string{"--site-key", "s", "--pace", "-1s"}, getenvOf(good)); err == nil {
+		t.Error("负 pace 应被拒绝")
+	}
+	o, err := parseArgs([]string{"--site-key", "s", "--pace", "660ms", "--requests", "450"}, getenvOf(good))
+	if err != nil {
+		t.Fatalf("合法 pace 被拒: %v", err)
+	}
+	if o.pace != 660*time.Millisecond || o.requests != 450 {
+		t.Errorf("解析结果不如预期: pace=%v requests=%d", o.pace, o.requests)
+	}
+	var out strings.Builder
+	s := newSummary()
+	s.Flows, s.OK = 450, 450
+	s.print(&out, o)
+	if !strings.Contains(out.String(), "节流 pace=660ms") {
+		t.Errorf("输出没有如实记录节流与目标速率:\n%s", out.String())
+	}
+}

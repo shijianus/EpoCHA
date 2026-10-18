@@ -538,6 +538,9 @@ func (r *RestoreReport) String() string {
 //
 // 主密钥**不在库里**，因此这里不处理它：恢复后必须用**新的** EPOCHA_MASTER_KEY 启动，
 // 且**不设** EPOCHA_MASTER_KEY_PREVIOUS——那把旧签名回退正是"旧 token 重新可用"的唯一通道。
+//
+// 运行锁由**调用方**（`cmd/ops` 的 restore）对 OutDir 取一次，本函数不取：
+// `flock` 锁绑在 open file description 上，同进程内两次独立打开同一把锁会互相冲突。
 func Restore(ctx context.Context, o RestoreOptions) (*RestoreReport, error) {
 	if len(o.Pepper) < 32 {
 		return nil, fmt.Errorf("%w: pepper 长度不足 32 字节", ErrBadConfig)
@@ -704,7 +707,10 @@ func (d *DB) transform(ctx context.Context, adminKey string, now time.Time) erro
 //
 // 它刻意很窄：只动 `admin_keys` 与一条审计；不读任何旧凭据（旧凭据只有带 pepper 的摘要，
 // 本来也读不回明文）；不做通用管理面；不接 HTTP——没有"未鉴权的恢复接口"这条路。
-// 调用方必须在服务停用时执行：探活检查在 `cmd/ops` 那侧，因为"服务还在跑就改库"会造出两份真相。
+// 调用方必须在服务停用时执行：判据是 `cmd/ops` 那侧对 `--db` 所在数据目录取的运行锁
+// （不是端口探测，也不是在本函数里重复取锁——同一进程内两次独立 flock 会互相冲突，
+// 在库层再取一次会直接把成功的恢复变成 ErrLockHeld）。
+// "服务还在跑就改库"造出的是两份真相，不是一个可以事后调和的分歧。
 func (d *DB) RecoverAdminKey(ctx context.Context, key string, now time.Time) (*AdminKey, int, error) {
 	if len(key) < MinSecretLen {
 		return nil, 0, fmt.Errorf("%w: 管理凭据短于 %d 字符", ErrBadConfig, MinSecretLen)

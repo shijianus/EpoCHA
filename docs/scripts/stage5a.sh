@@ -781,10 +781,11 @@ if [[ $DOCKER_OK -eq 1 && -n "$CID" ]]; then
     CID=""
 
     # 唯一的受控出口：停服 + 本地 epocha-ops admin-recover（没有未鉴权的恢复 HTTP 接口）。
+    # 5B 起"停服"这件事由数据目录上的排他锁强制，不再靠端口探测（见 docs/STAGE5B.md）。
     RECOVERED="$D/keys/admin.recovered"
     rc=0
     EPOCHA_PEPPER_FILE="$D/keys/pepper" "$BIN/epocha-ops" admin-recover --db "$D/data/epocha.db" \
-      --key-file "$RECOVERED" --admin-base-url "http://127.0.0.1:8081" >"$LOGS/recover.txt" 2>&1 || rc=$?
+      --key-file "$RECOVERED" >"$LOGS/recover.txt" 2>&1 || rc=$?
     if [[ $rc -ne 0 || ! -s "$RECOVERED" ]]; then
       fail "admin-recover 失败（rc=$rc）：$(tail -c 200 "$LOGS/recover.txt")"
     elif [[ "$(stat -c '%a' "$RECOVERED")" != "600" ]]; then
@@ -909,10 +910,13 @@ if [[ $DOCKER_OK -eq 1 && -n "$CID" ]]; then
   EPOCHA_PEPPER_FILE="$D/keys-foreign-pepper.b64" EPOCHA_ADMIN_KEY="$ADMIN_NEW" \
     "$BIN/epocha-ops" restore --backup "$D/backups/$BK_NAME.db" --manifest "$D/backups/$BK_NAME.manifest.json" \
     --out-dir "$D/restore-foreign" >"$LOGS/foreign.txt" 2>&1 || rc=$?
-  if [[ $rc -ne 0 ]] && [[ -z "$(ls -A "$D/restore-foreign" 2>/dev/null)" ]]; then
+  # 半成品的判据是"看起来像一份库的东西"：.db / .partial / -wal / -shm。
+  # epocha.lock 不算产物——restore 对 --out-dir 取排他锁时会留下它，且失败时也不删（flock 的正常形状）。
+  foreign_left="$(find "$D/restore-foreign" -mindepth 1 ! -name 'epocha.lock' -print -quit 2>/dev/null || true)"
+  if [[ $rc -ne 0 ]] && [[ -z "$foreign_left" ]]; then
     pass "pepper 与备份不配对 ⇒ 拒绝恢复且不产生任何文件（不会静默给出“可服务”状态）"
   else
-    fail "pepper 不配对的恢复行为不对（rc=$rc，产物=$(ls -A "$D/restore-foreign" 2>/dev/null | tr '\n' ' ')）"
+    fail "pepper 不配对的恢复行为不对（rc=$rc，留下=${foreign_left:-无}）"
   fi
 
   # 用**新的主密钥**启动恢复实例：恢复前签发的 token 一律不可用，且不保留签名回退。

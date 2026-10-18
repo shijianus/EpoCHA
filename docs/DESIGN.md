@@ -685,8 +685,13 @@ worker         = 单个后台 goroutine，priority=让出 CPU（每补 10 题 sl
 决策：`score < risk_threshold` → 签发 response；中间带 → 提高难度重出题（`harder`）；更高 → `deny`。
 **题型淘汰分级（ADR-006）**：统计信号只产生"候选降权"告警 + 人工确认入口；自动降权要求"高通过率 **且** 极低时延 **且** 样本充足"同时成立；
 自动下线要求连续多窗口且不被更高优先级信号反驳。**禁止仅凭通过率判定题型被机器破解并自动下线。**
-限流：内存令牌桶按 `ip` 与**站点 id**（不是自报的 `site_key` 字符串，见 ADR-009）两维，状态条目有硬上限
+限流：内存**固定窗口计数器**（不是令牌桶——`internal/risk/risk.go` 自始如此，本文与 AGENTS 早期的"令牌桶"叫法已在
+ADR-016 一并更正）按 `ip` 与**站点 id**（不是自报的 `site_key` 字符串，见 ADR-009）两维，状态条目有硬上限
 （默认 8192，可配）+ 定期清理与超额淘汰，否则攻击者可用随机源地址撑爆 1GB 内存；超限 `429 + Retry-After`。
+**窗口必须与名字一致**（ADR-016）：`EPOCHA_RATE_IP_RPM` / `rate_site_rpm` 声明的是**每分钟**，
+因此分桶必须按 `windowSize`（1 分钟）对齐。阶段 5B 之前分桶用的是 `now().Unix()`（**每秒**一个窗口），
+后果是限流比声称的松 60 倍（60 RPM ⇒ 实际 60 次/秒）；单测当时只推进整个窗口，测不出来。
+现在的口径：`bucket = Unix() / 60`，`RetryAfter` 从该窗口的起始时刻算剩余时间，两条都有测试钉住。
 持久封禁（阶段 2+ 可选）写 `meta` 中的 ban 列表，避免重启清零。
 **阶段 1 的限流就是这个有界实现**，不含打分。
 
@@ -938,6 +943,13 @@ swap: 512M + vm.swappiness=10；GOMEMLIMIT=56MiB GOMAXPROCS=1
 恢复是**保守恢复**：产物是新文件、站点全部禁用、凭据全部撤销、response 与题池清空、装入新的管理凭据，
 用新的主密钥启动且不设 previous。详见 `docs/BACKUP-RESTORE.md`。恢复演练写入 `deploy/docker/README.md` 与 `docs/DEPLOYMENT.md`。
 
+**运行互斥（阶段 5B，ADR-015）**："这个数据目录现在能不能被写"的判据是数据目录上的 `flock` 排他锁
+（`internal/store/lock.go`），**不是**管理端口的可达性。服务在 `store.Open`（含迁移）之前取得、在 `db.Close`
+之后释放；`admin-recover` 与 `restore` 取同一把锁（分别按 `--db` 与 `--out-dir`），拿不到就非阻塞拒绝。
+`backup`/`verify` **不**取锁——在线一致性快照的正确语义允许与服务并发，强制停服只会让按频率备份变成
+没人愿意做的事。锁文件从不删除（删了会把两个进程分到两个 inode，`flock` 就此静默失效），也不是 PID 文件。
+它是建议锁：同等文件权限下绕开本仓库代码直接开库的程序不受它阻止，这一点写进文档而不是脚注。
+
 **5A 的容器形状（与上面的 systemd 形状等价，不是另一套语义）**：`deploy/docker/` 的两阶段镜像
 （`golang:1.24-alpine` 编译 → `FROM scratch` 运行时，`CGO_ENABLED=0`、`GOTOOLCHAIN=local`、数字 uid 非 root、
 `read_only` 根、`cap_drop ALL`、`no-new-privileges`、`pids`/`memory`/`memswap`/`cpus` 硬限额、
@@ -983,12 +995,14 @@ compose **只**发布 `127.0.0.1:8080`，管理口 8081 不发布——容器内
 | 图片池磁盘 | `[目标]` 全局图片字节预算 4MiB | `[实测]` 新库 + ≥20 条 ready 图片题 + 40 条算术题 + 20 次闭环 ⇒ `wal_checkpoint(TRUNCATE)` 后 **278,528B**（写入中主文件仅 4,096B + WAL 2,855,192B——**只 stat 主文件会得到假数**）。每行图片的净磁盘开销本轮**未单独隔离测量** | `ImageAssetBytes` + `TestPurgeReleasesImageBytes` |
 | 服务进程驻留（含图片） | `[目标]` <100MB | `[实测]` **VmRSS 18,776 kB / VmHWM 18,904 kB / Threads 10**（`cmd/server` 二进制，形状 = 视觉桶 ≥20 条 + 20 次混合闭环 0 失败；2026-10-18）。仍是功能闭环形状采样，**不是**稳态，未压过预算满载 | `stage3b.sh` 第十三步 |
 | 池预生成 CPU | `[目标]` 平均 ≤15%（补 10 题睡 100ms） | 待填（未做持续负载测量；0.35ms/题的纯成本意味着按默认 `BatchPerTick=20`/`PollInterval=2s` 稳态补题时 CPU 占用远低于该目标，但这是算术推论不是实测） | metric `pool_gen_ms` 直方图（阶段 5） |
-| `/siteverify` p99 | `[目标]` <60ms | 待填（**阶段 5A 给出的是 p50/p95/max，不是 p99**：容器内限额下 `[实测]` p50 2.544ms / p95 7.800ms / max 69.900ms，150 次闭环、0 失败，2026-10-18 linux/arm64 1 CPU/128MiB） | 基准测试 `TestBenchmarkSiteVerify` + `make loadtest` |
-| `/api/challenge` p99 | `[目标]` <120ms | 待填（同上：`[实测]` p50 2.342ms / p95 11.578ms / max 71.929ms） | 同上 |
-| 混合吞吐 | `[目标]` ≥150 req/s 且无 `SQLITE_BUSY` | `[实测]` **239.23 闭环/秒 ≈ 718 请求/秒**（一次 challenge+redeem+siteverify 记为 3 个请求；`cmd/loadtest` 并发 4 / 150 次闭环 / 全部成功 / 0 超时 / 0 `SQLITE_BUSY`；容器限成 1 CPU + 128MiB + `GOMEMLIMIT=56MiB`，负载期间 `docker stats` CPU 42.06%、内存 7.918MiB，`OOMKilled=false`、`RestartCount=0`；2026-10-18）。**形状限制**：单一 pow_only 站点、`bits=12`、单一来源地址，且**必须**把全局 `EPOCHA_RATE_IP_RPM` 从默认 60 抬到 60000 才测得到容量——默认配置下 80 次闭环里 62 次是 429（那是限流器形状，不是服务端容量） | `make loadtest` / `docs/scripts/stage5a.sh` 第 10 步 |
-| 容器内库与 WAL 体积 | — | `[实测]` 同一轮负载：主文件 147,456 → 442,368 字节，`-wal` 622,152 → 4,128,272 字节（2026-10-18）。再次印证"只 stat 主文件会得到假数" | `stage5a.sh` 记录两个数 |
-| 图片补池（限额内） | `[目标]` 平均 CPU ≤15% | `[实测]` 有一个启用的 `pow_question` 视觉题站点时，1 CPU/128MiB 限额内补到 ready=17 行、图片字节 109,852；负载后 24 行 / 154,560 字节（2026-10-18）。**注意分桶来源**：`store.QuestionBuckets` 只取"启用的 pow_question 站点"，所以全部站点为 `pow_only` 时池恒为空——那不是故障，是语义 | `stage5a.sh` 第 10 步 |
+| `/siteverify` p99 | `[目标]` <60ms | 待填（**阶段 5A 给出的是 p50/p95/max，不是 p99**：容器内限额下 `[实测]` p50 2.044ms / p95 6.430ms / max 54.217ms，150 次闭环、0 失败，2026-10-18 linux/arm64 1 CPU/128MiB） | 基准测试 `TestBenchmarkSiteVerify` + `make loadtest` |
+| `/api/challenge` p99 | `[目标]` <120ms | 待填（同上：`[实测]` p50 2.162ms / p95 7.676ms / max 36.414ms） | 同上 |
+| 混合吞吐 | `[目标]` ≥150 req/s 且无 `SQLITE_BUSY` | `[实测]` **262.18 闭环/秒 ≈ 787 请求/秒**（一次 challenge+redeem+siteverify 记为 3 个请求；`cmd/loadtest` 并发 4 / 150 次闭环 / 全部成功 / 0 超时 / 0 `SQLITE_BUSY`；容器限成 1 CPU + 128MiB + `GOMEMLIMIT=56MiB`，负载期间 `docker stats` CPU 40.00%、内存 7.754MiB，`OOMKilled=false`、`RestartCount=0`；2026-10-18）。**形状限制**：单一 pow_only 站点、`bits=12`、单一来源地址，且**必须**把全局 `EPOCHA_RATE_IP_RPM` 从默认 60 抬到 60000 才测得到容量——默认配置下 80 次闭环里 61 次是 429（那是限流器形状，不是服务端容量） | `make loadtest` / `docs/scripts/stage5a.sh` 第 10 步 |
+| 容器内库与 WAL 体积 | — | `[实测]` 同一轮负载：主文件 147,456 → 438,272 字节，`-wal` 622,152 → 4,128,272 字节（2026-10-18）。再次印证"只 stat 主文件会得到假数" | `stage5a.sh` 记录两个数 |
+| 图片补池（限额内） | `[目标]` 平均 CPU ≤15% | `[实测]` 有一个启用的 `pow_question` 视觉题站点时，1 CPU/128MiB 限额内补到 ready=20 行、图片字节 126,778；负载后 24 行 / 152,143 字节（2026-10-18）。**注意分桶来源**：`store.QuestionBuckets` 只取"启用的 pow_question 站点"，所以全部站点为 `pow_only` 时池恒为空——那不是故障，是语义 | `stage5a.sh` 第 10 步 |
 | 服务内存（容器视角） | `[目标]` <100MB | `[实测]` 128MiB 硬限额下 `docker stats` 内存 7.918MiB（负载期间），无 OOMKill（2026-10-18）。这是**容器 cgroup 记账**，与 §13 上两行的 `/proc` VmRSS 口径不同，不可互相冒充 | `stage5a.sh` + `--memory` 硬限额 |
+| 持续 5 分钟的稳态形状（5B） | 无历史目标值 | `[实测]` 1 CPU / 128MiB / `GOMEMLIMIT=56MiB`，**节流** 1.5 闭环/秒 × 450 次（并发 1，`--pace 660ms`）：450/450 成功、0 失败、0 超时；容器内存在 218s/249s/280s 采样为 8.117/8.297/8.625 MiB，CPU 0.39–0.57%，`OOMKilled=false`、`RestartCount=0`；题池 ready 0→24（图片字节 150,899）；库 139,264→450,560B、WAL 稳定在 4,128,272B；过期清理**实际触发**（一次 `清理 responses=89 challenges=90`）（2026-10-18）。**读法限制**：流量是 pow_only（图片题只观察到后台补池，没有解题器 ⇒ 不称"图片题吞吐"）；5 分钟不等于长期稳定性；PoW 由工具代算不代表真人解题耗时 | `docs/scripts/stage5b.sh` 第 4 步 |
+| 运行互斥（写这条数据目录的权限） | 非性能项 | `[实测]` 容器与宿主 bind 同一数据目录时共享同一把 `flock`：服务在跑时宿主 `admin-recover` 被拒且库逐字节未变；第二个服务容器立即拒绝启动；停服后锁立即可取（锁文件未删）（2026-10-18） | `internal/store/lock.go` + `cmd/server`/`cmd/ops` 真实子进程测试 + `stage5b.sh` 第 2 步 |
 | PoW 求解时延 | 未设线（先测再说） | `[实测]` 纯 JS SHA-256 在 worker 里 **422,833 次/秒**（Firefox 147 headless、linux/arm64、2026-10-18）：bits=12 求解 **4–6ms**、提交→verified 墙钟 **103–173ms**（三次采样）；bits=20 提交→verified 五次采样 **309 / 1,551 / 1,862 / 4,064 / 8,991 ms** —— 解的位置是几何分布 + 同机负载差异 ⇒ **bits=20 已经是"秒级到十秒级"**，别把单次采样当常量，也别据此继续往上抬难度 | 难度不能为了"看着快"往下降；`cmd/exampleapp` 的 8394 端口专测生产难度 |
 
 **未测项与原因（3A 明确列出，不编造数值）**：
@@ -1016,7 +1030,8 @@ claim 在双句柄并发下的**吞吐**上限（3A 测的是**正确性**——
    标识符产生假阳性，禁止这样实现。
 8. 来源地址：默认只信真实连接地址；`X-Forwarded-For` / `CF-Connecting-IP` / `remoteip` 只有在 trust-proxy 显式开启
    且连接来自受信网段时才采信（阶段 1 已实现并有测试）。
-9. 限流状态必须有硬上限与清理策略，避免攻击者用随机源地址撑爆内存（阶段 1 实现为有界令牌桶）。
+9. 限流状态必须有硬上限与清理策略，避免攻击者用随机源地址撑爆内存（阶段 1 实现为有界固定窗口计数器）；
+   窗口长度必须与配置名的单位一致（`*_RPM` = 每分钟，ADR-016）——"代码里的窗口比名字松一个数量级"是安全缺陷，不是精度问题。
 10. admin（阶段 2）：admin_key 摘要存储、失败计数锁定（内存）、默认仅 localhost；审计表覆盖所有写操作。
 11. 依赖：见 §16；引入任何新依赖需记录理由并由我确认。`GOTOOLCHAIN=local`，禁止构建过程隐式升级 Go。
 12. 错误处理不吞异常；不 panic 出栈（中间件 recover + 通用文案）；安全关键状态**事务提交后才返回成功**（D12）。
@@ -1046,10 +1061,12 @@ internal/generator/  Generator 契约 + Registry + arithmetic-baseline-v1（3A�
     cmd/evalgen/       离线样本生成（dev / holdout 两集，输出 eval-out/ 不入库）
     cmd/evalocr/       外部 OCR 适配器（exec argv、逐张计时、缺工具时退出码 3 = 未测）
     cmd/devseed/       受控题目注入（端到端验收用；需要主密钥，只操作本地库，不提供答案查询）
-internal/risk/       有界令牌桶与来源地址裁决（阶段 1）；打分（阶段 3+）
+internal/risk/       有界固定窗口计数器（按分钟对齐，ADR-016）与来源地址裁决（阶段 1）；打分（阶段 3+）
 internal/admin/      管理 API：鉴权/审计/站点与凭据生命周期（阶段 2，admin.go + handlers.go）；
                      模式与生成器配置校验、`/api/admin/generators` 与 `/api/admin/pool` 只读观测（阶段 3A）；页面属阶段 5
 internal/config/     配置装载（flag + env + 站点文件，无 YAML 依赖）；3A 起含 6 个题池水位/节奏项与组合校验
+    internal/store/lock.go 阶段 5B：数据目录的 flock 排他锁（服务在迁移前持有、关库后释放；
+                     admin-recover/restore 取同一把；backup 明确不取）。永不删除锁文件、不是 PID 文件
 internal/version/    构建信息（ldflags 注入）
 cmd/devclient/       开发/验收客户端：真实暴力求解 PoW（阶段 1）、站点策略闭环与**独立求值**基线题答案（阶段 3A），
                      驱动 stage1.sh / stage2.sh / stage3a.sh
@@ -1069,7 +1086,7 @@ cmd/ops/             阶段 5A：**运维入口**（backup / verify / restore / 
 deploy/cloudflare/   Worker + wrangler.toml（阶段 5 之后评估）
 internal/store/migrations/  NNNN_*.sql（阶段 1 起）——偏离"顶层 migrations/"是有意的：
                      go:embed 只能嵌入本包子树，放在仓库根就无法编进单二进制
-docs/                DESIGN.md、DECISIONS.md、STAGE3A.md、STAGE3B.md（3B 数据流/配置/预览/评测方法与未测项）、
+docs/                DESIGN.md、DECISIONS.md（含 ADR-015 运行互斥）、STAGE3A.md、STAGE3B.md（3B 数据流/配置/预览/评测方法与未测项）、
                      NOTICE.md（依赖与**字体**许可）、scripts/（stage1.sh…stage3b.sh）、reviews/
 ```
 调整需说明理由；测试与被测文件同包同目录（`*_test.go`），集成测试用 `t.TempDir()` 建独立 DB，禁止依赖外部环境。
@@ -1226,6 +1243,30 @@ CSP 禁 Worker 明确失败、键盘-only 完成一题、请求面与凭据面�
 移动端 375px 无横向溢出；中英切换；PoW 高难度无障碍通道可用；失败重试与 fallback endpoint 生效；
 并首次给出浏览器侧 PoW 时延的 `[实测]` 数据（设备、日期）。无法自动化的项必须标注"人工验证"，**不得声称自动化通过**。
 
+**阶段 5B — 运行互斥、恢复边界收敛与部署候选清单（本轮，2026-10-18）**
+范围边界：**不新增产品功能**（无后台页面、无风险打分、无自动淘汰、无新题型、无 CF 边缘、无多节点），
+只做"能不能安全地动这个数据目录"与"这一版到底测过哪条路径"两件事。
+验收（`make stage5b-check` → `docs/scripts/stage5b.sh`，退出码 0/1/3 三态）：
+- 锁的语义：非阻塞、崩溃后可重取、锁文件永不删除、`ErrLockHeld` 与 `ErrLockAccess` 分族；
+  服务侧"迁移前持有、关库后释放"。
+- 真实**子进程**测试（重新执行测试二进制按角色分派，按 pid 定向清理）：两个服务抢同一数据目录最多一个启动、
+  服务与离线操作竞争不交叉修改、正常停止后可重启、`SIGKILL` 后锁可重取、陈旧锁文件不阻塞启动、
+  两个 `admin-recover` 竞态恰好一个成功、拒绝路径不改凭据与业务数据也不留凭据文件。
+- 真实**容器**演练：容器与宿主 bind 同一数据目录时共享同一把锁（宿主进程在服务运行时改不了库）、
+  第二个服务容器立即拒绝启动、就地恢复（`--out-dir` 正在被用作数据目录）被拒而隔离恢复可成、
+  在线备份在持锁期间照常成功（这条是反向断言，防止"顺手加锁"）。
+- 恢复边界：凭据文件与库变更之间失败的明确出口写在 `BACKUP-RESTORE.md` §5；
+  checksum / 数据库一致性 / 来源真实性 / 保密性四分在文档里分别标注，
+  只有前两个存在 ⇒ 不得宣称抵御恶意替换。
+- 候选清单：分 A（容器内编译）与 B（宿主静态编译 + named build context 装配）两条路径记录，
+  **只对本轮实际执行的 B 写 PASS**，A 保留 NOT_RUN 并给出恢复执行命令；
+  清单含源码 commit、Go 版本与编译参数、`GOOS/GOARCH/CGO_ENABLED`、二进制 SHA-256、
+  本地镜像 ID（**不**冒充 registry digest）、schema 版本、已测试的 uid/gid、未测项。
+- 持续演练：1 CPU / 128MiB 限额、约 1.5 闭环/秒（`--pace` 节流）、5 分钟硬上限，
+  分别记录 pow_only 流量、图片题后台补池、容器内存、DB/WAL 增长、题池水位、失败类别、
+  以及**过期清理是否真的触发过**（看日志里有没有非零计数，不看"代码里有 purge 循环"）。
+  抬限流只存在于测量实例，不写进 compose。
+
 **阶段 5 — 管理后台、统计与分级淘汰、Dockerfile 与部署文档；CF 边缘仅作评估项**
 验收：管理页完成站点 CRUD/权重/池状态；淘汰规则按 ADR-006 分级（候选告警 + 人工确认，自动降权需多信号同时成立）且有测试；
 `deploy/docker` 镜像非 root、`--db` 挂卷持久化、容器启动后 `make stage1-check` 仍通过；
@@ -1281,6 +1322,16 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
 
 ## 19. 变更日志
 
+- 2026-10-18 **v2.10（阶段 5B：运行互斥、恢复边界收敛、部署候选清单与持续演练）**：
+  §12 新增运行互斥一段：判据是数据目录上的 `flock` 排他锁而非端口探活；服务"迁移前持有、关库后释放"，
+  `admin-recover`/`restore` 取同一把锁，`backup`/`verify` 明确不取（在线快照允许并发）。
+  ADR-015 记录机制选择的四条理由（非阻塞、锁文件永不删除、不用 PID 文件、建议锁的能力上限）。
+  `BACKUP-RESTORE.md` 把"可信"拆成 checksum / 数据库一致性 / 来源真实性 / 保密性四维并标注只存在前两个
+  （只有 checksum ⇒ 不宣称抵御恶意替换；备份目录的可写者就是备份内容的作者），
+  并补 `admin-recover` 在“凭据文件已写、库未提交”之间失败时的明确出口。
+  §17 新增阶段 5B 边界与验收；`cmd/loadtest` 加 `--pace` 节流（没有它 450 次闭环会在 1 秒内打完，
+  "5 分钟观察"就无从谈起），测量实例抬高限流**不**写进 compose。
+  新增 `docs/scripts/stage5b.sh` 与 `make stage5b-check`、`docs/STAGE5B.md`。
 - 2026-10-18 **v2.9（阶段 5A：单节点部署包、密钥持久化、备份恢复与资源演练）**：
   §6 的密钥入口按实现更正（`--master-key-file` 从未存在，真实入口是 `EPOCHA_*_FILE`），
   并写入"env 与 `_FILE` 同时设置即拒绝启动、不做优先级"与文件校验规则（`os.Stat` 解析后的目标、

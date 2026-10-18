@@ -50,6 +50,7 @@ type options struct {
 	concurrency int
 	requests    int
 	timeout     time.Duration
+	pace        time.Duration
 	quiet       bool
 }
 
@@ -84,6 +85,7 @@ func parseArgs(args []string, getenv func(string) string) (*options, error) {
 	fs.IntVar(&o.concurrency, "concurrency", 1, "并发闭环数（上限 16）")
 	fs.IntVar(&o.requests, "requests", 50, "总闭环数（上限 5000）")
 	fs.DurationVar(&o.timeout, "timeout", 10*time.Second, "单次 HTTP 超时")
+	fs.DurationVar(&o.pace, "pace", 0, "每个 worker 两次闭环之间的最小间隔（持续演练用的节流）")
 	fs.BoolVar(&o.quiet, "quiet", false, "只打印一行汇总")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -101,6 +103,9 @@ func parseArgs(args []string, getenv func(string) string) (*options, error) {
 	}
 	if o.requests < 1 || o.requests > maxRequests {
 		return nil, fmt.Errorf("--requests 必须在 [1,%d]", maxRequests)
+	}
+	if o.pace < 0 {
+		return nil, errors.New("--pace 不能为负")
 	}
 	return o, nil
 }
@@ -310,6 +315,16 @@ func drive(ctx context.Context, c *client, o *options, now func() time.Time) *su
 		go func() {
 			for range jobs {
 				out <- c.runOnce(ctx, o)
+				// 节流：持续演练要的是"每秒 1–2 次、跑满 5 分钟"的形状，
+				// 而不是把上限打满再拿一个没意义的峰值数字。
+				if o.pace > 0 {
+					t := time.NewTimer(o.pace)
+					select {
+					case <-ctx.Done():
+						t.Stop()
+					case <-t.C:
+					}
+				}
 			}
 		}()
 	}
@@ -421,6 +436,11 @@ func (s *summary) print(w io.Writer, o *options) {
 			maxOf(ds).Round(time.Microsecond))
 	}
 	fmt.Fprintf(w, "负载形状 concurrency=%d requests=%d base=%s（凭据不回显）\n", o.concurrency, o.requests, o.base)
+	if o.pace > 0 {
+		// 节流必须写在报告里：没有这行，"5 分钟 450 次闭环"和"1 秒 450 次闭环"看起来一模一样。
+		fmt.Fprintf(w, "节流 pace=%s（每 worker）→ 目标速率≈%.2f 闭环/秒（并发 %d）\n",
+			o.pace, float64(o.concurrency)/o.pace.Seconds(), o.concurrency)
+	}
 	fmt.Fprintf(w, "wall=%s flows=%d ok=%d 吞吐=%.2f 闭环/秒\n",
 		s.wall.Round(time.Millisecond), s.Flows, s.OK, s.throughputPS)
 	line("challenge", s.Challenge)

@@ -10,6 +10,9 @@
 - widget 接入契约（API、状态机、CSP 清单、无障碍边界）：`docs/WIDGET.md`
 - 阶段 4A 现状（浏览器交互验收、实测数字、BLOCKED/NOT_RUN 清单）：`docs/STAGE4A.md`
 - 阶段 4B 现状（真实窄屏、表单接入 fixture、OCR 基线数字、人工盲测入口）：`docs/STAGE4B.md`
+- 单节点部署（容器、端口与管理面边界、密钥文件、反代）：`docs/DEPLOYMENT.md`
+- SQLite 备份与保守恢复（旧快照的安全语义在这里，必读）：`docs/BACKUP-RESTORE.md`
+- 阶段 5A 现状（演练结果、资源实测、BLOCKED 清单）：`docs/STAGE5A.md`
 - 依赖与字体许可：`docs/NOTICE.md`
 - 前端 widget：中英双语、键盘可完成（`docs/WIDGET.md`）
 - 命令：`make help`
@@ -28,7 +31,8 @@
 | 4A | 生产 widget（零依赖原生 JS）+ 示例业务后端 + 真实浏览器闭环验收 | 工程与浏览器闭环完成（tag `stage-4a-done`）；人工项 NOT_RUN |
 | 4B | 接入收尾（表单 fixture + 原生 POST）、真实窄屏视口、离线 OCR 基线、人工盲测入口 | 工程与窄屏完成；**OCR 基线已测出真实数字**（低/中/高档 96%/31%/3%）；人工可读性需真人执行 ⇒ NOT_RUN |
 | 4C | 非视觉等价通道（音频等）、`fallback_base`、人工验收项（题型人工各过 5 次、辅助技术实测） | 未开始 |
-| 5 | 管理后台、分级淘汰、Docker 与部署文档（CF 边缘为之后评估项） | 未开始 |
+| 5A | 单节点容器部署包、密钥文件持久化、SQLite 备份/保守恢复、边界与资源受限演练 | 部署包与演练完成（`make stage5a-check`）；**容器/恢复验收通过不等于抗 AI 验证通过** |
+| 5B | 管理后台页面、统计与分级淘汰、风险打分（第三层）、非视觉通道 | 未开始 |
 
 ## 阶段 1 复核（2026-10-17）
 
@@ -47,6 +51,7 @@ make build          # 单二进制（实测 10.31 MiB，阶段 3B 后；预算 3
 make stage1-check   # 端到端验收：真实暴力求解 PoW，10 项检查
 make check          # fmt-check + vet + go test -race -count=1 + 体积预算
 make stage2-check   # 阶段 2 端到端验收
+make stage5a-check  # 部署包 + 备份恢复 + 容器边界 + 资源演练（退出码 0/1/3）
 ```
 
 启动需要两个必需的外部输入：`EPOCHA_MASTER_KEY`、`EPOCHA_PEPPER`（base64，≥32 字节，**不进仓库**）。

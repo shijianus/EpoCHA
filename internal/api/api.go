@@ -114,6 +114,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("OPTIONS /api/redeem", s.handlePreflight)
 	mux.HandleFunc("POST /siteverify", s.handleSiteverify)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	// /readyz 与 /healthz 分列：前者是"能不能接流量"的存储层自检，后者只证明进程存在。
+	// 容器健康检查用 /readyz（阶段 5A），存活探针继续用 /healthz。
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	// widget 静态资源挂在**公共**监听器上（DESIGN §10.1、D10）：浏览器要在业务页面上
 	// 用 `<script src>` 跨域取它，且它不含任何按身份变化的内容。
 	// 只有这两条固定版本化路径，没有目录、没有按参数拼路径。

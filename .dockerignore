@@ -1,0 +1,52 @@
+# 构建上下文白名单式收窄。这个文件必须位于**仓库根**，因为 `docker build` 的上下文是仓库根
+# （Dockerfile 需要 go.mod / internal / web 等源码目录）。
+#
+# 目标不是"少拷一点"，而是让生产镜像的构建**在物理上拿不到**这些东西：
+#   - eval-out/ 含 ground truth（答案表）与样本图片；
+#   - 开发期命令（预览、评测、盲测、示例后端）与 internal/eval；
+#   - 任何密钥、数据库文件、备份与本地构建产物。
+# 生产 HTTP API 不得有答案出口，而"根本没拷进构建上下文"比"代码里没引用"更可核查。
+
+# --- Git 与本地状态 ---
+.git/
+.gitignore
+*.test
+bin/
+deploy/docker/.prebuilt/
+deploy/docker/data/
+deploy/docker/keys/
+deploy/docker/backups/
+deploy/docker/*.env
+
+# --- 评测样本与 ground truth（绝不进任何层）---
+eval-out/
+
+# --- 密钥与数据库文件（即使误放进仓库也不进上下文）---
+.env
+.env.*
+!.env.example
+*.key
+*.pepper
+*.db
+*.db-wal
+*.db-shm
+*.manifest.json
+
+# --- 开发期命令与素材 ---
+cmd/preview/
+cmd/devseed/
+cmd/evalgen/
+cmd/evalocr/
+cmd/exampleapp/
+cmd/devclient/
+cmd/blindtest/
+internal/eval/
+web/preview/
+docs/
+
+# --- 运行期临时产物 ---
+tmp/
+*.log
+coverage.out
+web/widget/dist/
+*.png.out

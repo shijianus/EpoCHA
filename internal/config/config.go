@@ -43,12 +43,19 @@ const (
 	envMaxActiveSite = "EPOCHA_MAX_ACTIVE_CHALLENGES_PER_SITE"
 	envAdminListen   = "EPOCHA_ADMIN_LISTEN"
 	envAdminKey      = "EPOCHA_ADMIN_KEY"
-	envPoolLow       = "EPOCHA_POOL_LOW_WATERMARK"
-	envPoolHigh      = "EPOCHA_POOL_HIGH_WATERMARK"
-	envPoolMaxRows   = "EPOCHA_POOL_MAX_ROWS"
-	envPoolWorkers   = "EPOCHA_POOL_WORKERS"
-	envPoolTTL       = "EPOCHA_POOL_QUESTION_TTL_SEC"
-	envPoolPollMs    = "EPOCHA_POOL_POLL_MS"
+	// 阶段 5A：每一把密钥材料都可以改由**文件**提供，入口是同名变量加 _FILE 后缀。
+	// 存在的理由是"容器里不把密钥写进 env/argv/Compose"：`ps`、`docker inspect`、
+	// CI 日志和编排平台的 KV 都会带出 env，而 bind mount / secret 文件不会。
+	envMasterKeyFile     = envMasterKey + "_FILE"
+	envPrevMasterKeyFile = envPrevMasterKey + "_FILE"
+	envPepperFile        = envPepper + "_FILE"
+	envAdminKeyFile      = envAdminKey + "_FILE"
+	envPoolLow           = "EPOCHA_POOL_LOW_WATERMARK"
+	envPoolHigh          = "EPOCHA_POOL_HIGH_WATERMARK"
+	envPoolMaxRows       = "EPOCHA_POOL_MAX_ROWS"
+	envPoolWorkers       = "EPOCHA_POOL_WORKERS"
+	envPoolTTL           = "EPOCHA_POOL_QUESTION_TTL_SEC"
+	envPoolPollMs        = "EPOCHA_POOL_POLL_MS"
 	// 阶段 3B：图片题桶独立的水位/预算/让步节奏 + 题型白名单。
 	envPoolImageLow   = "EPOCHA_POOL_IMAGE_LOW_WATERMARK"
 	envPoolImageHigh  = "EPOCHA_POOL_IMAGE_HIGH_WATERMARK"
@@ -68,6 +75,18 @@ const (
 	// maxImageBudgetBytes 是图片字节预算的上界。它存在的理由与 TTL 上界一样：
 	// 没有上界的"预算"就是无界的磁盘增长器（ADR-009）。pool 包在构造 worker 时会再查一次。
 	maxImageBudgetBytes = 1 << 30
+
+	// maxKeyFileBytes 给密钥文件一个硬上限。理由不是省内存，而是拒绝"接线错误"：
+	// 把整个日志、/dev/zero 或一个目录树里的意外文件当成密钥时，必须在启动前失败，
+	// 而不是读满一坨再去 base64。达到上限即失败，**不截断**。
+	maxKeyFileBytes = 1 << 12
+)
+
+// 密钥材料的来源标注，只进 SafeSummary 与运维视野（env / file / none），不含内容。
+const (
+	sourceEnv  = "env"
+	sourceFile = "file"
+	sourceNone = "none"
 )
 
 var (
@@ -103,6 +122,12 @@ type Config struct {
 	MasterKey   []byte
 	PrevMaster  []byte
 	Pepper      []byte
+	// 每把密钥的来源标注（env / file / none）。运维排障的第一问题是"我改的这份到底生效没有"，
+	// 有了这三项就不必靠试错；标注本身不含内容，可以安全进日志。
+	MasterKeySource  string
+	PrevMasterSource string
+	PepperSource     string
+	AdminKeySource   string
 	// AdminKey 是**可选**的引导凭据：仅当库里没有任何管理密钥记录时登记一次
 	// （store.BootstrapAdminKey）。之后运维应在管理 API 里管理，并可以清空这个环境变量。
 	AdminKey     []byte
@@ -196,14 +221,15 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 		PoolImageYield:    200 * time.Millisecond,
 	}
 	var err error
-	if c.MasterKey, err = readKey(getenv, envMasterKey); err != nil {
+	if c.MasterKey, c.MasterKeySource, err = readKey(getenv, envMasterKey, envMasterKeyFile); err != nil {
 		return nil, err
 	}
-	if c.Pepper, err = readKey(getenv, envPepper); err != nil {
+	if c.Pepper, c.PepperSource, err = readKey(getenv, envPepper, envPepperFile); err != nil {
 		return nil, err
 	}
-	if v := getenv(envPrevMasterKey); v != "" {
-		if c.PrevMaster, err = readKey(getenv, envPrevMasterKey); err != nil {
+	c.PrevMasterSource = sourceNone
+	if getenv(envPrevMasterKey) != "" || getenv(envPrevMasterKeyFile) != "" {
+		if c.PrevMaster, c.PrevMasterSource, err = readKey(getenv, envPrevMasterKey, envPrevMasterKeyFile); err != nil {
 			return nil, err
 		}
 	}
@@ -376,8 +402,9 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 		}
 	}
 	// 管理引导凭据是可选的：库里已有管理密钥记录时它完全不生效（见 store.BootstrapAdminKey）。
-	if v := getenv(envAdminKey); v != "" {
-		if c.AdminKey, err = readAdminKey(v); err != nil {
+	c.AdminKeySource = sourceNone
+	if getenv(envAdminKey) != "" || getenv(envAdminKeyFile) != "" {
+		if c.AdminKey, c.AdminKeySource, err = readAdminKey(getenv); err != nil {
 			return nil, err
 		}
 	}
@@ -458,38 +485,44 @@ func loadSites(path string) ([]Site, error) {
 
 // readAdminKey 读取管理引导凭据。它与运维实际发出的 Bearer 值**逐字节相同**——
 // 不做 base64 解码：把"库中登记的形式"和"线上发送的形式"分开会制造两套真相。
-func readAdminKey(v string) ([]byte, error) {
-	v = strings.TrimSpace(v)
+func readAdminKey(getenv func(string) string) ([]byte, string, error) {
+	v, source, err := secretEntry(getenv, envAdminKey, envAdminKeyFile)
+	if err != nil {
+		return nil, "", err
+	}
 	if len(v) < minAdminKeyLen {
 		// 不回显原值
-		return nil, fmt.Errorf("%w: %s 短于 %d 字符", ErrInvalid, envAdminKey, minAdminKeyLen)
+		return nil, "", fmt.Errorf("%w: %s 短于 %d 字符", ErrInvalid, entryName(envAdminKey, envAdminKeyFile, source), minAdminKeyLen)
 	}
 	for _, r := range v {
 		if r < 0x21 || r > 0x7e {
-			return nil, fmt.Errorf("%w: %s 含空白或控制字符", ErrInvalid, envAdminKey)
+			return nil, "", fmt.Errorf("%w: %s 含空白或控制字符", ErrInvalid, entryName(envAdminKey, envAdminKeyFile, source))
 		}
 	}
-	return []byte(v), nil
+	return []byte(v), source, nil
 }
 
-// readKey 读取 base64 编码的密钥材料，要求解码后 ≥32 字节。
-func readKey(getenv func(string) string, name string) ([]byte, error) {
-	v := strings.TrimSpace(getenv(name))
+// readKey 读取 base64 编码的密钥材料（env 或 *_FILE 两条入口之一），要求解码后 ≥32 字节。
+func readKey(getenv func(string) string, envName, fileEnvName string) ([]byte, string, error) {
+	v, source, err := secretEntry(getenv, envName, fileEnvName)
+	if err != nil {
+		return nil, "", err
+	}
 	if v == "" {
-		if name == envPepper {
-			return nil, ErrMissingPepper
+		if envName == envPepper {
+			return nil, "", ErrMissingPepper
 		}
-		return nil, ErrMissingMasterKey
+		return nil, "", ErrMissingMasterKey
 	}
 	k, err := base64.StdEncoding.DecodeString(v)
 	if err != nil {
 		// 不回显原值，也不回显解码错误细节
-		return nil, fmt.Errorf("%w: %s 不是合法 base64", ErrInvalid, name)
+		return nil, "", fmt.Errorf("%w: %s 内容不是合法 base64", ErrInvalid, entryName(envName, fileEnvName, source))
 	}
 	if len(k) < minKeyBytes {
-		return nil, fmt.Errorf("%w: %s 解码后短于 %d 字节", ErrInvalid, name, minKeyBytes)
+		return nil, "", fmt.Errorf("%w: %s 解码后短于 %d 字节", ErrInvalid, entryName(envName, fileEnvName, source), minKeyBytes)
 	}
-	return k, nil
+	return k, source, nil
 }
 
 // SafeSummary 是可安全写入启动输出与日志的一行摘要。
@@ -498,9 +531,16 @@ func (c *Config) SafeSummary() string {
 	if generators == "" {
 		generators = "all"
 	}
-	return fmt.Sprintf("listen=%s admin_listen=%s db=%s site_imports=%d challenge_ttl=%s response_ttl=%s trust_proxy=%t ip_rpm=%d site_rpm=%d max_active=%d max_active_per_site=%d admin_key_present=%t pool=%t pool_low=%d pool_high=%d pool_max=%d pool_workers=%d pool_ttl=%s pool_poll=%s pool_image_low=%d pool_image_high=%d pool_image_bytes=%d pool_image_yield=%s generators=%s",
+	or := func(s string) string {
+		if s == "" {
+			return sourceNone
+		}
+		return s
+	}
+	return fmt.Sprintf("listen=%s admin_listen=%s db=%s site_imports=%d challenge_ttl=%s response_ttl=%s trust_proxy=%t ip_rpm=%d site_rpm=%d max_active=%d max_active_per_site=%d admin_key_present=%t master_key_source=%s pepper_source=%s prev_master_source=%s admin_key_source=%s pool=%t pool_low=%d pool_high=%d pool_max=%d pool_workers=%d pool_ttl=%s pool_poll=%s pool_image_low=%d pool_image_high=%d pool_image_bytes=%d pool_image_yield=%s generators=%s",
 		c.Listen, c.AdminListen, c.DBPath, len(c.Sites), c.ChallengeTTL, c.ResponseTTL, c.TrustProxy,
 		c.RateIPRPM, c.RateSiteRPM, c.MaxActiveChallenges, c.MaxActivePerSite, len(c.AdminKey) > 0,
+		or(c.MasterKeySource), or(c.PepperSource), or(c.PrevMasterSource), or(c.AdminKeySource),
 		c.PoolEnabled, c.PoolLow, c.PoolHigh, c.PoolMaxRows, c.PoolWorkers, c.PoolQuestionTTL, c.PoolPoll,
 		c.PoolImageLow, c.PoolImageHigh, c.PoolImageMaxBytes, c.PoolImageYield, generators)
 }

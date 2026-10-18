@@ -367,7 +367,17 @@ CHECK 把可选值封成一项，浏览器就没有 `data:<任意 MIME>` 的空�
 
 ## 6. 密钥体系与 token
 
-**主密钥**：`EPOCHA_MASTER_KEY`（32B，env 或 `--master-key-file`，权限 0600）；**pepper**：`EPOCHA_PEPPER`（32B，与 DB 文件分离存放，独立挂载）。两者缺一服务拒绝启动（不静默降级）。
+**主密钥**：`EPOCHA_MASTER_KEY`（32B，base64）；**pepper**：`EPOCHA_PEPPER`（32B，与 DB 文件分离存放，独立挂载）。两者缺一服务拒绝启动（不静默降级）。
+**阶段 5A 的实现方式更正**：本文原先写的 `--master-key-file` 命令行入口从未实现；真实入口是**同名变量加 `_FILE` 后缀**
+（`EPOCHA_MASTER_KEY_FILE` / `EPOCHA_PEPPER_FILE` / `EPOCHA_MASTER_KEY_PREVIOUS_FILE` / `EPOCHA_ADMIN_KEY_FILE`）。
+理由是容器里 env 的泄露面：`ps`、`docker inspect`、编排平台的 KV 与 CI 日志都会原样带出环境变量，
+而 bind mount / secret 文件不会。规则（`internal/config/keyfile.go`，有测试）：
+文件必须存在、解析后的目标是普通文件、**group/other 权限位必须为空**（0600/0400）、非空且 ≤4096B（达到上限即失败，不截断）；
+允许符号链接（secret 挂载本身就是指向 `..data/<uuid>` 的链接，为原子轮换设计）；
+**同一个入口的 env 与 `_FILE` 同时非空 ⇒ 拒绝启动**，不做优先级——"文件优先"或"env 优先"都会制造
+"运维改的那一份不生效"这类极难定位的故障，而密钥配错的失败面是签名与摘要。
+文件内容与密钥值不进错误文案、启动摘要与日志；摘要只记录每把密钥的**来源**（`env`/`file`/`none`）。
+`cmd/ops` 与 `cmd/server` 共用同一套解析规则（`config.LoadPepper`/`LoadAdminKey`），避免出现两套真相。
 
 派生（**带域分隔的 HMAC-SHA256**，标准库即可；不引入 `x/crypto/hkdf`，理由见 ADR-007——本设计每个用途只需要一把固定长度密钥，
 单次 HMAC 展开在此场景与 HKDF-expand 等价，且域分隔串含版本与 purpose，无跨用途复用风险）：
@@ -392,7 +402,8 @@ payload 字段（阶段 1 实现）：`typ`(`chal`|`resp`)、`kid`、`sid`(站�
 实现取 **token 总长 ≤4096B、payload ≤2048B**（比本文原先写的"payload ≤4KB"更严，复核后按取严者固化）。
 验证顺序：总长度上限 → 分段解析 → kid ∈ {current, previous} → **常数时间比 tag** → `DisallowUnknownFields` 解 payload →
 `typ`/purpose 匹配 → `exp`/`iat` 时钟窗口 → `sid` 与请求站点一致 → 业务层原子消费。任何一步失败对外都是同一族错误码，不区分原因。
-轮换：`kid` 允许同时存在 current + previous（`--master-key-previous`），旧 token 在 TTL 内自然过期。
+轮换：`kid` 允许同时存在 current + previous（`EPOCHA_MASTER_KEY_PREVIOUS`，阶段 5A 起同样有 `_FILE` 入口），
+旧 token 在 TTL 内自然过期。**恢复旧快照时不得设置 previous**——那把签名回退正是"旧 token 重新可用"的唯一通道（§12.4、ADR-014）。
 **题目 verifier 不参与这套双密钥**：`K(qver)` 只由**当前**主密钥派生，所以轮换主密钥后，题池里存量题的摘要
 在新密钥下**必然判假**——即使提交正确答案（`TestVerifierFailsClosedAfterKeyChange` 钉住这条 fail-closed 语义）。
 后果与运维程序：轮换后这些题会消耗掉用户的作答机会（答案被拒 ⇒ challenge 终态作废），直到它们被清理或过期。
@@ -410,6 +421,11 @@ payload 字段（阶段 1 实现）：`typ`(`chal`|`resp`)、`kid`、`sid`(站�
 
 **管理密钥引导**（阶段 2 实现）：库中**没有任何 `admin_keys` 记录**时，用 `EPOCHA_ADMIN_KEY` 登记其摘要（label=`bootstrap`）；
 有记录后该环境变量**完全忽略**——否则运维在管理 API 里的撤销会被下一次重启推翻。
+**阶段 5A 补上一条这条规则的必然后果**：撤销掉最后一把凭据之后，"库里已有记录"仍成立，因此换引导文件（env 或 `_FILE`）
+**不会**恢复访问；而交付的镜像里没有 `sqlite3` 可以手工改库。唯一的受控出口是
+`epocha-ops admin-recover`（停服 + 探活拒绝 + 一条事务内撤销全部有效凭据并登记新凭据 + 审计；
+新凭据只写进 `--key-file` 的 0600 文件，stdout 只给 `key_id`）。仍然没有任何未鉴权的恢复 HTTP 面。
+运维纪律由此反推：**撤销管理凭据前，先新增一把并验证可用**（ADR-014 第 5 条）。
 `EPOCHA_ADMIN_KEY` 的值与运维实际发出的 Bearer 值**逐字节相同**（不做 base64 变换），
 否则"登记的形式"与"发送的形式"会变成两套真相。库里没有可用管理凭据时管理 API 一律 401：**缺凭据不等于放开管理功能**。
 日志红线：禁止输出 `secret`、`response`/`token` 全文、`answer`、payload 完整 JSON、未掩码 IP。允许输出：nonce 前 8 字符、site_key、耗时、错误码。
@@ -692,6 +708,7 @@ TTL 有 `[1s, 1h]` 上下界——有效期长度直接决定防重放账本必�
 | POST | `/api/redeem` | challenge token | 1（3A 起接受 `answer`） | 提交 PoW 解（与答案），成功换一次性 `response` |
 | POST | `/siteverify` | `secret` | 1 | reCAPTCHA 风格，服务端调用 |
 | GET | `/healthz` | 无 | 1 | 存活探针，只返回 `{"status":"ok"}`，不含版本/路径/计数/依赖信息，不做健康即放行的语义 |
+| GET | `/readyz` | 无 | 5A | **就绪探针**（阶段 5A）：存储层有界自检——连得上、`meta.schema_version` 与本程序一致、**写路径可用**（主文件可写 + 数据目录可创建临时文件）。就绪 ⇒ `{"status":"ready"}`；否则 **503** `{"status":"unavailable"}`。三条边界：不分配题目也不消费 token（有测试逐表对账行数）；自带 2s 上限并沿用请求 ctx（探针不得成为故障源）；只回一个词，不外泄路径/SQL/驱动文本/站点数/失败原因（原因只进日志的类别字段）。题池水位低**不是**未就绪，那是容量信号（§8.3） |
 | ~~GET~~ | ~~`/asset/<pool_id>/<sig>`~~ | — | **未采用（3B）** | 草稿里的签名媒体端点没有实现：它会凭空造出一个需要防枚举、防跨 challenge 引用的面，而题目是一次性的。图片改为**内联在 `/api/challenge` 的公开 DTO 里**（§10.1 下方、ADR-012） |
 | GET | `/widget/v1.js` | 公开 | **4A** | widget 主脚本（go:embed）。实测 gzip **16,687 B** [实测]（预算 30KB [目标]） |
 | GET | `/widget/v1.worker.js` | 公开 | **4A** | PoW worker 的**同源副本**（接入方选方案 B 时用）。内容与 v1.js 内嵌那份逐字节相同，由测试钉住 |
@@ -915,7 +932,21 @@ nginx/caddy: TLS 终止 + client_max_body_size 8k + X-Forwarded-For 处理 + 808
 ufw: 仅放行 443（+ CF IP 段），8080 不对外
 swap: 512M + vm.swappiness=10；GOMEMLIMIT=56MiB GOMAXPROCS=1
 ```
-备份：`sqlite3 .backup` 每日 + WAL checkpoint；恢复演练写入 `deploy/README.md`。
+备份：~~`sqlite3 .backup` 每日 + WAL checkpoint~~ → **阶段 5A 更正**（ADR-014）：`sqlite3` 是外部二进制，
+与本仓库"服务与运维能力都用纯 Go"的约束冲突；主方案改为 `epocha-ops backup`，走 `VACUUM INTO` 的整库一致性快照
+（WAL 内容进快照，产物是单个无 `-wal` 的库）+ 自描述 manifest（版本/schema/哈希/计数/pepper 指纹）。
+恢复是**保守恢复**：产物是新文件、站点全部禁用、凭据全部撤销、response 与题池清空、装入新的管理凭据，
+用新的主密钥启动且不设 previous。详见 `docs/BACKUP-RESTORE.md`。恢复演练写入 `deploy/docker/README.md` 与 `docs/DEPLOYMENT.md`。
+
+**5A 的容器形状（与上面的 systemd 形状等价，不是另一套语义）**：`deploy/docker/` 的两阶段镜像
+（`golang:1.24-alpine` 编译 → `FROM scratch` 运行时，`CGO_ENABLED=0`、`GOTOOLCHAIN=local`、数字 uid 非 root、
+`read_only` 根、`cap_drop ALL`、`no-new-privileges`、`pids`/`memory`/`memswap`/`cpus` 硬限额、
+`HEALTHCHECK` 用镜像内的 `epocha-ops check --path /readyz`）。
+compose **只**发布 `127.0.0.1:8080`，管理口 8081 不发布——容器内 loopback 与宿主 loopback 不互通，
+所以管理操作的受控路径是容器内 `epocha-ops admin`（只允许 loopback 目标、只允许 `/api/admin/*`）。
+密钥走 `*_FILE` + `:ro` 挂载；数据/密钥/备份是三个分开挂载的目录。反代主示例是 Nginx
+（`deploy/docker/nginx.conf.example`：不回传管理路由、动态端点 `no-store`、widget 透传后端缓存语义、
+`client_max_body_size 8k`、访问日志不记 query 与体、`X-Forwarded-For` 覆写、默认不转发 `CF-Connecting-IP`）。
 
 **Cloudflare 边缘（延后，阶段 5 之后评估；不属于阶段 1）**
 - 事实更正（ADR-001）：Cloudflare **免费计划可以使用 SQLite-backed Durable Objects**（官方定价页：Workers Free 只能创建/访问
@@ -933,8 +964,9 @@ swap: 512M + vm.swappiness=10；GOMEMLIMIT=56MiB GOMAXPROCS=1
 
 ## 13. 资源与性能预算（1 vCPU / 1GB / 50GB）
 
-**本表除"守护方式"外全部是 `[目标]` 或 `[估算]`，阶段 1 未做任何性能测量。**"实测"列必须由阶段 5 的 `make loadtest`
-（注明机器、日期、负载形状）填写后才能作为选型依据。
+阶段 1 时本表全是 `[目标]`/`[估算]`；**阶段 3A/3B/4A/4B/5A 已逐行填入真实采样**（每行都注明机器、日期与负载形状）。
+读表纪律不变：`make loadtest` / 验收脚本给出的数字必须注明形状才能用于选型，
+而"实测"列里的每一项都仍是个别采样，不是稳态结论。
 
 | 项 | 目标/估算 | 实测 | 守护方式 |
 |---|---|---|---|
@@ -951,9 +983,12 @@ swap: 512M + vm.swappiness=10；GOMEMLIMIT=56MiB GOMAXPROCS=1
 | 图片池磁盘 | `[目标]` 全局图片字节预算 4MiB | `[实测]` 新库 + ≥20 条 ready 图片题 + 40 条算术题 + 20 次闭环 ⇒ `wal_checkpoint(TRUNCATE)` 后 **278,528B**（写入中主文件仅 4,096B + WAL 2,855,192B——**只 stat 主文件会得到假数**）。每行图片的净磁盘开销本轮**未单独隔离测量** | `ImageAssetBytes` + `TestPurgeReleasesImageBytes` |
 | 服务进程驻留（含图片） | `[目标]` <100MB | `[实测]` **VmRSS 18,776 kB / VmHWM 18,904 kB / Threads 10**（`cmd/server` 二进制，形状 = 视觉桶 ≥20 条 + 20 次混合闭环 0 失败；2026-10-18）。仍是功能闭环形状采样，**不是**稳态，未压过预算满载 | `stage3b.sh` 第十三步 |
 | 池预生成 CPU | `[目标]` 平均 ≤15%（补 10 题睡 100ms） | 待填（未做持续负载测量；0.35ms/题的纯成本意味着按默认 `BatchPerTick=20`/`PollInterval=2s` 稳态补题时 CPU 占用远低于该目标，但这是算术推论不是实测） | metric `pool_gen_ms` 直方图（阶段 5） |
-| `/siteverify` p99 | `[目标]` <60ms | 待填（阶段 1 未做性能测量） | 基准测试 `TestBenchmarkSiteVerify` |
-| `/api/challenge` p99 | `[目标]` <120ms | 待填 | 同上 |
-| 混合吞吐 | `[目标]` ≥150 req/s 且无 `SQLITE_BUSY` | 待填 | `make loadtest`（阶段 5） |
+| `/siteverify` p99 | `[目标]` <60ms | 待填（**阶段 5A 给出的是 p50/p95/max，不是 p99**：容器内限额下 `[实测]` p50 2.544ms / p95 7.800ms / max 69.900ms，150 次闭环、0 失败，2026-10-18 linux/arm64 1 CPU/128MiB） | 基准测试 `TestBenchmarkSiteVerify` + `make loadtest` |
+| `/api/challenge` p99 | `[目标]` <120ms | 待填（同上：`[实测]` p50 2.342ms / p95 11.578ms / max 71.929ms） | 同上 |
+| 混合吞吐 | `[目标]` ≥150 req/s 且无 `SQLITE_BUSY` | `[实测]` **239.23 闭环/秒 ≈ 718 请求/秒**（一次 challenge+redeem+siteverify 记为 3 个请求；`cmd/loadtest` 并发 4 / 150 次闭环 / 全部成功 / 0 超时 / 0 `SQLITE_BUSY`；容器限成 1 CPU + 128MiB + `GOMEMLIMIT=56MiB`，负载期间 `docker stats` CPU 42.06%、内存 7.918MiB，`OOMKilled=false`、`RestartCount=0`；2026-10-18）。**形状限制**：单一 pow_only 站点、`bits=12`、单一来源地址，且**必须**把全局 `EPOCHA_RATE_IP_RPM` 从默认 60 抬到 60000 才测得到容量——默认配置下 80 次闭环里 62 次是 429（那是限流器形状，不是服务端容量） | `make loadtest` / `docs/scripts/stage5a.sh` 第 10 步 |
+| 容器内库与 WAL 体积 | — | `[实测]` 同一轮负载：主文件 147,456 → 442,368 字节，`-wal` 622,152 → 4,128,272 字节（2026-10-18）。再次印证"只 stat 主文件会得到假数" | `stage5a.sh` 记录两个数 |
+| 图片补池（限额内） | `[目标]` 平均 CPU ≤15% | `[实测]` 有一个启用的 `pow_question` 视觉题站点时，1 CPU/128MiB 限额内补到 ready=17 行、图片字节 109,852；负载后 24 行 / 154,560 字节（2026-10-18）。**注意分桶来源**：`store.QuestionBuckets` 只取"启用的 pow_question 站点"，所以全部站点为 `pow_only` 时池恒为空——那不是故障，是语义 | `stage5a.sh` 第 10 步 |
+| 服务内存（容器视角） | `[目标]` <100MB | `[实测]` 128MiB 硬限额下 `docker stats` 内存 7.918MiB（负载期间），无 OOMKill（2026-10-18）。这是**容器 cgroup 记账**，与 §13 上两行的 `/proc` VmRSS 口径不同，不可互相冒充 | `stage5a.sh` + `--memory` 硬限额 |
 | PoW 求解时延 | 未设线（先测再说） | `[实测]` 纯 JS SHA-256 在 worker 里 **422,833 次/秒**（Firefox 147 headless、linux/arm64、2026-10-18）：bits=12 求解 **4–6ms**、提交→verified 墙钟 **103–173ms**（三次采样）；bits=20 提交→verified 五次采样 **309 / 1,551 / 1,862 / 4,064 / 8,991 ms** —— 解的位置是几何分布 + 同机负载差异 ⇒ **bits=20 已经是"秒级到十秒级"**，别把单次采样当常量，也别据此继续往上抬难度 | 难度不能为了"看着快"往下降；`cmd/exampleapp` 的 8394 端口专测生产难度 |
 
 **未测项与原因（3A 明确列出，不编造数值）**：
@@ -1023,7 +1058,14 @@ cmd/exampleapp/      阶段 4A：**开发专用**示例业务后端（真实 /si
 docs/scripts/browser/ 阶段 4A：WebDriver BiDi 客户端与浏览器/向量测试（Node 内置能力，零第三方依赖）
 cmd/blindtest/       阶段 4B：**开发期**人工可读性盲测记录服务（三段耗时分离、导出无凭据；不链进 cmd/server）
 docs/scripts/ocr/    阶段 4B：隔离 OCR 评测容器与基线编排（tesseract 只在容器里跑，不是服务依赖）
-deploy/docker/       Dockerfile + compose（阶段 5）
+deploy/docker/       阶段 5A：Dockerfile（两阶段，scratch 运行时）+ compose.yml + .env.example +
+                     nginx.conf.example + README（索引）。仓库根的 `.dockerignore` 收窄构建上下文：
+                     eval-out/（ground truth）、开发期命令、密钥与库文件一律不进上下文
+cmd/ops/             阶段 5A：**运维入口**（backup / verify / restore / check / admin / version）。
+                     它随生产镜像一起交付（镜像里没有 shell，健康检查与管理操作需要一个真能跑的命令），
+                     但**不是**通用管理平台：每条子命令对应 DEPLOYMENT/BACKUP-RESTORE 里的一个具体步骤
+    cmd/loadtest/    阶段 5A：**开发期**有界负载工具（分段时延与失败类别；并发与请求数都有硬上限）。
+                     `cmd/server` 不链接它（stage4b.sh 的依赖隔离检查钉住）
 deploy/cloudflare/   Worker + wrangler.toml（阶段 5 之后评估）
 internal/store/migrations/  NNNN_*.sql（阶段 1 起）——偏离"顶层 migrations/"是有意的：
                      go:embed 只能嵌入本包子树，放在仓库根就无法编进单二进制
@@ -1190,6 +1232,33 @@ CSP 禁 Worker 明确失败、键盘-only 完成一题、请求面与凭据面�
 `make loadtest` 在 1C1G 上给出 `[实测]` 吞吐/p99/RSS 并回填 §13（未达标要如实记录，不得写成达标）。
 CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先补边缘原子性可行性验证。
 
+**阶段 5A — 单节点部署包、密钥持久化、备份恢复与资源受限演练（本轮，2026-10-18）**
+范围边界：**不含**管理后台页面、题型权重/风险打分/自动淘汰、非视觉通道、CF Worker、多节点、公网部署授权。
+验收（`make stage5a-check` → `docs/scripts/stage5a.sh`；逐项三态与退出码契约见 `docs/STAGE5A.md`）：
+- 交付：`deploy/docker/{Dockerfile,compose.yml,.env.example,nginx.conf.example,README.md}`、根 `.dockerignore`、
+  `cmd/ops`、`cmd/loadtest`、`internal/store/deploy.go`（备份/恢复/`Ready`）、`internal/config/keyfile.go`（`*_FILE`）、
+  `GET /readyz`、`docs/{DEPLOYMENT,BACKUP-RESTORE,STAGE5A}.md`。
+- 镜像：只含 `epocha` 与 `epocha-ops` 两把静态二进制（用 `docker save` 的文件清单证明没有
+  shell/curl/sqlite3/OCR/评测样本/ground truth/浏览器）；非 root；`read_only`；`cap_drop ALL`；
+  `no-new-privileges`；`pids`/`memory`/`memswap`/`cpus` 硬限额**经 `docker inspect` 核实**；
+  `HEALTHCHECK` 打 `/readyz` 而非 `/healthz`。
+- 边界：宿主只出现 `127.0.0.1:<公共端口>`；管理口不发布；公共端口上 `/api/admin/*` 是 404。
+- 密钥：缺文件/权限过宽/env 与 `_FILE` 同时设置 ⇒ 一律拒绝启动；日志与错误文案不带出密钥值与路径；
+  重建容器不生成新 master/pepper。
+- 持久化与旧快照语义：容器重建后已消费 response 仍不可重放、停用站点仍停用、被撤销的凭据与
+  被撤销的管理凭据都不复活；恢复产物保守失效、旧 token 被拒、旧管理凭据被拒、人工启用后新闭环可走。
+- 故障形状：数据目录/库不可写时不得返回验证成功（`/readyz` 503 或直接拒绝启动两种形状都可接受，
+  但"照常服务"不可接受）；SIGTERM 后端口释放、无 OOMKill。
+- 等价替换（记录在案，不假装成别的东西）：阶段 5 原文的"容器启动后 `make stage1-check` 仍通过"在 5A 里由
+  **容器路径上的等价端到端断言**承担（领题→真解 PoW→兑换→`/siteverify` 成功、重放被拒、重启后仍不可重放、
+  轮换/停用/撤销的持久化）。`stage1.sh` 本身按设计会自建密钥、自建 DB、自起实例，
+  因此**不**把它指向已运行的容器去跑（那会让它的哨兵按值扫描与清理逻辑失真）。
+- 资源：`cmd/loadtest` 在**限额内**给出 challenge/redeem/siteverify 的分段 `[实测]` 时延与吞吐、
+  容器内存、库与 WAL 体积、失败类别、OOM 计数，并回填 §13（未达标如实记录）。
+  表述纪律照旧：PoW 由浏览器求解，工具代算的那一段不得混进"服务端时延"或"用户体验"。
+- 反代：真实 nginx 容器验证"不回传管理面 / 动态端点 no-store / widget 缓存透传 / 日志无 query 无凭据"。
+  自签名测试证书**不等于**公网 TLS 已验收。
+
 ## 18. 已知风险与未决问题（跟踪中）
 
 | # | 风险/问题 | 现状 | 处理方向 |
@@ -1212,6 +1281,17 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
 
 ## 19. 变更日志
 
+- 2026-10-18 **v2.9（阶段 5A：单节点部署包、密钥持久化、备份恢复与资源演练）**：
+  §6 的密钥入口按实现更正（`--master-key-file` 从未存在，真实入口是 `EPOCHA_*_FILE`），
+  并写入"env 与 `_FILE` 同时设置即拒绝启动、不做优先级"与文件校验规则（`os.Stat` 解析后的目标、
+  group/other 位必须为空、≤4096B 不截断、内容与路径不进文案）。
+  §10.1 新增 `GET /readyz`（就绪 = 连接 + schema 版本 + **写路径可用**；不领题不消费 token；
+  有 2s 边界并沿用请求 ctx；只回一个词）。§12 的备份方案更正为 `VACUUM INTO`（`sqlite3` 属外部二进制，
+  与 AGENTS 约束冲突；理由与保守恢复语义见 ADR-014），并补 5A 的容器形状与"管理面只在容器内 loopback"。
+  §15 新增 `cmd/ops/`（运维入口，随镜像交付）、`cmd/loadtest/`（开发期有界负载工具，`cmd/server` 不链接）、
+  `deploy/docker/` 的真实文件清单与根 `.dockerignore`。
+  §17 把阶段 5 拆出 **5A** 并写清范围边界与验收项。§13 的资源数字回填见 `docs/STAGE5A.md`（本轮实测）。
+  新增 `docs/{DEPLOYMENT,BACKUP-RESTORE,STAGE5A}.md` 与 `make stage5a-check`（退出码 0/1/3 三态）。
 - 2026-10-18 **v2.8（阶段 4B：接入收尾 + 真实窄屏 + 首次 OCR 基线）**：
   §8.4 的 M4 从"未测（阻塞）"改成**一次真实的通用 OCR 基线**（低/中/高档 96%/31%/3%，Wilson 95% 见该行），
   并据此写下两条结论与一条新限制：低档挡不住通用 OCR ⇒ 生产默认不得落低档；

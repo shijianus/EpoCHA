@@ -1,0 +1,118 @@
+# 阶段 5A：单节点（1 vCPU / 1GB / 50GB）VPS 的容器编排。
+#
+# 边界，按重要性排序：
+#   1. **只有公共 API 端口被发布，且绑死宿主 127.0.0.1**。管理面（容器内 127.0.0.1:8081）
+#      完全不发布：宿主上不存在那个端口，公网更不存在。想用它只能进容器（`docker compose exec`）。
+#      注意这里**不能**写成 `8080:8080`——省略宿主 IP 会绑到 0.0.0.0，等于把验证服务直接放到
+#      所有网卡上（含公网），TLS 与反代都白做了。
+#   2. 根文件系统只读，只有数据卷可写。运行时没有任何"下载/安装/写日志到镜像层"的能力。
+#   3. 不加任何 capability，不允许提权。数字 uid + 8080/8081（>1024）不需要特权。
+#   4. 内存与 CPU 是**硬限额**（不是 reservation）：1GB 宿主上要给 OS 与反代留足空间，
+#      超限的失败形状是 OOM Kill + 重启，不是把整台机器拖死。数值来源见 docs/STAGE5A.md 的实测。
+#
+# 变量都来自同目录的 compose.env（由 compose.env.example 复制），不写真实密钥。
+# 密钥一律走文件挂载：env 会被 `docker inspect`、编排平台 KV 与 CI 日志原样带出。
+
+name: epocha
+
+services:
+  epocha:
+    image: ${EPOCHA_IMAGE:-epocha:5a}
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        VERSION: ${EPOCHA_VERSION:-unknown}
+        COMMIT: ${EPOCHA_COMMIT:-none}
+        BUILD_DATE: ${EPOCHA_BUILD_DATE:-unknown}
+    # 只发布到宿主 loopback：反代（同机 nginx/caddy）经 127.0.0.1:8080 回源。
+    ports:
+      - "${EPOCHA_PUBLIC_BIND:-127.0.0.1}:${EPOCHA_PUBLIC_PORT:-8080}:8080"
+    # 管理端口刻意**不**出现在这里。见 docs/DEPLOYMENT.md §5 的"容器内管理操作"。
+
+    volumes:
+      - "${EPOCHA_DATA_DIR:-./data}:/var/lib/epocha"
+      - "${EPOCHA_KEY_DIR:-./keys}:/etc/epocha/keys:ro"
+      # 备份目录单独挂载（可写），且**不**嵌在数据目录里面：
+      # "对着活库旁边写快照"会让一次误删同时带走库与备份。恢复永远在隔离目录做。
+      - "${EPOCHA_BACKUP_DIR:-./backups}:/var/backups/epocha"
+    read_only: true
+    # 密钥文件必须是**只读**挂载：可写的"只读配置"意味着任何能进容器身份的东西都能换掉 pepper。
+    user: "${EPOCHA_UID:-65534}:${EPOCHA_GID:-65534}"
+
+    environment:
+      # 镜像里已写死这两条；重复声明是为了让"监听形状"在这份文件里可读、可审计。
+      EPOCHA_LISTEN: "0.0.0.0:8080"
+      EPOCHA_ADMIN_LISTEN: "127.0.0.1:8081"
+      EPOCHA_DB: "/var/lib/epocha/epocha.db"
+      EPOCHA_MASTER_KEY_FILE: "/etc/epocha/keys/master"
+      EPOCHA_PEPPER_FILE: "/etc/epocha/keys/pepper"
+      # 引导管理凭据（可选）：文件不存在就不登记，管理面保持"无凭据即全部 401"。
+      # 刻意**不**在镜像 ENV 里写死这个路径——那会让"没有 admin 文件"变成启动失败。
+      EPOCHA_ADMIN_KEY_FILE: "${EPOCHA_ADMIN_KEY_FILE:-}"
+      # 来源地址（红线 9）。默认 false：只信容器看到的 TCP 对端。
+      # 有反代时置 true 并把 EPOCHA_TRUSTED_PROXIES 填成**容器实际看到的**反代网段
+      # （见下面 networks 里钉住的子网——发布端口经 bridge 进入容器，源地址不是 127.0.0.1）。
+      # 只置 true 不填网段会被 config 直接拒绝启动，这是有意的 fail closed。
+      EPOCHA_TRUST_PROXY: "${EPOCHA_TRUST_PROXY:-false}"
+      EPOCHA_TRUSTED_PROXIES: "${EPOCHA_TRUSTED_PROXIES:-}"
+      # 运行时资源：GOMEMLIMIT 让 Go 在 56MiB 附近主动压 GC，容器硬上限 128MiB 兜底。
+      GOMEMLIMIT: "56MiB"
+      GOMAXPROCS: "1"
+      # 一次性把题型白名单显式写出来：默认全部登记，但部署面希望"这一台开了什么题"可读。
+      EPOCHA_GENERATORS: "${EPOCHA_GENERATORS:-}"
+
+    # 资源硬限额（docs/STAGE5A.md 第十节的实测形状）。
+    # `deploy.resources.limits` 是 compose spec 里的规范写法（顶层 `pids` 之类的旧键在这个
+    # compose 版本会被 schema 直接拒绝）；limits 是**硬上限**而不是 reservation——超额的失败
+    # 形状是 OOM Kill + restart，而不是把整台 1GB 机器拖死。
+    # memswap_limit == memory ⇒ 容器内不许 swap：宿主 swap（DESIGN §12：512M + swappiness=10）
+    # 只用于吸收 OS 抖动，不给验证服务当 heap 扩展。
+    # 这四个值**必须实测确认落地**（docker inspect），写在文件里不等于内核在执行。
+    deploy:
+      # 单副本：SQLite 是本地单文件权威状态，副本数 >1 会直接破坏一次性消费语义。
+      replicas: 1
+      resources:
+        limits:
+          cpus: "${EPOCHA_CPUS:-1.0}"
+          memory: ${EPOCHA_MEM_LIMIT:-128m}
+          pids: ${EPOCHA_PIDS_LIMIT:-128}
+    memswap_limit: ${EPOCHA_MEMSWAP_LIMIT:-128m}
+
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    restart: unless-stopped
+    # SIGTERM → ctx 取消 → 排空在途请求 → 关闭 DB（cmd/server 的既有优雅关闭路径）。
+    # 15s 给的是"最坏一次 redeem 正在写事务"的余量，不是随手写的 10s。
+    stop_grace_period: 15s
+
+    healthcheck:
+      # 镜像里没有 shell/curl/wget。这里用的是镜像内真实存在的命令，且打的是 /readyz
+      # （连接 + schema 版本 + 写路径可用性），不是 /healthz（只证明进程活着）。
+      test: ["CMD", "/usr/local/bin/epocha-ops", "check", "--path", "/readyz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        # stdout/stderr 是唯一日志出口（slog 文本），轮转由 Docker 负责。
+        # 上限 3×5MB ≈ 15MB：1GB 机器上这已经是"日志不该和数据库抢磁盘"的量级。
+        max-size: "${EPOCHA_LOG_MAX_SIZE:-5m}"
+        max-file: "${EPOCHA_LOG_MAX_FILE:-3}"
+
+networks:
+  default:
+    name: ${EPOCHA_NETWORK:-epocha_default}
+    # 钉住子网的理由不是"整齐"，而是**让受信代理网段成为一个可写进配置的具体值**：
+    # 宿主上的反代通过发布端口进入容器时，源地址是这个网络的网关（不是 127.0.0.1），
+    # 而 EPOCHA_TRUSTED_PROXIES 必须包含它，否则 trust-proxy 开着也永远不采信 XFF。
+    # 与宿主其它网段冲突时改这里，并同步改 EPOCHA_TRUSTED_PROXIES。
+    ipam:
+      config:
+        - subnet: ${EPOCHA_SUBNET:-172.28.0.0/24}

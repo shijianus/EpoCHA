@@ -3,6 +3,7 @@ SHELL := /bin/bash
 export GOTOOLCHAIN := local
 MODULE      := github.com/shijianus/EpoCHA
 BIN         := bin/epocha
+OPS_BIN     := bin/epocha-ops
 VERSION     := $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.0.0-dev)
 COMMIT      := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 BUILDDATE   := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -36,16 +37,68 @@ help:
 	@echo "make ocr-container 构建隔离 OCR 评测容器（仅开发期；记录镜像与模型指纹）"
 	@echo "make ocr-baseline-real 阶段 4B 真实基线：dev 调参 + dev/holdout 正式测量（需先 ocr-container）"
 	@echo "make blindtest     一条命令起人工可读性盲测（临时密钥/库/端口，页面导出无凭据 CSV/JSON）"
-	@echo "make run          以临时 DB 启动（仅本地调试）"
+	@echo "make run          以临时 DB 启动（仅本地调试；它绑 :8080 即全部网卡，别在有公网的机器上试部署）"
+	@echo "make build-ops    构建运维二进制到 bin/epocha-ops（备份/校验/恢复/探针/容器内管理）"
+	@echo "make docker-image 规范构建：在容器内编译（需 registry 访问 + ≥2GB 可用磁盘给 Go 模块与编译中间产物）"
+	@echo "make docker-image-local 同一份 Dockerfile 的运行时层，用宿主已编译的二进制填 toolchain 阶段"
+	@echo "make stage5a-check 部署包 + 备份恢复 + 容器语义 + 资源限额 的真实演练（会动 Docker，见 docs/STAGE5A.md）"
+	@echo "make loadtest ARGS=\"--base URL --site-key KEY --requests N\"  有界负载实测（需服务已在跑 + EPOCHA_SITE_SECRET）"
 
 .PHONY: build
 build:
 	@mkdir -p bin
 	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/server
 
+.PHONY: build-ops
+build-ops:
+	@mkdir -p bin
+	go build -trimpath -ldflags "$(LDFLAGS)" -o $(OPS_BIN) ./cmd/ops
+
+# DESIGN §13/§17 点名的实测入口。它**不**替你启动服务，所以不会因"忘了起服务"报出一个假的低数字。
+# 有界性在 cmd/loadtest 内部（并发 ≤16、请求 ≤5000），不靠这里的约定。
+# 例：EPOCHA_SITE_SECRET=sk_... make loadtest ARGS="--base http://127.0.0.1:8080 --site-key pk_xxx --requests 150 --concurrency 4"
+.PHONY: loadtest
+loadtest:
+	@test -n "$(ARGS)" || { echo "用法：make loadtest ARGS=\"--base URL --site-key KEY --requests N [--concurrency C]\"（还需 EPOCHA_SITE_SECRET）"; exit 2; }
+	go build -trimpath -o bin/epocha-loadtest ./cmd/loadtest
+	bin/epocha-loadtest $(ARGS)
+
+# 生产镜像的两条构建路径，产物是**同一个运行时层**（deploy/docker/Dockerfile 的 runtime 阶段）：
+#   docker-image        规范配方：toolchain 阶段在容器内 go build。需要 registry 可达，
+#                       以及 /var/lib/docker 所在分区 ≥2GB 空闲（modernc.org 的生成代码解包就要 1GB 量级）。
+#   docker-image-local   把 toolchain 阶段换成宿主已编译产物（--build-context 覆盖同名阶段）。
+#                       磁盘或网络不足以在容器内编译时用这条；镜像内容与规范配方逐文件一致，
+#                       由 stage5a.sh 的"docker save 文件清单"检查证明。
+DOCKER_IMAGE ?= epocha:5a
+DOCKERFILE  := deploy/docker/Dockerfile
+.PHONY: docker-image
+docker-image:
+	docker build -f $(DOCKERFILE) --target runtime -t $(DOCKER_IMAGE) \
+	  --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_DATE=$(BUILDDATE) .
+
+.PHONY: docker-image-local
+docker-image-local:
+	@mkdir -p deploy/docker/.prebuilt/out
+	CGO_ENABLED=0 GOTOOLCHAIN=local go build -trimpath -ldflags "$(LDFLAGS)" -o deploy/docker/.prebuilt/out/epocha ./cmd/server
+	CGO_ENABLED=0 GOTOOLCHAIN=local go build -trimpath -ldflags "$(LDFLAGS)" -o deploy/docker/.prebuilt/out/epocha-ops ./cmd/ops
+	@# 交付层是 `FROM scratch`：没有 /lib/ld.so。带 PT_INTERP 的二进制会在容器启动时报
+	@# "exec ...: no such file or directory"（实测第一轮就是这么炸的——宿主 CGO_ENABLED=1 且有 gcc）。
+	@# 所以这条断言必须在构建期，而不是等 compose up 的.healthcheck 超时。
+	@if command -v readelf >/dev/null 2>&1; then \
+	  for b in deploy/docker/.prebuilt/out/epocha deploy/docker/.prebuilt/out/epocha-ops; do \
+	    if readelf -lW "$$b" 2>/dev/null | grep -qi 'program interpreter'; then \
+	      echo "构建出的 $$b 是动态链接，scratch 镜像起不来（CGO_ENABLED 必须为 0）"; exit 1; \
+	    fi; \
+	  done; \
+	  echo "已确认两把二进制无 PT_INTERP（静态链接）"; \
+	else \
+	  echo "警告：本机没有 readelf，跳过静态链接断言（交付风险由 stage5a.sh 的容器启动检查承担）"; \
+	fi
+	docker build -f $(DOCKERFILE) --target runtime -t $(DOCKER_IMAGE) \
+	  --build-context toolchain=deploy/docker/.prebuilt .
+
 .PHONY: run
-run: build
-	@mkdir -p /tmp/epocha-dev
+run: build	@mkdir -p /tmp/epocha-dev
 	EPOCHA_MASTER_KEY=$$(head -c32 /dev/urandom | base64) \
 	EPOCHA_PEPPER=$$(head -c32 /dev/urandom | base64) \
 	$(BIN) --db /tmp/epocha-dev/epocha.db --listen :8080
@@ -104,7 +157,9 @@ secret-scan:
 	go test -count=1 -v -run 'TestTextImagePrivateFieldsNeverLeave|TestTextImageAssetHasNoTextChunks' ./internal/generator/
 	go test -count=1 -v -run 'TestSecretNeverReachesBrowser|TestVerifyTargetIsNotBrowserControlled' ./cmd/preview/
 	go test -count=1 -v -run 'TestSecretNeverReachesBrowser|TestClientCannotChooseVerifyTarget|TestPostWritesOnlyWhenVerifySucceeds' ./cmd/exampleapp/
-	@echo "按值扫描通过：哨兵 secret、3A/3B 的私有 verifier 与图片资产都不出现在日志、错误响应、启动输出与管理面响应中"
+	go test -count=1 -v -run 'TestBackupVerifyRestoreThroughCLI|TestAdminSubcommandIsLoopbackOnly|TestMissingKeyMaterialRefusesWithExit1|TestKeyFileEntryIsHonoredByOps' ./cmd/ops/
+	go test -count=1 -v -run 'TestFlowAgainstStubRecordsAllThreeStages' ./cmd/loadtest/
+	@echo "按值扫描通过：哨兵 secret、3A/3B 的私有 verifier 与图片资产、5A 的运维输出与负载工具都不出现在日志、错误响应、启动输出与管理面响应中"
 
 .PHONY: stage1-check
 stage1-check:
@@ -125,6 +180,14 @@ stage4a-check:
 # 回归与浏览器套件各只跑一遍，不把同一套 -race 再跑第二遍。
 stage4b-check:
 	@bash docs/scripts/stage4b.sh
+
+.PHONY: stage5a-check
+# 5A 的门禁**不**嵌套其它总门禁：脚本内部跑一次 stage3b-check 承担回归，其余逐项是
+# 镜像/密钥/备份恢复/边界/资源/反代的真实演练。
+# 退出码：0=全部 PASS；1=有 FAIL；3=无失败但存在 BLOCKED/NOT_RUN（部署验收未通过）。
+# `make` 会把 1 与 3 都折叠成 2 —— 要机器可读就直接跑脚本并读最后的 RESULT 行。
+stage5a-check:
+	@bash docs/scripts/stage5a.sh
 
 .PHONY: widget-checks
 widget-checks:

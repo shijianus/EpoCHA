@@ -101,6 +101,8 @@ var (
 type DB struct {
 	h      *sql.DB
 	pepper []byte
+	// path 是打开时使用的数据库文件路径，只用于就绪探针的写可用性检查（deploy.go writeProbe）。
+	path string
 }
 
 // Challenge 是一次 challenge 的权威记录：PoW 参数以此行为准，不接受客户端自报。
@@ -155,7 +157,7 @@ func Open(ctx context.Context, path string, pepper []byte) (*DB, error) {
 		_ = h.Close()
 		return nil, fmt.Errorf("store: 连接: %w", err)
 	}
-	d := &DB{h: h, pepper: pepper}
+	d := &DB{h: h, pepper: pepper, path: path}
 	if err := d.migrate(ctx); err != nil {
 		_ = h.Close()
 		return nil, err

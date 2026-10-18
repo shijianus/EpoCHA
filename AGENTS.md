@@ -8,7 +8,7 @@
 `/siteverify` 采用 reCAPTCHA **风格**的契约（`secret`/`response`/`remoteip` → `success`/`challenge_ts`/`hostname`/`error-codes`），
 **不声称无条件兼容所有现成 SDK**（v2/v3 的额外参数未实现）。
 
-## 当前实现进度（阶段 1、2、3A、3B、4A 已完成，2026-10-18）
+## 当前实现进度（阶段 1、2、3A、3B、4A、4B、5A 已完成，2026-10-18）
 已实现：`config`、`store`（三条增量迁移 0001/0002/0003 + 原子条件消费 + 题池绑定）、`pow`、`token`
 （`chal`/`resp`/`qver` 三把域分隔密钥）、`risk`（有界令牌桶 + 代理信任裁决）、`api`（`/api/challenge`、`/api/redeem`、
 `/siteverify`、`/healthz`）、`admin`（站点与凭据生命周期、来源策略、模式/生成器配置、`/api/admin/generators` 与
@@ -51,16 +51,30 @@ CSP 四档 blob/worker-file/no-worker/none；默认 loopback 强制）、
 **4B 的 OCR 真实数字**（tesseract 5.3.4 + eng 4.1.0，固定最强配置，holdout 各 100 张，分母含工具失败与畸形）：
 低档 **96%** / 中档 **31%** / 高档 **3%** 整串严格通过率 ⇒ **低档挡不住通用 OCR**，
 生产默认不得落在低档；高档好看也**不**改变 `production_ready:false`（DESIGN §8.4、红线 14）。
+**5A 新增**：`internal/config/keyfile.go`（每一把密钥材料都有 `EPOCHA_<NAME>_FILE` 入口；env 与 `_FILE`
+同时非空 ⇒ **拒绝启动，不做优先级**；文件校验落在 `os.Stat` 解析后的目标上，group/other 位必须为空、
+≤4096B 不截断；内容与路径不进错误文案）、`GET /readyz`（就绪 = 连接 + schema 版本 + **写路径可用**；
+不领题不消费 token；2s 边界且沿用请求 ctx；只回一个词）、`internal/store/deploy.go`
+（`Backup` 用 `VACUUM INTO` 出一致性快照 + manifest；`VerifyBackup`；`Restore` **保守恢复**；`Ready`）、
+`cmd/ops`（backup/verify/restore/check/admin/admin-recover，随镜像交付）、`cmd/loadtest`（开发期**有界**负载工具）、
+`deploy/docker/{Dockerfile,compose.yml,.env.example,nginx.conf.example}` + 根 `.dockerignore`、
+`docs/{DEPLOYMENT,BACKUP-RESTORE,STAGE5A}.md`、`make stage5a-check`。
+**5A 的两条纪律**：(1) 备份**不是** `cp` 主 `.db`——WAL 模式下那会得到"存在但落后"的库（理由与能力测试见 ADR-014）；
+(2) 旧快照**不**保持备份之后的消费/撤销/停用状态 ⇒ 恢复必须把快照里所有"还能被接受的东西"一次性失效
+（challenges 终态、responses/pool/site_secrets/admin_keys 清空、sites 全禁用、装入新的管理凭据），
+并用**新的** master 启动且**不设** `EPOCHA_MASTER_KEY_PREVIOUS`。容器化与恢复演练验收通过**不等于**题型抗 AI/抗 OCR 通过。
+
 **尚未实现**：题型权重与多生成器选择、风险打分、自动淘汰、非视觉等价通道（音频等）、
 widget 的 `fallback_base` 与多站点配置面、阶段 4 的人工验收项（"题型人工各过 5 次"、辅助技术实测）、
 真机移动端验证（本轮窄屏是 headless 真实视口，不是真设备）、
-后台页面/容器/边缘（阶段 5 及之后）。
+后台页面、统计与分级淘汰（阶段 5 其余部分）、CF 边缘（阶段 5 之后评估）。单节点容器部署包已在 5A 交付。
 **阶段 3A 只有"文本基线题型 + 题池工程骨架"两层（PoW + 一次性题目）**：第三层风险打分不存在，
 且 `arithmetic-baseline-v1` 的答案**可由公开 payload 程序化推出**——不得在响应或文档里把它说成抗 AI/抗 OCR 题型，
 也不得用"随机实例多"论证安全性（DESIGN §8.4、ADR-011、红线 14）。
-阶段边界与验收：`make stage1-check` / `stage2-check` / `stage3a-check` / `stage3b-check` / `stage4a-check` / `stage4b-check`；
-标签只打 `stage-3a-done`、`stage-3b-done`、`stage-4a-done`、`stage-4b-done`，**不打 `stage-3-done`、`stage-4-done`**
-（第三层风险打分不存在；阶段 4 的人工验收项与非视觉通道仍未做）。
+阶段边界与验收：`make stage1-check` / `stage2-check` / `stage3a-check` / `stage3b-check` / `stage4a-check` / `stage4b-check` / `stage5a-check`；
+标签只打 `stage-3a-done`、`stage-3b-done`、`stage-4a-done`、`stage-4b-done`、`stage-5a-done`，**不打 `stage-3-done`、`stage-4-done`、`stage-5-done`**
+（第三层风险打分不存在；阶段 4 的人工验收项与非视觉通道仍未做；阶段 5 的后台页面/统计/淘汰不存在）。
+`make stage5a-check` 的退出码是**三态**：0=全 PASS、1=有 FAIL、3=无失败但有 BLOCKED/NOT_RUN（部署与恢复演练没跑完就不是验收通过，"文件都写好了"不算）。
 
 ## 硬性技术约束
 - **只用 Go，纯 Go 依赖，禁止 cgo**。禁止引入 JVM、MongoDB、Postgres、Redis、外部二进制（ImageMagick/fontconfig/headless chrome）。
@@ -120,11 +134,12 @@ widget 的 `fallback_base` 与多站点配置面、阶段 4 的人工验收项�
 15. 不得仅凭通过率判定题型被机器破解并自动下线；淘汰必须分级（候选告警 + 人工确认，多信号同时成立才自动降权，ADR-006）。
 
 ## 目录约定
-`cmd/{server,devclient,devseed,preview,evalgen,evalocr,exampleapp}`、
+`cmd/{server,devclient,devseed,preview,evalgen,evalocr,exampleapp,blindtest,ops,loadtest}`、
 `internal/{api,pow,token,store,pool,generator,risk,admin,config,version,eval}`、
 `internal/store/migrations`、`web/{widget,preview}`、`web/widget/`（生产 widget 与 worker + 内嵌 handler）、
-`deploy/{docker,cloudflare}`、`docs/{,scripts,scripts/browser}`。
-`internal/eval` 与 `cmd/{preview,devseed,evalgen,evalocr,exampleapp}` 是**开发期**代码：`cmd/server` 不得链接它们
+`deploy/docker`（Dockerfile + compose + `.env.example` + `nginx.conf.example`）、`deploy/cloudflare`、`docs/{,scripts,scripts/browser}`。
+`internal/eval` 与 `cmd/{preview,devseed,evalgen,evalocr,exampleapp,loadtest}` 是**开发期**代码：`cmd/server` 不得链接它们
+（`cmd/ops` **不是**开发期代码：它随生产镜像交付，但只提供 backup/verify/restore/check/admin/admin-recover 六个动作，不是管理平台）
 （`stage3b.sh`、`stage4a.sh` 各用 `go list -deps` 钉住，4A 还要求它**必须**链接 `web/widget`），
 生产 HTTP API 不得有任何答案出口。`docs/scripts/browser/` 是 Node ESM 测试代码：只用 Node 内置能力
 （`node:test`、全局 `WebSocket`、`vm`）与本机 Firefox 的 BiDi 端点，**不得引入 npm 包**。

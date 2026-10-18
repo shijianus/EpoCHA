@@ -53,7 +53,7 @@ go build -trimpath -o "$BIN/evalocr" ./cmd/evalocr
 go build -trimpath -o "$BIN/blindtest" ./cmd/blindtest
 go build -trimpath -o "$BIN/devseed" ./cmd/devseed
 DEPS="$(go list -deps ./cmd/server)"
-for banned in internal/eval cmd/preview cmd/devseed cmd/evalgen cmd/evalocr cmd/exampleapp cmd/blindtest web/preview docs/scripts; do
+for banned in internal/eval cmd/preview cmd/devseed cmd/evalgen cmd/evalocr cmd/exampleapp cmd/blindtest cmd/loadtest web/preview docs/scripts; do
   if printf '%s\n' "$DEPS" | grep -q "EpoCHA/$banned"; then
     fail "服务二进制链接了开发期包 $banned（生产路径不得出现答案出口或演示后门）"
   fi

@@ -936,14 +936,20 @@ func TestRateLimitPerIPWithRetryAfter(t *testing.T) {
 
 func TestRateLimitPerSite(t *testing.T) {
 	h := newHarness(t, func(c *config.Config) { c.RateSiteRPM = 2 })
-	for range 3 {
+	// 预热里的每一次请求都必须落在 {200, 429} 之内。
+	// 老写法把其它状态码也当成"没触发限流"继续循环，于是一次瞬时的 500/503（库忙、池空）
+	// 会让"第 4 次应该 429"变成"第 4 次其实第一次都没计数"——实测在高负载下会以
+	// "站点维度限流未生效：200" 的形态出现，把原因指错到限流器上。这里直接判死因。
+	for i := range 3 {
 		if r := h.postJSON("/api/challenge", map[string]string{"site_key": "sk-alpha"}); r.status == http.StatusTooManyRequests {
 			break
+		} else if r.status != http.StatusOK {
+			t.Fatalf("预热第 %d 次请求既不是 200 也不是 429：%d %s（限流断言的前提不成立）", i+1, r.status, r.body)
 		}
 	}
 	blocked := h.postJSON("/api/challenge", map[string]string{"site_key": "sk-alpha"})
 	if blocked.status != http.StatusTooManyRequests {
-		t.Fatalf("站点维度限流未生效：%d", blocked.status)
+		t.Fatalf("站点维度限流未生效：%d %s", blocked.status, blocked.body)
 	}
 	other := h.postJSON("/api/challenge", map[string]string{"site_key": "sk-bravo"})
 	if other.status != http.StatusOK {

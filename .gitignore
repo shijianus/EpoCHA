@@ -23,3 +23,12 @@ eval-out/
 # 预览/验收脚本的临时输出
 /tmp-*/
 *.png.out
+
+# 阶段 5A 的本地部署工作区：数据、密钥、备份与预编译产物一律不入库。
+# DESIGN §6 的硬约束在这里是同一条：pepper 与 DB 不得同处一份可撤销历史（git）里。
+deploy/docker/.prebuilt/
+deploy/docker/data/
+deploy/docker/keys/
+deploy/docker/backups/
+deploy/docker/.env
+deploy/docker/*.env.local

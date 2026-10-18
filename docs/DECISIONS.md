@@ -503,3 +503,114 @@ CDN 与图片缓存（一次性资产没有可缓存语义）、为省带宽做�
 - 新增生产路由 `/widget/v1.js`、`/widget/v1.worker.js`（只读、白名单资源名、`nosniff`、可缓存、无 CORS 头）。
 - `web/widget/` 从"目录约定里的占位"变成实际交付；`cmd/exampleapp` 与 `docs/scripts/browser/` 加入目录约定（开发期）。
 - 验收口径变化写进 AGENTS.md：三态（PASS/BLOCKED/NOT_RUN）、退出码分层、门禁不嵌套总门禁。
+
+---
+
+## ADR-014 阶段 5A：备份一致性方案、保守恢复的语义、密钥文件入口与容器边界
+
+### 背景
+
+DESIGN §12 原先把备份写成"`sqlite3 .backup` 每日 + WAL checkpoint"，§6 把主密钥入口写成
+"`EPOCHA_MASTER_KEY`（32B，env 或 `--master-key-file`）"。两条都从未实现，而阶段 5A 要交付
+能在 1 vCPU / 1GB 单机上真的跑起来的部署包，这两处必须落到可执行的形式。同时"部署验收"很容易
+被写成"文件都齐了"，而真正的验收问题是：**这份快照是不是完整的、这份恢复会不会把撤销过的东西放回来、
+这台机器在限额内的形状是什么**。
+
+### 决策
+
+1. **备份主方案是 `VACUUM INTO`，不是 `cp`，也不是 `sqlite3` CLI。**
+   库跑在 WAL 模式（DSN 钉住），最新那段状态在 `-wal` 里；DESIGN §13 自己就记着实测形状
+   "写入进行中主文件 4,096B + WAL 2,855,192B"。**只 `cp` 主文件会得到一个存在但落后的库**，
+   而且看起来是成功的。`sqlite3` 是外部二进制，与"服务与运维能力都用纯 Go"冲突（AGENTS 硬性约束），
+   所以本条**更正 DESIGN §12** 而不是照做。
+   SQLite backup API（在线）本轮不选：驱动层是否暴露该能力没做逐调用验证，而本轮要的是**可证明**的方案。
+   `VACUUM INTO` 的四条依赖事实由 `internal/store/capability_test.go` 钉住 `modernc.org/sqlite v1.46.1`
+   的真实行为（只读连接可执行、目标名走绑定参数、未 checkpoint 的 WAL 内容进快照、失败不留半成品）。
+   任何一条哪天不再成立，方案就必须换成"停服冷备份"，而不是继续假装 `cp` 安全——
+   这与 AGENTS 里"能力边界必须由能力测试给出"是同一条教训的第二次应用。
+
+2. **恢复是"保守恢复"：产物是新文件，且快照里所有还能被接受的东西一次性失效。**
+   旧快照**不**保持备份之后发生的消费、撤销与停用记录——这是快照的定义，不是可以小心绕过的风险。
+   因此一条事务里做：`challenges` 全部置 `invalid`、`responses` 全删、`pool` 全删、`sites` 全部 `enabled=0`、
+   `site_secrets` 与 `admin_keys` 全删，然后装入**本次操作指定的新管理凭据**并写一条审计。
+   明确**拒绝**"温和恢复"（保留旧凭据只标记来源）：那等价于"被撤销的凭据复活"，
+   而本服务的安全语义（ADR-004 的一次性消费、§6 的凭据生命周期）不允许这种回退。
+   连带后果如实写进文档而不是淡化：**恢复 = 全部接入方的 `secret_key` 需要重新签发**。
+   主密钥不在库里，所以恢复后的启动要求是"用新的 master，且不设 `EPOCHA_MASTER_KEY_PREVIOUS`"——
+   previous 那把签名回退正是"旧 token 重新可用"的唯一通道。
+   pepper 与备份的配对用单向指纹（域分隔 `epocha/v1|pepper-fp|`）在恢复前检查；
+   不配对默认拒绝，只有显式 `--rotate-pepper` 才继续（拿错密钥文件与有意轮换在两可之间，靠猜的失败面是摘要与签名）。
+
+3. **密钥入口增加 `*_FILE`，且 env 与 `_FILE` 同时非空即拒绝启动，不做优先级。**
+   存在的理由是容器里 env 的泄露面：`ps`、`docker inspect`、编排平台 KV、CI 日志都会原样带出环境变量。
+   "文件优先"或"env 优先"都会制造"运维改的那一份不生效"这类极难定位的故障；
+   拒绝启动比静默选一份安全，因为配错的失败面是签名与摘要。
+   文件校验落在 **`os.Stat` 解析后的目标**上（secret 挂载本身就是指向 `..data/<uuid>` 的符号链接，
+   拒绝符号链接等于否掉这个入口的主要用法）：目标必须是普通文件、group/other 权限位必须为空、
+   非空且 ≤4096B（**达到上限即失败，不截断**）。错误文案只给入口变量名与失败类别——
+   内容本身就是密钥，路径会原样出现在启动日志里，两者都不进文案。
+
+4. **`/readyz` 与 `/healthz` 分列，且就绪判据包含"写路径可用"。**
+   "每次验证都失败"的实例完全可能同时是活着的（WAL 库读得动但目录只读、磁盘满、迁移没跑完）。
+   写可用性用两个零副作用的文件级检查表达（主文件可 `O_WRONLY` 打开 + 数据目录可 `CreateTemp`），
+   **不用** `BEGIN IMMEDIATE`：连接池上限是 1（`SetMaxOpenConns(1)`），探针占住那条连接会把正常流量排在后面——
+   探针不该自己成为故障源。题池水位低**不是**未就绪（那是容量信号，业务侧本来就是 503 + 不降级），
+   把它当就绪判据会让编排在整个补池期间反复重启服务。
+   响应只回 `ready`/`unavailable` 一词；原因只进日志的类别字段（红线 8）。
+
+5. **管理面只保留一条受控路径：容器内 `epocha-ops admin`，目标必须 loopback。**
+   应用既有的约束是"管理监听器绑 loopback、公共监听器没有管理路由"，本轮**没有**为了部署方便放宽它
+   （不发布 8081、不做 SSH 隧道、不开任何未鉴权的恢复接口）。
+   `ops admin` 自己钉三条：目标必须 loopback、路径必须 `/api/admin/*`、方法白名单。
+   管理凭据是 Bearer 明文而管理监听器是明文 HTTP，放宽 loopback 约束需要的是 TLS + 明确的通道设计。
+   容器内 loopback 与宿主 loopback 不互通这件事在 `DEPLOYMENT.md` §5 单独写一节——
+   它是本轮最容易读错的一条。
+
+   **演练撞出来的真实缺口**（因此多了一条命令，而不是多一个接口）：撤销掉最后一把管理凭据之后，
+   `BootstrapAdminKey` 的"只在库里没有任何记录时登记"这个前提已经不再成立，换 `EPOCHA_ADMIN_KEY_FILE`
+   完全不生效，而镜像里没有 `sqlite3` 可以手工改库 ⇒ 管理面永久锁死。第一轮演练正是在这里把自己关在门外。
+   唯一受控出口是 `epocha-ops admin-recover`：**必须先停服**——命令自己探活，探到任何 HTTP 响应（含 401）
+   就拒绝执行，因为"服务还在写账本时离线改 admin_keys"就是两份真相。它一条事务里做完
+   撤销全部有效管理凭据 + 登记新凭据 + 写一条 `admin.recover_local` 审计；新凭据只写进 `--key-file`
+   （`O_EXCL` + 0600，已存在即拒绝覆盖），stdout 只给 `key_id`。
+   仍然**不做**未鉴权的恢复 HTTP 接口，也**不做**通用管理平台。
+   运维纪律由它反推出来并写进 `DEPLOYMENT.md` §5：撤销管理凭据之前，先新增一把并验证可用。
+
+6. **运行时镜像是 `FROM scratch` + 两把二进制，且构建期必须断言无 `PT_INTERP`。**
+   交付面里"有 shell、有包管理器"不是运维能力，而是可执行任意命令的攻击面；没有 shell 就意味着
+   `HEALTHCHECK` 不能用 `curl`，于是镜像里带一个只会打 `/readyz|/healthz` 的探针命令。
+   **实测教训**：第一轮 `compose up` 直接失败，报 `exec /usr/local/bin/epocha: no such file or directory`——
+   文件在镜像里，但宿主 `CGO_ENABLED=1`（有 gcc）产出的是**动态链接**二进制，scratch 里没有 `ld.so`。
+   现在 `make docker-image-local` 强制 `CGO_ENABLED=0` 并用 `readelf` 断言无 PT_INTERP，
+   把这类缺陷挡在构建期而不是等健康检查超时。
+   镜像构建保留两条路径（容器内编译的规范配方 / `--build-context` 替换 toolchain 的装配路径），
+   二者**运行时层完全相同**，由 `docker save` 的文件清单核对；这不是"两套部署方案"，
+   而是同一份 Dockerfile 在构建机磁盘或 module proxy 不可用时的降级输入源。
+
+7. **`cmd/loadtest` 的表述边界。** 它代算 PoW，只是为了把服务端三段 HTTP 的时延单独量出来；
+   测的是**服务端吞吐形状**，不能用来推断访问者的解题体验（PoW 在浏览器里算）。
+   并发与请求数都有硬上限（16 / 5000）：1GB 机器上无界压测会先把被测量对象打死，数据随之失真。
+   它是开发期代码，`cmd/server` 不得链接（依赖隔离检查已把它加进禁链清单）。
+
+### 未做（以及为什么）
+
+- **在线热备份**：本轮只有"一致性快照 + 备份窗口内不做安全动作"这一条纪律。
+  在线备份要处理的状态更多，而可证明性更差。
+- **自动保留轮转**：工具不删任何历史文件。自动删除的代码分不清"我这轮生成的旧文件"与
+  "别人放在这个目录里的东西"，误删的失败面不可逆。
+- **恢复后的自动启用/批量启用**：逐个确认是流程的一部分，写成命令就变成"默认就全开"。
+- **跨 schema 版本的恢复兼容**（旧快照在新程序上）与**多架构镜像**：都没有验证环境，
+  写进 `BACKUP-RESTORE.md` §7 与 `DEPLOYMENT.md` §3 作为阻止安全开放的限制，而不是脚注。
+- **管理后台页面、风险打分、自动淘汰、非视觉通道**：不属于本轮（阶段 5 的其余部分）。
+
+### 影响
+
+- 新增 `internal/store/deploy.go`（`Backup`/`VerifyBackup`/`Restore`/`Ready`/`PepperFingerprint`）、
+  `internal/config/keyfile.go`、`GET /readyz`、`cmd/ops`、`cmd/loadtest`、
+  `deploy/docker/{Dockerfile,compose.yml,.env.example,nginx.conf.example}`、根 `.dockerignore`、
+  `docs/{DEPLOYMENT,BACKUP-RESTORE,STAGE5A}.md`、`make stage5a-check`。
+- `store.DB` 多带一个 `path` 字段（只服务于写路径探测），`Config` 多带四个密钥**来源**标注（`env`/`file`/`none`）。
+- DESIGN §6（密钥入口与 previous 密钥的恢复禁令）、§10.1（`/readyz`）、§12（备份方案与容器形状）、
+  §15（`cmd/ops`、`cmd/loadtest`、`deploy/docker` 文件清单）、§17（阶段 5A 边界与验收）同步更正。
+- 门禁退出码新增一层：`stage5a.sh` 用 **0=PASS / 1=FAIL / 3=BLOCKED**——
+  部署与恢复演练没跑完时**不得**把"文件已编写"包装成"部署验收通过"。

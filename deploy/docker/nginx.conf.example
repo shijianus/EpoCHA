@@ -1,0 +1,153 @@
+# epocha 单节点反代模板（阶段 5A，主示例只用 Nginx；Caddy 的形状等价但不在这里并列维护）。
+#
+# 用法：复制到 /etc/nginx/conf.d/epocha.conf，改三处——server_name、证书路径、
+# 以及（仅在确有前置 CDN 时）real_ip 段。
+#
+# 这份模板承担的是**边界**，不是便利：
+#   - 只回源 127.0.0.1:8080（compose 里唯一被发布的端口）。管理面 8081 不在这里出现，
+#     而且 `location ^~ /api/admin/` 显式 404 —— 即便有人误把 8081 发布出去，这条也不会把管理路由转出去。
+#   - 不缓存三个动态端点（一次性的 challenge/redeem/siteverify 被缓存等于把一次性语义变成可重放）。
+#   - widget 静态资源沿用**后端自己给的** Cache-Control（web/widget/widget.go: `public, max-age=3600`）。
+#     这里不覆盖成 immutable：同一 URL 的内容在小版本里会变，immutable 会让修复发不出去。
+#   - 访问日志只记 `$uri`，不记 query、不记体。token/secret 在体里，但接入方手测时常把它们放进 query；
+#     少记一层比"配一个正则去掩码"更难写错。
+#   - X-Forwarded-For 由本模板**覆写**为真实对端地址，客户端自写的 XFF 直接丢弃。
+#   - CF-Connecting-IP 默认**不转发**；只有显式启用 Cloudflare 段才打开那一段。
+
+# --- 上游 ---
+upstream epocha_backend {
+    server 127.0.0.1:8080;
+    # 单节点、短连接为主的验证请求：8 条常驻连接足够，且避免每次验证都重建 TCP。
+    keepalive 8;
+    keepalive_timeout 20s;
+}
+
+# --- 访问日志：只记路径，不记 query/体/头 ---
+log_format epocha_access '$remote_addr - [$time_local] "$request_method" $uri '
+                         '$status $body_bytes_sent rt=$request_time '
+                         '"$http_user_agent"';
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name captcha.example.com;
+
+    # 80 只做跳转。TLS 证书签发与公网 DNS 不在阶段 5A 范围内（docs/DEPLOYMENT.md §7 明确标注）。
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name captcha.example.com;
+
+    ssl_certificate     /etc/nginx/ssl/fullchain.pem;
+    ssl_certificate_key /etc/nginx/ssl/privkey.pem;
+    # 现代配置即可：这台机器只服务 widget 与业务后端，不需要兼容老旧 TLS 栈。
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:epocha_TLS:10m;
+    ssl_session_timeout 1h;
+
+    access_log /var/log/nginx/epocha.access.log epocha_access;
+    error_log  /var/log/nginx/epocha.error.log warn;
+
+    # --- 请求体与超时（红线 6：所有输入有上限）---
+    # 8k：/api/redeem 的体 = token(≤4096B) + 答案(≤64B)，/siteverify 的体 = secret(68B) + response(≤4096B)。
+    # 与 DESIGN §12 一致；超限由 nginx 直接 413，不打到服务。
+    client_max_body_size 8k;
+    client_body_timeout  10s;
+    client_header_timeout 10s;
+    send_timeout          10s;
+    keepalive_timeout     30s;
+    # 大请求体先读完再转发，避免半截体进入服务的事务路径。
+    client_body_buffer_size 8k;
+
+    # --- 安全头 ---
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer-when-downgrade" always;
+    # 注意：不要在这里加全局 CSP。widget 由**业务页面**引入，CSP 属于业务页面；
+    # 而服务本身不提供 HTML 页面，给 API 响应挂 CSP 只会掩盖"谁该负责 CSP"这件事。
+
+    # --- 管理面：显式不转发 ---
+    # 公共监听器上根本没有 /api/admin/*（服务侧是 404），这一条是纵深防御：
+    # 万一有人把 8081 发布到宿主、或改了上游指向，管理路由也不会经公网到达。
+    location ^~ /api/admin/ {
+        return 404;
+    }
+
+    # --- 动态端点：绝不缓存 ---
+    location ~ ^/(api/challenge|api/redeem|siteverify|healthz|readyz)$ {
+        proxy_pass http://epocha_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        # 覆写而不是追加：客户端自写的 XFF 一律丢弃，服务端只需要"直连本代理的那个地址"。
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
+        # Cloudflare 专用头默认不转发（见文件顶部的说明与下方 CF 段）。
+        proxy_set_header CF-Connecting-IP "";
+        # 站点/来源判定与 Origin 相关：不得改写 Origin，也不得把 Authorization 带进日志。
+        # 未配置 proxy_cache ⇒ 本 location 无任何缓存语义。这里再显式关一次，
+        # 是为了让"有人全局打开了 proxy_cache"变成一次可见的配置冲突，而不是静默重放。
+        proxy_no_cache 1;
+        proxy_cache_bypass 1;
+        # nginx 的 add_header 继承规则是"本块只要出现任何 add_header，就不再继承上层的"。
+        # 所以这里把服务端安全头**重列一遍**，而不是只加 Cache-Control ——
+        # 否则 nosniff 会在这个 location 静默消失（典型的"配置看着对、响应却少了头"）。
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "no-referrer-when-downgrade" always;
+        add_header Cache-Control "no-store" always;
+
+        proxy_connect_timeout 2s;
+        proxy_send_timeout    10s;
+        proxy_read_timeout    10s;
+    }
+
+    # --- widget 静态脚本：按后端语义缓存 ---
+    location = /widget/v1.js {
+        proxy_pass http://epocha_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        # 后端的 Cache-Control（public, max-age=3600）原样透传：不在这里 proxy_hide_header，
+        # 也不在这里 add_header 覆盖。
+        proxy_connect_timeout 2s;
+        proxy_read_timeout    10s;
+    }
+
+    location = /widget/v1.worker.js {
+        proxy_pass http://epocha_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_connect_timeout 2s;
+        proxy_read_timeout    10s;
+    }
+
+    # 其余路径（包括站点自己的管理页、调试端点）一律不透传：本服务只有上面这些路由。
+    location / {
+        return 404;
+    }
+}
+
+# --- Cloudflare 专用代理信任：默认关闭，需要时整段启用 ---
+# 启用的前提（DESIGN §12、红线 9），三条都要同时成立，否则这一段应该保持注释状态：
+#   1. 源站防火墙只放行 Cloudflare 的 IP 段直连 443；
+#   2. 服务端 EPOCHA_TRUST_PROXY=true 且 EPOCHA_TRUSTED_PROXIES 填**容器实际看到的**反代网段
+#      （compose 里发布的端口经 bridge 进入容器，源地址是该网络的网关，不是 127.0.0.1；
+#       docs/DEPLOYMENT.md §6 给了把这一段测出来的方法，不要凭印象写）；
+#   3. 下面的 real_ip 段与 CF 官方公布的 IP 段一致，并定期复核（这些段会变）。
+#
+# 启用方式：把下面三行放进 443 server 块内，并把动态端点那处的
+# `proxy_set_header CF-Connecting-IP "";` 改成 `proxy_set_header CF-Connecting-IP $remote_addr;`
+# （real_ip 生效后 `$remote_addr` 就是终端用户地址，`$realip_remote_addr` 才是 CF 边缘地址——别用后者）。
+#
+#   set_real_ip_from 173.245.48.0/20;      # 以 https://www.cloudflare.com/ips/ 当日列表为准
+#   real_ip_header   CF-Connecting-IP;
+#   real_ip_recursive on;

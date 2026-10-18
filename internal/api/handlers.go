@@ -639,6 +639,27 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// handleReadyz 回答"现在能不能接流量"，判据是存储层的一次有界自检（store.Ready）。
+//
+// 与 /healthz 的分工是刻意的：/healthz 只证明进程存在，而"每次验证都失败"的实例
+// 也完全可能同时是活着的（WAL 库读得动但目录只读、磁盘满、迁移没跑完）。
+// 容器编排需要后者才能不把故障实例当成健康。
+//
+// 三条边界（阶段 5A 要求）：
+//   - **不分配题目、不消费 token**：探针本身不得改变任何安全关键状态（有测试对账行数）；
+//   - **有界**：store.Ready 自带 2s 上限，且沿用请求 ctx，探针慢成故障源就直接判不就绪；
+//   - **不外泄**：只回 status 一词，不写路径、SQL、驱动文本、站点数、题池水位。
+//     题池水位低是容量信号（业务侧本来就会给 503 + 不降级），不是未就绪。
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	if err := s.db.Ready(r.Context()); err != nil {
+		// 与 /api/* 的其它 5xx 一样：日志记类别，响应不记原因（红线 8）。
+		s.log.Warn("未就绪", "err", errKind(err))
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "unavailable"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
 // --- 内部辅助 ---
 
 func (s *Server) reject(w http.ResponseWriter, code string) {
@@ -695,6 +716,8 @@ func errKind(err error) string {
 		return "pool-empty"
 	case errors.Is(err, generator.ErrUnknownGenerator):
 		return "unknown-generator"
+	case errors.Is(err, store.ErrNotReady):
+		return "not-ready"
 	default:
 		return "unspecified"
 	}

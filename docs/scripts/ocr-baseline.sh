@@ -44,7 +44,10 @@ echo "退出码分层：evalocr 二进制=$RC_BIN；go run=$RC_GORUN（stderr: $
 
 case $RC_BIN in
   0) echo "OCR 实测：PASS（通过率与工具版本见上）" ;;
-  3) echo "OCR 实测：BLOCKED —— 本机没有离线 OCR 工具，未获授权安装或下载模型。这不是通过。" ;;
+  3) echo "OCR 实测（**宿主机可执行文件**这一条路径）：BLOCKED —— PATH 里没有离线 OCR。这不是通过，也不等于没测过：" >&2
+     echo "  阶段 4B 起真实基线走隔离容器（tesseract 5.3.4 + eng 4.1.0），数字见 docs/STAGE4B.md §4，" >&2
+     echo "  复现命令：make ocr-container && make ocr-baseline-real（识别阶段 --network none、答案不进容器）。" >&2
+     echo "  本脚本只负责证明'工具缺失时必须报 BLOCKED 而不是报 0%'这条退出码语义。" >&2 ;;
   *) echo "OCR 实测：FAIL —— 工具存在但执行失败（见上面的评分器输出）" ;;
 esac
 exit $RC_BIN

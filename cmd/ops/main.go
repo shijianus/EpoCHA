@@ -410,8 +410,24 @@ func hoistFlags(args []string) []string {
 // sqlite3 之类可以手工改库的东西。没有这条命令，那个局面的唯一出路是打开一个未鉴权的恢复接口，
 // 而那正是本轮明确禁止的形状。
 //
-// 顺序是刻意的：**先**写凭据文件（O_EXCL，权限 0600），**再**改库；改库失败就删掉自己刚写的文件。
+// 顺序是刻意的：**先**写凭据文件（O_EXCL，权限 0600，写完 Sync），**再**改库。
 // 反过来会留下"库已经改完但没人知道新凭据是什么"的状态——那比失败更糟。
+//
+// 收尾清理的规则只有一条依据：**有没有理由相信库里已经（或可能已经）采用这把凭据**。
+// 有 ⇒ 文件是它的唯一副本，任何后续错误（包括句柄关闭失败）都不许删它；
+// 没有（提交之前的失败，或只读核查确认库里没这条）⇒ 才清理本次创建的文件。
+// 把这条写成"err != nil 就删"会在两种形状上出错：提交成功但 Close 失败（删掉生效的凭据），
+// 以及 COMMIT 返回错误而写入其实已落盘（同上）。
+var (
+	// 测试缝：三种收尾形状里有两种在真实 SQLite 上无法按需构造
+	// ——「提交已确认但句柄关闭失败」与「提交返回错误而库里其实已采用」。
+	// 它们的处置方向必须一致（都保留凭据文件），而构造不出来就没法证明代码真的保留了。
+	// 生产路径取真实实现；测试注入假的报告，见 main_test.go 的用例。
+	opsOpenRecoverDB   = store.Open
+	opsRecoverAdminKey = (*store.DB).RecoverAdminKey
+	opsCloseRecoverDB  = (*store.DB).Close
+)
+
 func adminRecover(ctx context.Context, args []string, getenv func(string) string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("admin-recover", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -450,42 +466,72 @@ func adminRecover(ctx context.Context, args []string, getenv func(string) string
 		return fmt.Errorf("生成管理凭据: %w", err)
 	}
 	// O_EXCL：不覆盖已有凭据文件。覆盖一个可能是别处正在用的凭据，是不可逆的动作。
+	// 也正因为"之前不存在"，后面才敢把"删掉它"当成**本次**临时文件的清理。
 	f, err := os.OpenFile(*keyFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("凭据文件不可创建（已存在即为拒绝覆盖）: %s", filepath.Base(*keyFile))
 	}
-	written := false
+	created := true // 这个文件是本次创建的，不是别人留下的
+	fdOpen := true  // 显式 Close 之后置 false，defer 不再重复关（那只会拿到 EBADF）
+	keep := false   // 见下面的定义：一旦为 true，收尾**绝不**删除这个文件
 	defer func() {
-		if !written {
+		if fdOpen {
 			_ = f.Close()
+			fdOpen = false
+		}
+		if created && !keep {
 			_ = os.Remove(*keyFile)
 		}
 	}()
 	if _, err := f.WriteString(key); err != nil {
 		return fmt.Errorf("写凭据文件失败")
 	}
+	// Sync 之后再 Close：文件内容落盘是"这把凭据有副本"的前提。
 	if err := f.Sync(); err != nil {
 		return fmt.Errorf("写凭据文件失败")
 	}
 	if err := f.Close(); err != nil {
+		fdOpen = false
 		return fmt.Errorf("写凭据文件失败")
 	}
 
-	d, err := store.Open(ctx, *dbPath, pepper)
+	d, err := opsOpenRecoverDB(ctx, *dbPath, pepper)
 	if err != nil {
 		return fmt.Errorf("打开数据库: %w", err)
 	}
-	ak, revoked, err := d.RecoverAdminKey(ctx, key, time.Now().UTC())
-	cerr := d.Close()
+	rep, err := opsRecoverAdminKey(d, ctx, key, time.Now().UTC())
+	cerr := opsCloseRecoverDB(d)
+	// `keep` 的依据只有一个：**有没有理由相信库里已经（或可能已经）采用这把凭据**。
+	// 这条必须在检查 cerr 之前设——把"提交已确认"的保留判定放到 cerr 分支之后，
+	// 就会出现"事务成功、句柄关闭失败、唯一凭据副本被删掉"的形状（本轮核实到的真实缺陷）。
+	if rep != nil && rep.KeepCredentialFile() {
+		keep = true
+	}
 	if err != nil {
+		// 保留文件有两种理由，措辞必须分开——它们要求的下一步不同。
+		if rep != nil && (rep.Committed || rep.Adopted) {
+			return fmt.Errorf("恢复事务报错，但数据库已采用这把凭据（key_id=%s）：凭据文件已保留在 %s，"+
+				"不要删除，也先不要重跑（重跑会再撤销一次并换成另一把）。"+
+				"下一步：把它放到 EPOCHA_ADMIN_KEY_FILE 指向的路径（0600、属主=容器 uid）后启动服务，"+
+				"用 `epocha-ops admin GET /api/admin/whoami` 核对 key_id 是不是 %s；核对成功即恢复完成。"+
+				"底层错误: %w", rep.Key.KeyID, filepath.Base(*keyFile), rep.Key.KeyID, err)
+		}
+		if keep {
+			// 连"库里有没有它"都查不到（只读核查本身失败）。未知方向时保留是可逆的，删除不可逆。
+			return fmt.Errorf("恢复失败，且无法确认数据库有没有采用这把凭据（key_id=%s；核查错误: %v）："+
+				"凭据文件已保留在 %s。先别删也别重跑：用它启动服务后跑一次 whoami，"+
+				"确认它不可用再删除该文件并重跑。底层错误: %w",
+				rep.Key.KeyID, rep.VerifyErr, filepath.Base(*keyFile), err)
+		}
 		return err
 	}
 	if cerr != nil {
-		return fmt.Errorf("库已更新但关闭失败（请以 verify 复核后再决定是否重来）: %w", cerr)
+		// 措辞不能含糊：事务**已经提交并且读回确认**，这把凭据有效；这里只是资源释放失败。
+		// 把它说成"失败/回滚/重来"会诱导运维删掉正在用的凭据，或重跑一次换来另一把。
+		fmt.Fprintf(stdout, "警告: 数据库句柄关闭失败（凭据已生效、文件已保留，**不需要**重跑本命令）：%v\n", cerr)
 	}
-	written = true
 	// 只打印 key_id 与文件路径：凭据本身只存在于那个 0600 文件里，不进 stdout/日志。
-	fmt.Fprintf(stdout, "管理访问已恢复 key_id=%s revoked_existing=%d key_file=%s\n", ak.KeyID, revoked, filepath.Base(*keyFile))
+	fmt.Fprintf(stdout, "管理访问已恢复 key_id=%s revoked_existing=%d key_file=%s\n", rep.Key.KeyID, rep.Revoked, filepath.Base(*keyFile))
 	fmt.Fprintln(stdout, "下一步：把这个文件放到 EPOCHA_ADMIN_KEY_FILE 指向的路径（0600、属主=容器 uid），再启动服务。")
 	fmt.Fprintln(stdout, "注意：旧的凭据已全部撤销；恢复期间不要接收业务流量。")
 	return nil

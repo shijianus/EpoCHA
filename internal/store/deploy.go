@@ -697,6 +697,74 @@ func (d *DB) transform(ctx context.Context, adminKey string, now time.Time) erro
 	return nil
 }
 
+// RecoverReport 是一次"恢复管理访问"的**阶段结论**。
+//
+// 为什么不返回 (key, revoked, err) 三个值就够：调用方手上有一把刚写好的凭据文件，
+// 它该删还是该留，取决于**数据库到底采没采用这把凭据**，而不取决于 error 是不是 nil。
+// 用 err 的有无来推断这件事，就是把"提交失败"和"提交结果不确定"当成同一件事——
+// 前者可以安全清理临时凭据，后者清理掉的就是这把凭据的唯一副本。
+type RecoverReport struct {
+	// Key 是本次生成并尝试写入的凭据登记信息。key_id 在生成之前失败时为 nil。
+	Key *AdminKey
+	// Revoked 是本次撤销掉的存量有效凭据数（仅提交成功时有意义）。
+	Revoked int
+	// Committed：事务的 Commit 调用返回了成功。
+	Committed bool
+	// Adopted：库里存在这把**未撤销**的凭据。提交成功时来自读回；提交结果不确定时来自
+	// 另一个只读连接的核查（见 AdminKeyAdopted 的理由说明）。
+	Adopted bool
+	// VerifyErr：那次只读核查自己失败了。非 nil 时 Adopted 的 false 不代表"没采用"，只代表"没查到"。
+	VerifyErr error
+	// Err 是失败原因；提交成功时为 nil。
+	Err error
+}
+
+// KeepCredentialFile 回答调用方唯一关心的问题：这把凭据文件**不能**删。
+//
+// 依据是"有任何理由相信库里已经（或可能已经）采用它"：提交确认了、或只读核查读到了、
+// 或连核查都没做成（未知方向时保留文件是可逆的，删除是不可逆的）。
+func (r *RecoverReport) KeepCredentialFile() bool {
+	if r == nil {
+		return false
+	}
+	return r.Committed || r.Adopted || r.VerifyErr != nil
+}
+
+// AdminKeyAdopted 用**只读连接**确认库里是否存在这把未撤销的管理凭据。
+//
+// 存在的理由不是"我们知道 COMMIT 会在写盘之后才报错"——我没测过 SQLite 的这条路径，
+// 也不打算把一个没验证过的驱动行为写进依据。理由是更弱、也更硬的一件事：
+// **`tx.Commit()` 返回的 error 本身不能证明库里没有这次写入**，所以"提交失败 ⇒ 可以放心删掉凭据文件"
+// 是一个推断，不是一个观测。观测比推断便宜：读一次就行。
+// 凭 error 猜方向的代价不对称——猜错的后果是"库里有一把没人知道的活凭据 + 唯一副本已被销毁"。
+//
+// 为什么必须另开连接而不能复用 *DB：服务/运维句柄是 `SetMaxOpenConns(1)` 的**同一条连接**，
+// 而一个仍未结束的事务在它自己的连接上看得见自己的未提交写入——那会把"没采用"读成"采用了"。
+// 只读连接走 WAL 的已提交快照，才是数据库侧的事实（这条可见性边界有测试钉住）。
+// key_id 不是秘密（它进日志与管理面响应），所以它可以出现在文案里；凭据值本身不行。
+func AdminKeyAdopted(ctx context.Context, dbPath, keyID string) (bool, error) {
+	if keyID == "" {
+		return false, fmt.Errorf("%w: key_id 为空", ErrBadConfig)
+	}
+	if err := checkDSNPath(dbPath); err != nil {
+		return false, err
+	}
+	h, err := sql.Open("sqlite", fmt.Sprintf(readOnlyDSN, dbPath))
+	if err != nil {
+		return false, fmt.Errorf("store: 只读打开: %w", err)
+	}
+	defer func() { _ = h.Close() }()
+	var one int
+	if err := h.QueryRowContext(ctx,
+		`SELECT 1 FROM admin_keys WHERE key_id=? AND revoked_at IS NULL LIMIT 1`, keyID).Scan(&one); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("store: 核查管理凭据: %w", err)
+	}
+	return true, nil
+}
+
 // RecoverAdminKey 撤销库里所有仍然有效的管理凭据，并登记一把新的（同一条事务）。
 //
 // 存在的理由是一条真实的锁死路径：`BootstrapAdminKey` 只在"库里**没有任何** admin_keys 记录"时登记，
@@ -711,54 +779,68 @@ func (d *DB) transform(ctx context.Context, adminKey string, now time.Time) erro
 // （不是端口探测，也不是在本函数里重复取锁——同一进程内两次独立 flock 会互相冲突，
 // 在库层再取一次会直接把成功的恢复变成 ErrLockHeld）。
 // "服务还在跑就改库"造出的是两份真相，不是一个可以事后调和的分歧。
-func (d *DB) RecoverAdminKey(ctx context.Context, key string, now time.Time) (*AdminKey, int, error) {
+//
+// 返回的 report 在**所有** key_id 已生成的失败路径上都非 nil，并带一次只读核查的事实；
+// 只有"还没生成 key_id 就失败"才返回 nil report（那种情况下库里不可能有本次写入）。
+func (d *DB) RecoverAdminKey(ctx context.Context, key string, now time.Time) (*RecoverReport, error) {
 	if len(key) < MinSecretLen {
-		return nil, 0, fmt.Errorf("%w: 管理凭据短于 %d 字符", ErrBadConfig, MinSecretLen)
+		return nil, fmt.Errorf("%w: 管理凭据短于 %d 字符", ErrBadConfig, MinSecretLen)
 	}
 	if d == nil || d.h == nil {
-		return nil, 0, fmt.Errorf("%w: 句柄缺失", ErrBadConfig)
+		return nil, fmt.Errorf("%w: 句柄缺失", ErrBadConfig)
 	}
 	tx, err := d.h.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, 0, fmt.Errorf("store: 恢复事务: %w", err)
+		return nil, fmt.Errorf("store: 恢复事务: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	res, err := tx.ExecContext(ctx, `UPDATE admin_keys SET revoked_at=? WHERE revoked_at IS NULL`, formatTime(now.UTC()))
 	if err != nil {
-		return nil, 0, fmt.Errorf("store: 撤销存量管理凭据: %w", err)
+		return nil, fmt.Errorf("store: 撤销存量管理凭据: %w", err)
 	}
 	revoked64, err := res.RowsAffected()
 	if err != nil {
-		return nil, 0, fmt.Errorf("store: 统计撤销数: %w", err)
+		return nil, fmt.Errorf("store: 统计撤销数: %w", err)
 	}
 	if revoked64 < 0 || revoked64 > maxRecoverRevoked {
-		return nil, 0, fmt.Errorf("%w: 撤销数量异常", ErrConflict)
+		return nil, fmt.Errorf("%w: 撤销数量异常", ErrConflict)
 	}
 
 	keyID, err := NewKeyID()
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
+	// 此后每个失败出口都要带上核查结果：key_id 已经存在，库里可能已经有它的行。
+	attempted := func(reason error, committed bool) *RecoverReport {
+		rep := &RecoverReport{Key: &AdminKey{KeyID: keyID}, Err: reason, Committed: committed}
+		rep.Adopted, rep.VerifyErr = AdminKeyAdopted(ctx, d.path, keyID)
+		return rep
+	}
+
 	label := recoverLabelPrefix + "@" + keyID
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO admin_keys(key_id, label, key_mac, created_at) VALUES(?,?,?,?)`,
 		keyID, label, hex.EncodeToString(d.AdminKeyMac(key)), formatTime(now.UTC())); err != nil {
-		return nil, 0, fmt.Errorf("store: 登记恢复用管理凭据: %w", err)
+		return attempted(fmt.Errorf("store: 登记恢复用管理凭据: %w", err), false), err
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO audit(ts, actor, action, target, success) VALUES(?,?,?,?,1)`,
 		formatTime(now.UTC()), keyID, "admin.recover_local", "admin_keys", 1); err != nil {
-		return nil, 0, fmt.Errorf("store: 恢复审计写入失败")
+		return attempted(fmt.Errorf("store: 恢复审计写入失败"), false), err
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, 0, fmt.Errorf("store: 恢复提交: %w", err)
+		// 提交报错 ⇒ 结论是"不确定"，而 attempted() 的只读核查会把它变成有依据的结论。
+		return attempted(fmt.Errorf("store: 恢复提交: %w", err), false), err
 	}
 	k, err := d.AdminKeyByKey(ctx, keyID)
 	if err != nil {
-		return nil, 0, err
+		// Commit 已成功，只是读不回细节：文件必须保留（Committed 已经为真）。
+		rep := &RecoverReport{Key: &AdminKey{KeyID: keyID}, Committed: true, Adopted: true,
+			Err: fmt.Errorf("store: 恢复后读回管理凭据: %w", err)}
+		return rep, rep.Err
 	}
-	return k, int(revoked64), nil
+	return &RecoverReport{Key: k, Revoked: int(revoked64), Committed: true, Adopted: true}, nil
 }
 
 // --- 小工具 ---

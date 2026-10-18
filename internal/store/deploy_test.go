@@ -505,13 +505,17 @@ func TestRecoverAdminKeyAfterLastRevocation(t *testing.T) {
 	}
 
 	fresh := strings.Repeat("r", 40)
-	got, revoked, err := d.RecoverAdminKey(ctx, fresh, time.Now().UTC())
+	rep, err := d.RecoverAdminKey(ctx, fresh, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("RecoverAdminKey: %v", err)
 	}
-	if revoked != 0 {
-		t.Errorf("revoked = %d，期望 0（旧的那把在这一步之前就已经撤销）", revoked)
+	if rep.Revoked != 0 {
+		t.Errorf("Revoked = %d，期望 0（旧的那把在这一步之前就已经撤销）", rep.Revoked)
 	}
+	if !rep.Committed || !rep.Adopted {
+		t.Errorf("成功恢复的阶段结论不对: Committed=%v Adopted=%v", rep.Committed, rep.Adopted)
+	}
+	got := rep.Key
 	if got.KeyID == "" || !strings.HasPrefix(got.Label, recoverLabelPrefix) {
 		t.Errorf("恢复登记的管理凭据形状不对: %+v", got)
 	}
@@ -549,12 +553,12 @@ func TestRecoverAdminKeyRevokesLiveKeysAndIsRepeatable(t *testing.T) {
 	if _, err := d.AddAdminKey(ctx, "ops-2", strings.Repeat("b", 40)); err != nil {
 		t.Fatalf("AddAdminKey: %v", err)
 	}
-	first, revoked, err := d.RecoverAdminKey(ctx, strings.Repeat("c", 40), time.Now().UTC())
+	first, err := d.RecoverAdminKey(ctx, strings.Repeat("c", 40), time.Now().UTC())
 	if err != nil {
 		t.Fatalf("RecoverAdminKey: %v", err)
 	}
-	if revoked != 2 {
-		t.Errorf("revoked = %d，期望 2（两把有效凭据都要撤销，否则恢复等于留后门）", revoked)
+	if first.Revoked != 2 {
+		t.Errorf("Revoked = %d，期望 2（两把有效凭据都要撤销，否则恢复等于留后门）", first.Revoked)
 	}
 	for _, k := range []string{strings.Repeat("a", 40), strings.Repeat("b", 40)} {
 		if _, err := d.MatchAdminKey(ctx, k, time.Now()); err == nil {
@@ -562,14 +566,14 @@ func TestRecoverAdminKeyRevokesLiveKeysAndIsRepeatable(t *testing.T) {
 		}
 	}
 	// 再做一次：label 必须不冲突（库里是 UNIQUE），且上一次的凭据也要被撤销。
-	second, revoked2, err := d.RecoverAdminKey(ctx, strings.Repeat("d", 40), time.Now().UTC())
+	second, err := d.RecoverAdminKey(ctx, strings.Repeat("d", 40), time.Now().UTC())
 	if err != nil {
 		t.Fatalf("第二次 RecoverAdminKey（label 冲突？）: %v", err)
 	}
-	if revoked2 != 1 {
-		t.Errorf("第二次 revoked = %d，期望 1", revoked2)
+	if second.Revoked != 1 {
+		t.Errorf("第二次 Revoked = %d，期望 1", second.Revoked)
 	}
-	if second.KeyID == first.KeyID {
+	if second.Key.KeyID == first.Key.KeyID {
 		t.Error("两次恢复得到同一个 key_id")
 	}
 	if _, err := d.MatchAdminKey(ctx, strings.Repeat("c", 40), time.Now()); err == nil {
@@ -587,8 +591,17 @@ func TestRecoverAdminKeyRefusesShortKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListAdminKeys: %v", err)
 	}
-	if _, _, err := d.RecoverAdminKey(ctx, "short", time.Now()); err == nil {
+	rep, err := d.RecoverAdminKey(ctx, "short", time.Now())
+	if err == nil {
 		t.Fatal("短凭据必须被拒绝")
+	}
+	// key_id 还没生成就失败了 ⇒ 库里不可能有本次写入 ⇒ 报告必须是 nil，
+	// 调用方据此才敢清理自己写的凭据文件。
+	if rep != nil {
+		t.Errorf("未生成 key_id 的失败却给出了报告: %+v", rep)
+	}
+	if rep != nil && rep.KeepCredentialFile() {
+		t.Error("这种失败路径应当允许清理凭据文件")
 	}
 	after, err := d.ListAdminKeys(ctx)
 	if err != nil {
@@ -596,5 +609,114 @@ func TestRecoverAdminKeyRefusesShortKey(t *testing.T) {
 	}
 	if len(after) != len(before) {
 		t.Errorf("失败的恢复改动了 admin_keys 行数 %d → %d", len(before), len(after))
+	}
+}
+
+// AdminKeyAdopted 是"能不能删掉那把唯一副本凭据文件"的依据，所以它必须回答
+// **数据库侧的事实**，而不是本进程事务里未提交的猜测。
+func TestAdminKeyAdoptedUsesCommittedState(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "adopted.db")
+	d, _ := newDBAt(t, path)
+
+	const pending = "k_pending_uncommitted"
+	tx, err := d.h.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	// 先证明"同连接看得见自己的未提交写入"——这正是不能拿写句柄自查的原因。
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO admin_keys(key_id, label, key_mac, created_at) VALUES(?,?,?,?)`,
+		pending, "pending", strings.Repeat("0", 64), formatTime(time.Now().UTC())); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("插入未提交凭据: %v", err)
+	}
+	var same int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(1) FROM admin_keys WHERE key_id=?`, pending).Scan(&same); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("事务内读回: %v", err)
+	}
+	if same != 1 {
+		_ = tx.Rollback()
+		t.Fatal("前置不成立：事务里看不到自己的写入，这条测试就没意义")
+	}
+	// 只读核查必须是 false：库里**尚未**采用它。真在这里返回 true，
+	// 调用方就会保留一把永远验不过的凭据文件，并把"恢复失败"说成"已生效"。
+	adopted, err := AdminKeyAdopted(ctx, path, pending)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("AdminKeyAdopted: %v", err)
+	}
+	if adopted {
+		_ = tx.Rollback()
+		t.Error("只读核查看见了未提交的行 ⇒ 会把“没采用”报成“已采用”")
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if a, err := AdminKeyAdopted(ctx, path, pending); err != nil || !a {
+		t.Errorf("提交之后应查到: adopted=%v err=%v", a, err)
+	}
+	// "存在"不等于"还能用"：撤销之后必须回到 false。
+	if _, err := d.RevokeAdminKey(ctx, pending, time.Now().UTC()); err != nil {
+		t.Fatalf("RevokeAdminKey: %v", err)
+	}
+	if a, err := AdminKeyAdopted(ctx, path, pending); err != nil || a {
+		t.Errorf("已撤销的凭据仍被报成已采用: adopted=%v err=%v", a, err)
+	}
+	// 查不到（false,nil）与查不了（false,err）是两种结论，不能混：
+	// 前者可以安全清理凭据文件，后者不可以。
+	if a, err := AdminKeyAdopted(ctx, path, "k_never_existed"); err != nil || a {
+		t.Errorf("未知 key_id 应返回 (false,nil): %v %v", a, err)
+	}
+	if _, err := AdminKeyAdopted(ctx, filepath.Join(dir, "missing.db"), "k_x"); err == nil {
+		t.Error("库文件不存在时必须报“核查失败”，而不是“没采用”")
+	}
+}
+
+// 提交之前的失败必须是**核查过**的"未采用"，而不是从 error 非空推出来的。
+func TestRecoverAdminKeyPreCommitFailureIsConfirmedNotAdopted(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "precommit.db")
+	d, _ := newDBAt(t, path)
+	// 制造一个"key_id 已生成、事务里已写入、提交之前才失败"的形状：
+	// 拿掉 audit 表，审计那条 INSERT 就会失败，deferred Rollback 丢弃前面的写入。
+	if _, err := d.h.ExecContext(ctx, `DROP TABLE audit`); err != nil {
+		t.Fatalf("DROP TABLE audit: %v", err)
+	}
+	var before int
+	if err := d.h.QueryRowContext(ctx, `SELECT COUNT(1) FROM admin_keys`).Scan(&before); err != nil {
+		t.Fatalf("计数: %v", err)
+	}
+	rep, err := d.RecoverAdminKey(ctx, strings.Repeat("e", 40), time.Now().UTC())
+	if err == nil {
+		t.Fatal("审计插入应当失败")
+	}
+	if rep == nil {
+		t.Fatal("key_id 已生成，必须给出阶段报告（调用方要靠它决定是否删凭据文件）")
+	}
+	if rep.Committed {
+		t.Error("提交之前就失败，却报成已提交")
+	}
+	if rep.Key == nil || rep.Key.KeyID == "" {
+		t.Errorf("报告缺 key_id: %+v", rep.Key)
+	}
+	if rep.Adopted {
+		t.Error("库里确认没有这把，却报成已采用")
+	}
+	if rep.VerifyErr != nil {
+		t.Errorf("只读核查本身应当成功: %v", rep.VerifyErr)
+	}
+	if rep.KeepCredentialFile() {
+		t.Error("这条路径应当允许清理本次凭据文件（已确认库里没采用）")
+	}
+	var after int
+	if err := d.h.QueryRowContext(ctx, `SELECT COUNT(1) FROM admin_keys`).Scan(&after); err != nil {
+		t.Fatalf("计数(after): %v", err)
+	}
+	if after != before {
+		t.Errorf("失败的恢复改动了 admin_keys: %d → %d（回滚没生效？）", before, after)
 	}
 }

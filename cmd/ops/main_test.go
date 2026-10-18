@@ -1052,3 +1052,191 @@ func stopChild(t *testing.T, c *child) {
 		t.Fatalf("持锁子进程在 SIGTERM 后 10s 内没退出")
 	}
 }
+
+// --- admin-recover 的"提交 / 清理"边界（本轮核实到的真实缺陷所在）---
+//
+// 缺陷形状：保留判定写在"句柄关闭失败"分支**之后**，于是"提交成功 + Close 失败"
+// 会走到清理路径，把库里已经生效、且是唯一副本的凭据文件删掉——恢复动作反过来制造永久锁死。
+// 下面四个用例把四种处置分开钉住。用包级函数变量注入的原因写在 ops/main.go 的注释里：
+// "提交已确认但收尾失败"与"提交报错而库里已采用"在真实 SQLite 上构造不出来，
+// 而它们正是删除/保留的分界点；不注入就只能靠代码读起来像对，那不是测试。
+
+func swapRecoverDeps(t *testing.T, rec func(*store.DB, context.Context, string, time.Time) (*store.RecoverReport, error), closeFn func(*store.DB) error) {
+	t.Helper()
+	oldRec, oldClose := opsRecoverAdminKey, opsCloseRecoverDB
+	opsRecoverAdminKey, opsCloseRecoverDB = rec, closeFn
+	t.Cleanup(func() { opsRecoverAdminKey, opsCloseRecoverDB = oldRec, oldClose })
+}
+
+func readKeyFile(t *testing.T, p string) string {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("读凭据文件: %v", err)
+	}
+	return string(b)
+}
+
+// 1. 正常恢复：文件保留、权限 0600、库里确实采用（用只读核查独立确认），输出不含凭据值。
+func TestAdminRecoverNormalPathKeepsAndAdopts(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "epocha.db")
+	seedDB(t, dbPath, "ak_"+strings.Repeat("a", 64))
+	keyFile := filepath.Join(dir, "new-admin")
+	env := map[string]string{"EPOCHA_PEPPER": testPepperB64}
+	var out, errb bytes.Buffer
+	rc := run(context.Background(), []string{"admin-recover", "--db", dbPath, "--key-file", keyFile},
+		getenvOf(env), &out, &errb)
+	if rc != 0 {
+		t.Fatalf("正常恢复退出码 = %d: %s", rc, errb.String())
+	}
+	secret := readKeyFile(t, keyFile)
+	if fi, err := os.Stat(keyFile); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("凭据文件权限不对: %+v %v", fi, err)
+	}
+	keyID := ""
+	for _, f := range strings.Fields(out.String()) {
+		if strings.HasPrefix(f, "key_id=") {
+			keyID = strings.TrimPrefix(f, "key_id=")
+		}
+	}
+	if keyID == "" {
+		t.Fatalf("输出没给 key_id: %s", out.String())
+	}
+	if strings.Contains(out.String(), secret) || strings.Contains(errb.String(), secret) {
+		t.Error("输出带出了凭据值")
+	}
+	// 独立核查：库里有这把未撤销的凭据（而不是只相信退出码）。
+	adopted, err := store.AdminKeyAdopted(context.Background(), dbPath, keyID)
+	if err != nil || !adopted {
+		t.Errorf("库里应当采用新凭据: adopted=%v err=%v", adopted, err)
+	}
+}
+
+// 2. 提交之前失败（可确认库里没采用）⇒ 清理本次创建的文件，不留下无效凭据。
+func TestAdminRecoverRemovesFileWhenConfirmedNotAdopted(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "epocha.db")
+	seedDB(t, dbPath, "ak_"+strings.Repeat("b", 64))
+	sum := fileSum(t, dbPath)
+	keyFile := filepath.Join(dir, "new-admin")
+	env := map[string]string{"EPOCHA_PEPPER": testPepperB64}
+	swapRecoverDeps(t, func(_ *store.DB, _ context.Context, _ string, _ time.Time) (*store.RecoverReport, error) {
+		return &store.RecoverReport{
+			Key: &store.AdminKey{KeyID: "k_not_adopted"},
+			Err: errors.New("注入: 提交之前的失败"),
+		}, errors.New("注入: 提交之前的失败")
+	}, func(d *store.DB) error { return nil })
+	var out, errb bytes.Buffer
+	rc := run(context.Background(), []string{"admin-recover", "--db", dbPath, "--key-file", keyFile},
+		getenvOf(env), &out, &errb)
+	if rc == 0 {
+		t.Fatal("注入的失败却拿到退出码 0")
+	}
+	if _, err := os.Stat(keyFile); !os.IsNotExist(err) {
+		t.Error("库里确认没采用，本次凭据文件却没被清理（留下的是永远验不过的 secret）")
+	}
+	if got := fileSum(t, dbPath); got != sum {
+		t.Error("这条失败路径改了库")
+	}
+}
+
+// 3. 提交已确认，但句柄关闭失败 ⇒ 文件**必须**保留，且不能把它说成回滚/重来。
+func TestAdminRecoverKeepsFileWhenCloseFailsAfterCommit(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "epocha.db")
+	seedDB(t, dbPath, "ak_"+strings.Repeat("c", 64))
+	keyFile := filepath.Join(dir, "new-admin")
+	env := map[string]string{"EPOCHA_PEPPER": testPepperB64}
+	swapRecoverDeps(t, func(_ *store.DB, _ context.Context, _ string, _ time.Time) (*store.RecoverReport, error) {
+		return &store.RecoverReport{
+			Key: &store.AdminKey{KeyID: "k_committed"}, Revoked: 1,
+			Committed: true, Adopted: true,
+		}, nil
+	}, func(_ *store.DB) error { return errors.New("注入: 句柄关闭失败") })
+	var out, errb bytes.Buffer
+	rc := run(context.Background(), []string{"admin-recover", "--db", dbPath, "--key-file", keyFile},
+		getenvOf(env), &out, &errb)
+	if _, err := os.Stat(keyFile); err != nil {
+		t.Fatalf("提交已确认却删掉了唯一凭据副本（这就是本轮核实到的缺陷）: %v｜输出=%s", err, out.String()+errb.String())
+	}
+	// 措辞核对：不能出现"回滚/重来/复核后再决定"这类会把运维引向删除或重跑的说法。
+	joined := out.String() + errb.String()
+	for _, bad := range []string{"回滚", "再决定是否重来", "请以 verify 复核"} {
+		if strings.Contains(joined, bad) {
+			t.Errorf("输出里出现了误导性措辞 %q: %s", bad, joined)
+		}
+	}
+	if !strings.Contains(joined, "关闭失败") {
+		t.Errorf("关闭失败没有说出来: %s", joined)
+	}
+	if secret := readKeyFile(t, keyFile); strings.Contains(joined, secret) {
+		t.Error("警告文案把凭据值带了出来")
+	}
+	if rc != 0 {
+		t.Errorf("退出码 = %d；凭据已生效时不该报失败（重跑会换掉一把正在生效的凭据）", rc)
+	}
+}
+
+// 4a. 提交报错而只读核查读到"已采用" ⇒ 保留文件，并给出本地核对路径。
+func TestAdminRecoverKeepsFileWhenAdoptedDespiteCommitError(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "epocha.db")
+	seedDB(t, dbPath, "ak_"+strings.Repeat("d", 64))
+	keyFile := filepath.Join(dir, "new-admin")
+	env := map[string]string{"EPOCHA_PEPPER": testPepperB64}
+	swapRecoverDeps(t, func(_ *store.DB, _ context.Context, _ string, _ time.Time) (*store.RecoverReport, error) {
+		e := errors.New("注入: COMMIT 返回错误而写入已落盘")
+		return &store.RecoverReport{
+			Key: &store.AdminKey{KeyID: "k_adopted_unknown"}, Committed: false, Adopted: true, Err: e,
+		}, e
+	}, func(_ *store.DB) error { return nil })
+	var out, errb bytes.Buffer
+	rc := run(context.Background(), []string{"admin-recover", "--db", dbPath, "--key-file", keyFile},
+		getenvOf(env), &out, &errb)
+	if rc == 0 {
+		t.Error("结果不确定的路径不该报成功")
+	}
+	secret := readKeyFile(t, keyFile) // 文件必须还在，读不到就 t.Fatal
+	joined := out.String() + errb.String()
+	if strings.Contains(joined, secret) {
+		t.Error("输出带出了凭据值")
+	}
+	for _, need := range []string{"不要删除", "whoami", "k_adopted_unknown"} {
+		if !strings.Contains(joined, need) {
+			t.Errorf("输出缺少必要指引 %q: %s", need, joined)
+		}
+	}
+}
+
+// 4b. 连核查都做不成（未知方向）⇒ 同样保留：可逆的选择是留，不是删。
+func TestAdminRecoverKeepsFileWhenVerificationFailed(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "epocha.db")
+	seedDB(t, dbPath, "ak_"+strings.Repeat("e", 64))
+	keyFile := filepath.Join(dir, "new-admin")
+	env := map[string]string{"EPOCHA_PEPPER": testPepperB64}
+	swapRecoverDeps(t, func(_ *store.DB, _ context.Context, _ string, _ time.Time) (*store.RecoverReport, error) {
+		e := errors.New("注入: 提交错误")
+		return &store.RecoverReport{
+			Key: &store.AdminKey{KeyID: "k_verify_failed"}, Err: e,
+			VerifyErr: errors.New("注入: 只读核查失败"),
+		}, e
+	}, func(_ *store.DB) error { return nil })
+	var out, errb bytes.Buffer
+	rc := run(context.Background(), []string{"admin-recover", "--db", dbPath, "--key-file", keyFile},
+		getenvOf(env), &out, &errb)
+	if rc == 0 {
+		t.Error("核查失败的路径不该报成功")
+	}
+	if _, err := os.Stat(keyFile); err != nil {
+		t.Fatalf("无法确认方向时删掉了凭据文件: %v", err)
+	}
+	joined := out.String() + errb.String()
+	if !strings.Contains(joined, "无法确认") {
+		t.Errorf("没有说清“无法确认”这个事实: %s", joined)
+	}
+	if strings.Contains(joined, readKeyFile(t, keyFile)) {
+		t.Error("不确定路径的输出把凭据值带了出来")
+	}
+}

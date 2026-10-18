@@ -247,10 +247,20 @@ func (s *server) handlePage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		page := strings.ReplaceAll(pageHTML, "{{CFG}}", jsSafeJSON(string(blob)))
+		// widget 脚本必须**在 /app.js 之前**且**同样带 defer**：deferred 脚本按文档顺序执行，
+		// 这是 app.js 里 EpoCHA 已定义的唯一保证。漏掉这个标签的失败方式很隐蔽——
+		// 页面正常显示、档位按钮能点，但组件永远不出现（实测就是"进度停在 0/20"）。
+		page := strings.NewReplacer(
+			"{{CFG}}", jsSafeJSON(string(blob)),
+			"{{WIDGET_TAG}}", `<script src="`+jsSafeURL(s.o.WidgetSrc)+`" defer></script>`,
+		).Replace(pageHTML)
 		_, _ = io.WriteString(w, page)
 	})(w, r)
 }
+
+// jsSafeURL 只处理一件事：URL 里出现 `</script>` 之类会提前终结数据块。
+// widget 地址来自启动参数而不是请求，但拼进 HTML 就统一转义，不靠"它应该是干净的"。
+func jsSafeURL(s string) string { return strings.ReplaceAll(s, "</", "<\\/") }
 
 func tierViews(ts []tier) []map[string]string {
 	out := make([]map[string]string, 0, len(ts))

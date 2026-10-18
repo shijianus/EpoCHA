@@ -171,13 +171,17 @@ func TestPageIsCSPCleanAndHasNoSecrets(t *testing.T) {
 		t.Fatalf("CSP 不该需要例外：%s", csp)
 	}
 	body := rec.Body.String()
-	// 除配置数据块外不允许无 src 的 script
-	for _, seg := range strings.Split(body, "<script")[1:] {
-		end := strings.IndexByte(seg, '>')
-		if end < 0 {
-			t.Fatal("未闭合的 script 开始标签")
+	tags := scriptTags(t, body)
+	find := func(sub string) string {
+		for _, o := range tags {
+			if strings.Contains(o, sub) {
+				return o
+			}
 		}
-		head := seg[:end]
+		return ""
+	}
+	// 除配置数据块外不允许无 src 的 script
+	for _, head := range tags {
 		if !strings.Contains(head, "src=") && !strings.Contains(head, `type="application/json"`) {
 			t.Fatalf("页面里有内联 script%s", head)
 		}
@@ -188,6 +192,22 @@ func TestPageIsCSPCleanAndHasNoSecrets(t *testing.T) {
 	// 站点用的是公开 site_key：页面必须带它（widget 领题要用）
 	if !strings.Contains(body, testSiteKey) {
 		t.Fatal("页面没带 site_key，widget 无法领题")
+	}
+	// widget 脚本必须被引入，且**排在 /app.js 之前**：漏掉这个标签的失败方式很隐蔽——
+	// 页面照常显示、按钮照常能点，但组件永远不出现（真实浏览器里实测到"进度停在 0/20"）。
+	widgetTag := find("/widget/v1.js")
+	if widgetTag == "" {
+		t.Fatalf("页面没有引入 widget 脚本，app.js 里的 EpoCHA 必然未定义：%s", body)
+	}
+	if !strings.HasSuffix(widgetTag, " defer>") {
+		t.Fatalf("widget 脚本缺 defer，与 app.js 之间是加载顺序竞争：%s", widgetTag)
+	}
+	appTag := find("/app.js")
+	if appTag == "" || !strings.HasSuffix(appTag, " defer>") {
+		t.Fatalf("/app.js 必须是 deferred 同源脚本：%q", appTag)
+	}
+	if strings.Index(body, "/widget/v1.js") > strings.Index(body, `src="/app.js"`) {
+		t.Fatal("widget 脚本排在 app.js 之后：app.js 会撞上 EpoCHA is not defined")
 	}
 }
 
@@ -331,4 +351,25 @@ func waitReady(base string) (bool, error) {
 		time.Sleep(30 * time.Millisecond)
 	}
 	return false, context.DeadlineExceeded
+}
+
+// scriptTags 解析出页面里所有 <script **开始标签**（含尖括号），用于断言引入顺序与是否内联。
+// 不用正则也不用切片窗口：窗口法在标签靠近文档末尾时会越界（这个坑踩过一次）。
+func scriptTags(t *testing.T, body string) []string {
+	t.Helper()
+	var out []string
+	for i := 0; i+7 <= len(body); {
+		j := strings.Index(body[i:], "<script")
+		if j < 0 {
+			break
+		}
+		abs := i + j
+		k := strings.Index(body[abs:], ">")
+		if k < 0 {
+			t.Fatal("页面里有未闭合的 <script 开始标签")
+		}
+		out = append(out, body[abs:abs+k+1])
+		i = abs + k + 1
+	}
+	return out
 }

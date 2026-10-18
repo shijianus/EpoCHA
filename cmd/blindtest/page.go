@@ -44,6 +44,7 @@ const pageHTML = `<!doctype html>
 </div>
 
 <script id="cfg" type="application/json">{{CFG}}</script>
+{{WIDGET_TAG}}
 <script src="/app.js" defer></script>
 </body>
 </html>

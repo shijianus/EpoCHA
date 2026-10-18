@@ -1,8 +1,12 @@
 # STAGE5B — 阶段 5B：运行互斥、恢复边界收敛、部署候选清单与持续演练
 
-日期：2026-10-18。起点 HEAD `8e5c136`（`stage-5a-done`），工作树起点干净。
+日期：2026-10-18（主体）与 2026-10-19（收尾轮：支持范围取舍、门禁三类归属、启动配方实测）。
+起点 HEAD `8e5c136`（`stage-5a-done`），工作树起点干净。
 环境：`linux/arm64`（宿主 4 核可见，容器一律限制成 1 CPU）、Docker Engine 29.6.1、Compose v5.3.1、
 Go 1.24.5。门禁：`make stage5b-check` → `docs/scripts/stage5b.sh`。
+
+> **第一版正式支持范围只有 B 路径**（宿主静态编译 + named build context 装配）；
+> A 路径容器内编译保持**可选、NOT_RUN**，见 §5.0。收尾轮没有新增产品功能，也没有重跑五分钟演练之外的历史阶段验收。
 
 > **本轮不新增产品功能**：没有新题型、没有后台页面、没有风险打分/自动淘汰、没有 CF 边缘、没有多节点。
 > 做的是两件事——"谁能在什么时候动这个数据目录"，以及"这一版到底实测了哪条构建路径"。
@@ -78,43 +82,114 @@ Go 1.24.5。门禁：`make stage5b-check` → `docs/scripts/stage5b.sh`。
 "5 分钟观察内存/WAL/题池随时间变化"就无从谈起；报告里现在必须打印 pace 与目标速率，
 否则峰值数字与稳态数字长得一模一样。
 
+### 1.5 收尾轮加的东西：三类归属、启动配方演练、构建脚本修正
+
+- **三类归属**（§2.0）+ 分类逻辑的 9 条负向自测（§2.0）。这是为了把"可选路径没跑"和"必需项没跑"
+  在退出码上分开——前者不该阻塞已验证的交付，后者必须阻塞。
+- **第 2.5 步：启动配方演练**（必需项）。`DEPLOYMENT` §11 原来那段是自相矛盾的：
+  它先 `cd deploy/docker`，又写 `make docker-image-local # 在仓库根执行` —— `cd` 之后 `make` 找不到
+  Makefile；而且它没有覆盖保护（`> keys/master` 会把已有主密钥直接冲掉，等价于撤销全部已签发 token）。
+  新配方改成"整段从仓库根执行、不 `cd`，用 `-f/--project-directory/--env-file` 指定文件与项目根"，
+  并加 `set -C`。第 2.5 步照着这个形状在**隔离部署根**里真跑一次，七条判据：
+  ① 文档命令起得来且 `/readyz` 200；② 容器内 `epocha-ops admin` 通、`EPOCHA_ADMIN_KEY_FILE` 引导的凭据生效；
+  ③ 建测试站点并完成一次真实闭环（`pow_bits=12` 由工具真解）；④ 同 token 二次验证被拒
+  （`timeout-or-duplicate`）；⑤ `--force-recreate` 之后站点仍在用、**已消费 token 仍被拒**、锁仍在同一数据目录；
+  ⑥ `stop` 之后宿主端口既连不上也查不到监听；⑦ 只定点清理本步的容器/网络/卷，第 2 步那套仍就绪。
+  另外两条纯文本判据：compose 与 `.env.example` 的**变量名双向对账**（漂移就 FAIL，取不到列表也 FAIL），
+  以及 `./data` 这类相对绑定按**项目目录**解析（防止演练写进仓库的 `deploy/docker/data`）。
+- **`make run` 是坏的**（`run: build` 后面被一个 TAB 直接接了 `@mkdir ...`，make 把它当成 prerequisites，
+  报 `No rule to make target '@mkdir'`）。这是 5A 引入的，本轮修正并把 `make -n run` 跑通。
+- **退出码报告修正**：上一轮同时写了"make stage5b-check rc=3"和"make 会把 3 折叠成 2"——两句不可能同时成立。
+  实测见 §2.1：`make` 只能给 0 或 2；配方现在把脚本真实码打印出来再按它退出。
+
 ---
 
-## 2. 门禁结果（`docs/scripts/stage5b.sh`，真实一次运行）
+## 2. 门禁：三类归属与真实结果
 
-```
-工程项 PASS=29 FAIL=0；外部条件 BLOCKED=0；本轮未执行 NOT_RUN=1
-RESULT=blocked（无失败，但 NOT_RUN=1 ⇒ 不算阶段完成）
-脚本退出码 = 3        （直接跑脚本才是真码；make 会把 3 折叠成 2）
-```
+### 2.0 归属规则（`docs/scripts/stage5b.sh` 的口径）
 
-| 步 | 项 | 状态 |
+| 类 | 内容 | 对退出码的作用 |
 |---|---|---|
-| 0 | 工具、四个端口空闲（含宿主 8081）、磁盘余量 | PASS |
-| 1 | `internal/store` / `cmd/server` / `cmd/ops` / `cmd/loadtest` 的 `-race` 测试 | PASS |
-| 1 | 服务侧 6 条真实子进程测试、运维侧 5 条测试**存在性**对账 | PASS |
-| 1b | 一次全量 `go test -race -count=1 ./...` | PASS |
-| 1b | `fmt-check` / `vet` / `size` + `cmd/server` 不链接开发期包 | PASS |
-| 2 | 镜像重建（含锁实现）+ `/readyz` healthy | PASS |
-| 2 | 数据目录里出现 `epocha.lock`（宿主可见 ⇒ 同一 inode 的前提） | PASS |
-| 2 | **宿主进程在服务容器运行时改不了库**（拒绝原因＝锁占用；不改库、不留凭据文件） | PASS |
-| 2 | **第二个服务容器立即拒绝启动**并给出锁冲突原因；赢家不受扰动、仍就绪 | PASS |
-| 2 | 停服后锁立即可取（锁文件仍在、未删除）⇒ `admin-recover` 成功且只打印 `key_id` | PASS |
-| 2 | 重启后管理面认的正是恢复装入的那把（`whoami` 与 `key_id` 一致） | PASS |
-| 2 | 服务持锁期间在线备份照常成功（产物 0600 + manifest） | PASS |
-| 2 | 就地恢复（`--out-dir` 正被用作数据目录）被拒，且对工作库逐字节无副作用 | PASS |
-| 2 | 同一份备份恢复到隔离目录成功（锁只挡就地恢复） | PASS |
-| 2 | pepper 不配对 ⇒ 拒绝且不留下任何库形态产物 | PASS |
-| 3 | 候选清单落盘 + 进镜像两份二进制无 `PT_INTERP` | PASS |
-| 3 | **B 路径**（宿主 `CGO_ENABLED=0` 编译 + named build context 装配）实际执行并通过 | PASS |
-| 3 | **A 路径**（`make docker-image`，容器内编译） | **NOT_RUN**（见 §5） |
-| 4 | 测量实例就绪（1 CPU/128MiB/只读根/非 root；抬限流仅用于测量） | PASS |
-| 4 | 持续演练 450 次闭环全成功，用时 311s（1.45 闭环/秒） | PASS |
-| 4 | 过期清理**实际触发过**（日志非零计数） | PASS |
-| 4 | 窗口内无 OOM、无重启 | PASS |
-| 4 | 宿主上没有多出意外监听（带 `ss` 证据） | PASS |
+| **必需 R** | 受支持的 **B 路径**部署工程验收：分类自测、锁的真实进程测试、一次 `-race ./...`、静态检查与依赖隔离、容器/宿主互斥、恢复边界、候选清单、启动配方演练、持续演练 | 有 FAIL ⇒ **1**；有 BLOCKED/NOT_RUN ⇒ **3**；全 PASS ⇒ **0** |
+| **可选 O** | 第一版正式支持范围之外：A 路径（容器内编译）、amd64 交叉构建、root 场景下的 UID 65534 | **不决定退出码**；只如实输出。未执行永远是 NOT_RUN，`opt_pass` 缺"实际执行证据"直接被结构拒绝（exit 2） |
+| **超范围 S** | 产品效果项：人工可读性盲测、抗 OCR/抗 AI 基线、生产难度档 | 只登记边界，永不打印 `PASS`；由 `make blindtest` / `make ocr-baseline-real` 各自判定 |
 
-### 2.1 真实子进程测试到底测了什么
+负向自测（`bash docs/scripts/stage5b.sh --selftest-classify`，9 条场景断言）钉住四件事：
+必需项 FAIL/BLOCKED/NOT_RUN 都得到非 0；**必需项没执行时不可能绿**；可选项未执行必须显示
+NOT_RUN 且不改变必需项计数（同一批必需项计数行逐字符比对）；可选项不能被改写成 PASS；
+超范围项的输出里不出现 PASS。这套自测自身被变异测试验证过：
+把 `verdict` 的 BLOCKED/NOT_RUN 规则删掉 ⇒ 自测报 2 条 FAIL、rc=1；
+把可选项计数并进必需项 ⇒ 自测报 4 条 FAIL、rc=1。
+
+### 2.1 退出码的真实链路（实测，不是"包装层会透传"）
+
+| 执行方式 | 观察到的码 | 说明 |
+|---|---|---|
+| `bash docs/scripts/stage5b.sh --scenario r-pass-only` | `0` | 必需项全通过 |
+| `... --scenario r-fail` | `1` | 必需项 FAIL |
+| `... --scenario r-notrun` / `r-blocked` | `3` | 必需项未执行／外部条件不足 |
+| `... --scenario r-only-optional-notrun` | `0` | **可选项 NOT_RUN 不阻塞**已验证的 B 路径 |
+| `bash docs/scripts/stage5b.sh`（完整门禁） | `0/1/3` | 真码，最后一行同时打印 `SCRIPT_RC=` |
+| `make stage5b-check` | 非 0 时一律 `2` | make 的固有折叠；配方改为**先打印脚本真实码**再按真实码退出 |
+| `make stage5b-check GATE_ARGS=--scenario r-notrun` | make 报 `2`，输出含 `真实退出码 = 3` | 用受控分支验证包装行为，不重跑五分钟演练 |
+
+上一轮报告里"make stage5b-check rc=3"是错的表述（make 只能是 0 或 2）；正确读法见上表。
+被脚本调用的程序（`go test`、`make fmt-check vet size`、`docker`、`epocha-ops`）的码都被
+`rc=0; cmd || rc=$?` 显式捕获并写进对应项的文案，没有任何一处用 `| tail`/`| head` 掩盖上游失败。
+
+### 2.2 本轮结果
+
+见 §2.3 的逐项表（由 `bash docs/scripts/stage5b.sh` 的一次真实运行产出，绑定 `stage-5b-done`
+指向的提交）。结论行形如：
+
+```
+必需项(B 路径部署工程) PASS=… FAIL=… BLOCKED=… NOT_RUN=…
+可选项(A 路径/未验证平台) PASS=0 FAIL=0 BLOCKED=1 NOT_RUN=2
+超范围项(产品效果，本门禁不判定) 登记=1
+RESULT=… ; SCRIPT_RC=…
+```
+
+### 2.3 逐项表
+
+| 步 | 类 | 项 | 状态 |
+|---|---|---|---|
+| 0 | R | 工具、五个端口空闲（含宿主 8081 与配方端口 18183）、磁盘余量 | PASS |
+| 1 | R | 门禁自身分类逻辑的 9 条负向断言 | PASS |
+| 1 | R | `internal/store` / `cmd/server` / `cmd/ops` / `cmd/loadtest` 的 `-race` 测试 | PASS |
+| 1 | R | 服务侧 6 条真实子进程测试、运维侧 5 条测试**存在性**对账 | PASS |
+| 1b | R | 一次全量 `go test -race -count=1 ./...` | PASS |
+| 1b | R | `fmt-check` / `vet` / `size` + `cmd/server` 不链接开发期包 | PASS |
+| 2 | R | 镜像重建（B 路径，含锁实现）+ `/readyz` healthy | PASS |
+| 2 | R | 数据目录里出现 `epocha.lock`（宿主可见 ⇒ 同一 inode 的前提） | PASS |
+| 2 | R | **宿主进程在服务容器运行时改不了库**（拒绝原因＝锁占用；不改库、不留凭据文件） | PASS |
+| 2 | R | **第二个服务容器立即拒绝启动**并给出锁冲突原因；赢家不受扰动、仍就绪 | PASS |
+| 2 | R | 停服后锁立即可取（锁文件仍在、未删除）⇒ `admin-recover` 成功且只打印 `key_id` | PASS |
+| 2 | R | 重启后管理面认的正是恢复装入的那把（`whoami` 与 `key_id` 一致） | PASS |
+| 2 | R | 服务持锁期间在线备份照常成功（产物 0600 + manifest） | PASS |
+| 2 | R | 就地恢复（`--out-dir` 正被用作数据目录）被拒，且对工作库逐字节无副作用 | PASS |
+| 2 | R | 同一份备份恢复到隔离目录成功（锁只挡就地恢复） | PASS |
+| 2 | R | pepper 不配对 ⇒ 拒绝且不留下任何库形态产物 | PASS |
+| 2.5 | R | compose 与 `.env.example` 的变量名**双向**对账（取不到列表也算 FAIL） | PASS |
+| 2.5 | R | 密钥段幂等：`set -C` 拒绝覆盖已存在密钥，整段重跑后 master 未变 | PASS |
+| 2.5 | R | §11 的调用形状（仓库根、不 cd、`-f/--project-directory/--env-file`）渲染合法：`host_ip: 127.0.0.1`、8081 无发布项 | PASS |
+| 2.5 | R | `./data` 按项目目录解析到隔离部署根（不会写进仓库目录） | PASS |
+| 2.5 | R | ① 文档命令真起得来（`--wait` 依 `/readyz`）② 容器内管理命令 + 引导凭据 ③ 真实闭环 | PASS |
+| 2.5 | R | ④ 同 token 重放被拒（`timeout-or-duplicate`）⑤ 重建容器后站点可用且消费状态仍生效 | PASS |
+| 2.5 | R | ⑥ 停止后端口释放 ⑦ 只定点清理本步资源（第 2 步那套仍在就绪） | PASS |
+| 3 | R | 候选清单落盘（commit／工作树状态／Go／CGO／构建路径／SHA-256／镜像 ID／schema／实测 uid） | PASS |
+| 3 | R | 进镜像两份二进制无 `PT_INTERP` | PASS |
+| 3 | R | **B 路径**实际执行并通过 | PASS |
+| 3 | **O** | **A 路径**（`make docker-image`，容器内编译） | **NOT_RUN**（见 §5） |
+| 3 | **O** | amd64 交叉构建的镜像 | **NOT_RUN** |
+| 3 | **O** | UID/GID 65534 下的目录属主与 `chown` 动作 | **BLOCKED**（无 root） |
+| 3 | **S** | 人工可读性盲测、抗 OCR/抗 AI、生产难度档 | **OUT_OF_SCOPE**（不由本门禁判定） |
+| 4 | R | 测量实例就绪（1 CPU/128MiB/只读根/非 root；抬限流仅用于测量） | PASS |
+| 4 | R | 持续演练 450 次闭环全成功 | PASS |
+| 4 | R | 过期清理**实际触发过**（日志非零计数） | PASS |
+| 4 | R | 窗口内无 OOM、无重启 | PASS |
+| 4 | R | 宿主上没有多出意外监听（带 `ss` 证据） | PASS |
+
+### 2.4 真实子进程测试到底测了什么
 
 `cmd/server/lock_test.go`（重新执行测试二进制、按 `EPOCHA_TEST_ROLE` 分派；每个子进程按 pid 定向 kill，
 绝不按名字模式批量清理）：
@@ -141,40 +216,46 @@ RESULT=blocked（无失败，但 NOT_RUN=1 ⇒ 不算阶段完成）
 
 ---
 
-## 3. 部署候选清单（实际测量值）
+## 3. 部署候选清单
 
-```
-源码 commit（测量时的 HEAD）: 8e5c136c79c32b98f5929d975bc0886021d6773c   describe: stage-5a-done-dirty
-工作树（测量时）: dirty（含本轮 5B 改动，随后提交为本节末的 commit）
-Go: go1.24.5 linux/arm64
-宿主 go 默认: GOOS=linux GOARCH=arm64 CGO_ENABLED=1 GOTOOLCHAIN=auto      ← 注意宿主默认是 1
-镜像构建实际使用: CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-trimpath
-ldflags: -s -w -X internal/version.Version=… -X …Commit=8e5c136 -X …BuildDate=2026-10-18T13:41:46Z
-宿主架构: aarch64   docker: 29.6.1
+**候选产物由干净提交构建**：本轮的构建发生在 5B 的收尾提交之后、工作树 `git status --porcelain` 为空时。
+清单本身是**构建产物**，落在忽略目录里（`deploy/docker/.prebuilt/candidate-manifest.txt`，`.prebuilt/`
+已在 `.gitignore`）——把"含当前 commit 的清单"再提交进仓库会形成自引用循环（提交改了，清单里的 commit 就过期）。
+文档只负责指向**固定的源码提交**：`stage-5b-done` 标注里写明的构建绑定。
 
-进镜像的 epocha      sha256: 1c349b02d297148b7706d38bfe655d894732c3a6aac64d3defeea38f5126c7a8
-进镜像的 epocha-ops  sha256: d5aa006b63ccef4c80c713343cd74dae6dc61703661fc73119a236b5543b5d27
-演练用 epocha-ops    sha256: 563b553ee871475f26a58ed52a8c7f549c12540b36c339a4eed138ab61e4529e
-本地镜像 ID: sha256:30871ca7eb925dd1cfd3e408d6f279b17e917ea16964d4a1266a337cfc6d054f   （本地 image ID，**不是** registry digest）
-镜像大小: 8,680,228 字节
-schema 版本: 4        app_version: stage-5a-done-dirty        备份 manifest 的 commit 与 HEAD 一致: yes
-已测试的运行 UID/GID: 1000:1000（镜像默认 USER 65534:65534；见 DEPLOYMENT §2/§5.5 的 uid 规则）
-两份进镜像的二进制均无 PT_INTERP（静态链接，scratch 前提）
-```
+清单字段（每轮 `make docker-image-local` + `bash docs/scripts/stage5b.sh` 都会重新实测）：
 
-**这条清单的有效范围必须一起读**：SHA-256 对应的是**测量时那个工作树**（含未提交的 5B 改动）。
-提交后重跑 `make docker-image-local` 会注入新的版本串、二进制 SHA 随之改变——这是预期，不是漂移。
-候选启动方式（`docs/DEPLOYMENT.md` §11）：
+| 字段 | 为什么必须单独记 |
+|---|---|
+| 完整源码 commit + `git describe` + **工作树 clean/dirty** | `dirty` 的 SHA 不能归到某个干净提交上 |
+| Go 版本、宿主架构、docker/compose 版本 | `GOTOOLCHAIN=local` 不下载工具链，构建结果与本机 Go 绑定 |
+| 宿主 `go env` 的 `CGO_ENABLED` 与构建实际使用的值 | 宿主有 gcc 时默认 **1**，而 scratch 要求 **0**（5A 的真实翻车点） |
+| 编译参数与 `ldflags`（版本注入） | 决定 `epocha --version` 与备份 manifest 的 `app_version`/`commit` 能否对上仓库 |
+| **构建路径**＝B（宿主静态编译 → `.prebuilt/out` → named build context 装配） | A 路径未执行，不能写成"两条路径都验证过" |
+| 进镜像两份二进制的 SHA-256 + 无 `PT_INTERP` 断言 | 动态链接的二进制在 scratch 里的报错是"文件不存在"，极难归因 |
+| 本地镜像 ID + 标签 + 镜像大小 | **本地 image ID 不是 registry digest**；本轮不推送镜像，也就没有 digest |
+| schema 版本 | 迁移状态是恢复流程的判据之一（`/readyz` 也复核它） |
+| 实际测试的运行 UID/GID | 与镜像默认 `65534:65534` 不同就是"未验证项"，不能含糊 |
+| 备份 manifest 的 `commit` 与 HEAD 是否一致 | 不一致意味着"备份说的是另一个版本的状态" |
+
+复现与核对：
 
 ```bash
-cd deploy/docker
-mkdir -p data keys backups && chmod 700 data keys backups
-head -c32 /dev/urandom | base64 > keys/master; head -c32 /dev/urandom | base64 > keys/pepper
-chmod 600 keys/master keys/pepper
-cp .env.example .env    # 无 root 的机器把 EPOCHA_UID/GID 改成当前用户
-make docker-image-local && (cd deploy/docker && docker compose up -d --wait)
-curl -s http://127.0.0.1:8080/readyz
+git status --porcelain            # 必须为空，否则下面的 SHA 不属于这个提交
+make docker-image-local           # B 路径；版本串取自 git describe / rev-parse
+bash docs/scripts/stage5b.sh      # 第 3 步会重新落盘候选清单
+sed 's/^/  /' deploy/docker/.prebuilt/candidate-manifest.txt
+docker image inspect epocha:5a --format 'id={{.Id}} size={{.Size}}'
 ```
+
+启动方式统一用 `docs/DEPLOYMENT.md` §11（整段从仓库根执行、不 `cd`；`set -C` 保证重跑不覆盖密钥；
+uid/gid 与数据目录属主一致）。旧的"`cd deploy/docker` + 后面又 `make docker-image-local # 在仓库根执行`"
+那个形状已经在这一轮被替换掉——它自相矛盾：`cd` 之后 `make` 找不到 Makefile。
+`stage5b.sh` 的第 2.5 步就是照着新形状在**隔离部署根**里真跑一遍（§2.3 里那 7 条）。
+
+> 上一轮记录的 `8e5c136…-dirty` 清单（epocha `1c349b02…`、epocha-ops `d5aa006b…`、
+> 镜像 `30871ca7…`）对应的工作树是 **dirty**（含未提交的 5B 改动）。它属于"5A 提交 + 未提交改动"，
+> 不是任何干净提交的产物，保留在这里只作为历史测量值。
 
 ## 4. 持续演练（约 5 分钟，硬上限）
 
@@ -204,20 +285,42 @@ wall=5m0.054s  flows=450  ok=450（0 失败、0 超时）  吞吐=1.50 闭环/�
 - WAL 停在 ~4.1MB 是因为自动 checkpoint 阈值（1000 页）；主文件增长反映的是清理与补池的正常写入，
   观察窗口内没有单调膨胀的迹象，但这不构成"无泄漏"的结论。
 
-## 5. 未完成项与唯一出口
+## 5. 支持矩阵、未完成项与完成标签的边界
 
-| 项 | 状态 | 原因与恢复执行 |
+### 5.0 第一版正式支持范围（架构取舍，已定）
+
+**只把 B 路径列为受支持且需要验收的构建路径**：宿主 `CGO_ENABLED=0` 静态编译 → `deploy/docker/.prebuilt/out`
+→ named build context 装配运行镜像。A 路径（`make docker-image`，容器内编译）**保持可选、NOT_RUN**——
+这不是"把 A 改成 PASS"，而是**缩小第一版正式支持范围**：低磁盘环境下为它拉大镜像没有收益，
+而装配出来的运行时层与 B 完全相同（同一份 Dockerfile 的 runtime 阶段）。
+
+| 范围 | 状态 | 依据 |
 |---|---|---|
-| A 路径：`make docker-image`（容器内编译） | **NOT_RUN** | Docker Hub 直连被黑洞（只有 mirror 可用）；实测在容器内解包 Go 模块需要 1.5–2GB，本轮起始磁盘 450–900MB 量级。任务明确禁止为"全绿"去拉大型镜像，故保留 NOT_RUN。恢复：在 registry 可达且 `/var/lib/docker` 所在分区 ≥2GB 的构建机上 `make docker-image && bash docs/scripts/stage5b.sh` |
-| 跨架构（amd64）镜像 | NOT_RUN | 本机 arm64，无验证环境；不引入交叉构建体系（5A 的同一决定） |
-| 真机 root 场景下的 `chown 65534` 权限动作 | BLOCKED（无 root） | 镜像 `USER` 仍是 65534；本轮演练以 uid 1000 跑（`DEPLOYMENT` §2 记录差异）。上线时按 §2 执行并复测 |
-| 宿主 swap（512M + swappiness） | 未建立 | 本机 swap 为 0 且无 root；容器侧 `memswap_limit == memory` 已实测生效 |
-| 公网 TLS / DNS / 部署 | 不做 | 本轮不是公网部署授权 |
+| B 路径构建 + compose 启动 + 互斥/恢复/在线备份/持续演练 | **必需项，实测通过** | §2.3 的 R 行 |
+| A 路径（容器内编译） | **可选，NOT_RUN** | registry 直连被黑洞；容器内解包模块需 1.5–2GB 而本机余量是百 MB 量级 |
+| amd64 交叉构建 | **可选，NOT_RUN** | 本机 arm64，无 amd64 验证环境；不引入 buildx/QEMU 体系 |
+| UID/GID 65534（镜像默认 USER）+ `chown` | **可选，BLOCKED** | 本机无 root；实测组合是 `1000:1000` |
+| 公网 TLS / DNS / 真实反代证书 | **不在本轮范围** | 本轮不是公网部署授权；模板与语义写在 `DEPLOYMENT` §6/§7 |
+| 题型抗 AI/抗 OCR、人工可读性、生产难度档 | **超范围（产品效果）** | 由 `make blindtest` / `make ocr-baseline-real` 判定；容器化通过**不**构成它们的结论 |
 
-因为 A 路径是 NOT_RUN，`make stage5b-check` 的退出码是 **3 而不是 0**。
-按 AGENTS 的三态纪律，本轮**不打** `stage-5b-done`：本轮范围内的互斥、恢复边界与持续演练全部实测通过，
-但"部署候选"要能被两条构建路径各自复现才算完整。唯一下一步是在满足条件的构建机上跑一次 A 路径
-（或明确接受 A 路径长期 NOT_RUN 并据此决定标签）。
+`make stage5b-check` 在这套归属下给出 0/3 两种结果：必需项全通过 ⇒ **0**（即使 A 路径仍是 NOT_RUN），
+必需项有未执行 ⇒ **3**。可选项永远不会被计入通过，也不会成为"不通过"的理由——这正是"缩小支持范围"
+在门禁里的表达方式。
+
+### 5.1 其他未完成项
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| 宿主 swap（512M + swappiness=10） | 未建立 | 本机 swap 为 0 且无 root；容器侧 `memswap_limit == memory` 已实测生效（`docker inspect`） |
+| 真机移动端 / 辅助技术 / 人工各题型过 5 次 | 仍属阶段 4 的未完成人工项 | 与本轮无关，见 AGENTS「尚未实现」 |
+| 后台页面、统计与分级淘汰、非视觉等价通道、CF 边缘 | 不存在 | 阶段 5 其余部分 |
+
+### 5.2 `stage-5b-done` 到底覆盖什么
+
+标签正文写明：仅覆盖 **B 路径、linux/arm64、实际运行 UID/GID 1000:1000**；
+**不**代表 A 路径、amd64、公网 TLS、人工可读性或抗 AI/抗 OCR 已通过。
+打标签的条件是必需项全部实测通过（互斥、恢复边界、候选构建、启动配方、持续演练）；
+只要其中任何一条没跑，就提交结果与原因，不打标签。
 
 ## 6. 本轮门禁自身修掉的假信号（记录，避免下次重犯）
 
@@ -231,6 +334,11 @@ wall=5m0.054s  flows=450  ok=450（0 失败、0 超时）  吞吐=1.50 闭环/�
 | 6 | `docker wait -t 30s` | 这个子命令没有 `-t`。改成有界轮询 `State.Status`，并区分"命令写错"与"第二个实例真的活着" |
 | 7 | 持续演练中途 281/450 次 `challenge:429` | 不是缺陷，是**限流窗口修复（ADR-016）第一次真正生效**：站点默认 `rate_ip_rpm=60` 从此真的是每分钟 60 次。测量站点因此显式抬高配额（只抬在测量实例上，不写进 compose） |
 | 8 | 脚本在第 4 步开头直接终止，没有 RESULT 行 | 我把注释插在了反斜杠续行的**中间**：续行被注释截断，下一行的 JSON 变成一个"命令名"，`set -e` 让脚本当场退出。`bash -n` 不报这种错（语法合法），只有真跑才暴露 |
+| 9 | 收尾轮：`变量名双向对账` 在文件不存在时**通过**了 | 演练台里 `ROOT` 被替换成 `/`，两个 `grep` 都失败、列表为空 ⇒ "没有漂移"。判据本身写反的第二例：**空输入不等于通过**。现在取不到列表直接 FAIL，并且 PASS 文案带上两个列表的条数（23/20），条数为 0 就藏不住 |
+| 10 | 收尾轮：`建不出测试站点` 但看不到原因 | `admin_r` 失败时只 tail 了 `.err`，而 400 的正文在 stdout 那份 `.raw` 里。真实原因是我填了 `pow_bits:10`，而 `internal/pow.MinBits=12` —— 下界由代码规定，不是文档里的数字 |
+| 11 | 收尾轮：`compose 渲染出的端口…` 检查永远找不到那个字符串 | `docker compose config` 把端口渲染成 **映射形式**（`host_ip:` / `target:` / `published:`），不是 `"8080:8080"` 字符串。照 5A 时的字符串形状写的断言会因为"找不到违规形式"而恒真。现在按真实渲染形状断言，并且"缺 host_ip"才是 FAIL 条件 |
+| 12 | 收尾轮：`set -C` 在函数里泄漏到主脚本 | `keys_section() { set -C; ... }` 之后所有对已存在文件的 `>` 都会失败。函数体写成 `(...)` 才把它关在子 shell 里 |
+| 13 | 收尾轮：清理断言写成"第 2 步那套的网络必须存在" | 单独演练第 2.5 步时那套根本没起，于是"定点清理"被判成"波及了别人"。改成直接证明赢家仍就绪（`/readyz` 200），并且第 2 步没跑时如实说明"无从波及" |
 
 第 5 条最值得留档：它和 5A 那条"容器里没引入 widget 脚本所以永远不出现"是同一类错误——
 **判据本身写错时，失败方向是反的**，而且看起来像被测系统出了问题。
@@ -241,8 +349,14 @@ wall=5m0.054s  flows=450  ok=450（0 失败、0 超时）  吞吐=1.50 闭环/�
 ## 7. 命令
 
 ```bash
-make stage5b-check          # 本轮门禁（退出码 0/1/3；见 §2 与 §5）
-make stage5a-check          # 5A 的部署/恢复演练（本轮未回归它，只改了它调用的 admin-recover flag）
+make stage5b-check          # 本轮门禁：退出码只由必需项决定（见 §2.0/§2.1；make 本身只会报 0 或 2）
+make stage5b-check GATE_ARGS=--selftest-classify    # 只验分类逻辑与包装层行为，不重跑五分钟演练
+bash docs/scripts/stage5b.sh --selftest-classify    # 同一件事的**真码**版本（0/1）
+make stage5a-check          # 5A 的部署/恢复演练（收尾轮只改了它的 admin-recover flag 与 §11 的形状）
 go test -count=1 -race ./internal/store/ ./cmd/server/ ./cmd/ops/   # 只跑锁与互斥相关
 EPOCHA_SITE_SECRET=… make loadtest ARGS="--base http://127.0.0.1:8080 --site-key pk_… --requests 450 --concurrency 1 --pace 660ms"
 ```
+
+第 2.5 步单独调试时用的办法：把脚本里"第 2.5 步到第 3 步之间"的片段连同前面的记录器/工具函数
+抽出来，`DOCKER_OK=1` 直接跑——同一份文本、不重新实现判据，迭代一次约 3 分钟而不是整套门禁十几分钟。
+§6 的第 9–13 条全部是在这个演练台上暴露的；抽片段的 `ROOT` 需要手工指回仓库根（第 9 条就是这么撞出来的）。

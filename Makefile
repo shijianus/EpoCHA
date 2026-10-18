@@ -42,6 +42,8 @@ help:
 	@echo "make docker-image 规范构建：在容器内编译（需 registry 访问 + ≥2GB 可用磁盘给 Go 模块与编译中间产物）"
 	@echo "make docker-image-local 同一份 Dockerfile 的运行时层，用宿主已编译的二进制填 toolchain 阶段"
 	@echo "make stage5b-check 运行互斥（flock）、就地恢复拒绝、候选清单与 5 分钟持续演练（docs/STAGE5B.md）"
+	@echo "                 退出码只由必需项（受支持 B 路径）决定；A 路径/amd64/65534/公网 TLS 属可选项，如实打印不决定结论"
+	@echo "                 make 把任何非 0 折叠成 2，配方会打印脚本真实码；只验分类逻辑：make stage5b-check GATE_ARGS=--selftest-classify"
 	@echo "make stage5a-check 部署包 + 备份恢复 + 容器语义 + 资源限额 的真实演练（会动 Docker，见 docs/STAGE5A.md）"
 	@echo "make loadtest ARGS=\"--base URL --site-key KEY --requests N\"  有界负载实测（需服务已在跑 + EPOCHA_SITE_SECRET）"
 
@@ -99,7 +101,8 @@ docker-image-local:
 	  --build-context toolchain=deploy/docker/.prebuilt .
 
 .PHONY: run
-run: build	@mkdir -p /tmp/epocha-dev
+run: build
+	@mkdir -p /tmp/epocha-dev
 	EPOCHA_MASTER_KEY=$$(head -c32 /dev/urandom | base64) \
 	EPOCHA_PEPPER=$$(head -c32 /dev/urandom | base64) \
 	$(BIN) --db /tmp/epocha-dev/epocha.db --listen :8080
@@ -185,9 +188,18 @@ stage4b-check:
 .PHONY: stage5b-check
 # 5B 的门禁：运行锁的真实进程测试、容器/宿主共享同一把锁、就地恢复拒绝、
 # 候选构建清单，以及约 5 分钟的节流持续演练。回归只跑一次 -race ./...，不重跑 5A 的整套演练。
-# 退出码同样是三态：0=全 PASS、1=有 FAIL、3=无失败但有 BLOCKED/NOT_RUN。
+# 退出码三态，且**只由必需项（受支持的 B 路径）决定**：0=必需项全 PASS、1=有 FAIL、
+# 3=无失败但必需项里有 BLOCKED/NOT_RUN。可选项（A 路径、amd64、UID 65534、公网 TLS）的
+# NOT_RUN 如实打印但不决定结论——这是"缩小第一版正式支持范围"，不是把它写成通过。
+# 实测：make 把任何非 0 一律折叠成 **2**。所以配方先原样打印脚本的真实码，再按真实码退出；
+# 要机器可读就读最后的 RESULT / SCRIPT_RC 行，或直接 bash docs/scripts/stage5b.sh。
+# GATE_ARGS 只用于验证门禁自身的分类与包装层行为（不必为此重跑五分钟演练）。
 stage5b-check:
-	@bash docs/scripts/stage5b.sh
+	@rc=0; bash docs/scripts/stage5b.sh $(GATE_ARGS) || rc=$$?; \
+	if [ $$rc -ne 0 ]; then \
+		echo "[make] stage5b.sh 真实退出码 = $$rc（make 自身只能报 2；结论看 RESULT/SCRIPT_RC 行）"; \
+	fi; \
+	exit $$rc
 
 .PHONY: stage5a-check
 # 5A 的门禁**不**嵌套其它总门禁：脚本内部跑一次 stage3b-check 承担回归，其余逐项是

@@ -8,14 +8,186 @@
 #   - 回归跑一次 `make stage5a-check`？不。跑一次 `-race ./...` + 定向阶段脚本即可：
 #     同一套 -race 跑两遍不多证明任何东西，只烧墙钟（AGENTS 的既定口径）。
 #
-# 三态口径：工程项 PASS/FAIL；外部条件不足 BLOCKED；本轮没执行 NOT_RUN。
-# 退出码：0=全 PASS；1=有 FAIL；3=无失败但有 BLOCKED/NOT_RUN（候选版本可审阅，但别当成阶段完成）。
-# `make` 会把 1 与 3 都折叠成 2，所以机器可读的结论看最后那行 RESULT。
+# 三态口径与**三类归属**（两回事，都必须写清楚）：
+#   状态：PASS / FAIL / BLOCKED（外部条件不足）/ NOT_RUN（本轮没执行）。禁止"PASS：某项未测"。
+#   归属：
+#     R 必需项——受支持的 B 路径（宿主静态编译 + named build context 装配）的部署工程验收。
+#     O 可选项——未纳入第一版正式支持的构建路径与平台（A 路径容器内编译、amd64、
+#               root 场景下的 UID 65534、公网 TLS/DNS）。可选项**只如实输出**。
+#     S 超范围项——不属部署工程验收的产品效果项（人工可读性、抗 OCR/抗 AI、题型安全性）。
+#                   S 类永不写成 PASS，也永不计入工程结论：容器化与恢复演练通过不等于题型抗 AI 通过。
+#   退出码只由 R 类决定：R 有 FAIL ⇒ 1；R 有 BLOCKED/NOT_RUN ⇒ 3；否则 0。
+#   O 类 NOT_RUN 不阻塞已实测通过的 B 路径交付（这是"缩小正式支持范围"，不是"把 A 改成 PASS"）。
+#   可选项永远不会被计入 R_PASS；把未执行的可选项写成 PASS 的路径在结构上不存在（见 --selftest-classify）。
+#
+# 退出码的**包装层行为**（实测，不是推测）：直接跑本脚本拿到的是真码 0/1/3；
+# `make stage5b-check` 把任何非 0 一律折叠成 **2**（make 的固有行为，配方里已把真实码打印出来）。
+# 所以机器可读的结论看最后那行 RESULT 与 SCRIPT_RC，不要看 make 的码。
 set -euo pipefail
 
+# 记录器、verdict 与分类自测都在下面先定义；分派发生在任何副作用（mktemp、trap、docker）之前。
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "$ROOT"
 
+STEP=0
+# 三类归属各自的计数。**只有 R_* 进 verdict**——可选项与超范围项再多也不改变必需项的结论，
+# 反过来必需项少一条也不会被可选项的通过"补"回来。
+R_PASS=0; R_FAIL=0; R_BLOCKED=0; R_NOTRUN=0
+O_PASS=0; O_FAIL=0; O_BLOCKED=0; O_NOTRUN=0
+S_NOTE=0
+DOCKER_OK=0
+
+log()  { printf '[stage5b] %s\n' "$*"; }
+abort()  { printf '[stage5b] 中止: %s\n' "$*" >&2; exit 1; }
+
+# --- 必需项（R）：受支持的 B 路径部署工程验收 ---
+pass() { STEP=$((STEP+1)); R_PASS=$((R_PASS+1)); printf '[stage5b] PASS %d: %s\n' "$STEP" "$*"; }
+fail() { STEP=$((STEP+1)); R_FAIL=$((R_FAIL+1)); printf '[stage5b] FAIL %d: %s\n' "$STEP" "$*" >&2; }
+blocked() {
+  STEP=$((STEP+1)); R_BLOCKED=$((R_BLOCKED+1))
+  printf '[stage5b] BLOCKED %d: %s\n' "$STEP" "$*"
+  printf '[stage5b]   恢复执行: %s\n' "${2:-见 docs/STAGE5B.md}"
+}
+req_notrun() {
+  STEP=$((STEP+1)); R_NOTRUN=$((R_NOTRUN+1))
+  printf '[stage5b] NOT_RUN %d: %s（原因：%s）\n' "$STEP" "$*" "${2:-本轮未执行}"
+}
+
+# --- 可选项（O）：第一版正式支持范围之外的构建路径与平台 ---
+# opt_pass 的第二个参数是**证据**（实际跑过的那条命令/那个产物）。缺证据就拒绝：
+# 结构上不存在"把没执行的可选项写成 PASS"这条路，只靠纪律提醒是防不住的。
+opt_pass() {
+  if [[ -z "${2:-}" ]]; then
+    printf '[stage5b] 结构错误: 可选项要记 PASS 必须给出实际执行的证据（没跑就是没跑）\n' >&2
+    exit 2
+  fi
+  STEP=$((STEP+1)); O_PASS=$((O_PASS+1))
+  printf '[stage5b] OPTIONAL-PASS %d: %s｜证据: %s\n' "$STEP" "$*" "$2"
+}
+opt_fail() {
+  STEP=$((STEP+1)); O_FAIL=$((O_FAIL+1))
+  printf '[stage5b] OPTIONAL-FAIL %d: %s\n' "$STEP" "$*" >&2
+  printf '[stage5b]   可选项失败不进必需项结论，但也不得被写成通过\n'
+}
+opt_blocked() {
+  STEP=$((STEP+1)); O_BLOCKED=$((O_BLOCKED+1))
+  printf '[stage5b] OPTIONAL-BLOCKED %d: %s\n' "$STEP" "$*"
+  printf '[stage5b]   恢复执行: %s\n' "${2:-另建环境执行}"
+}
+opt_notrun() {
+  STEP=$((STEP+1)); O_NOTRUN=$((O_NOTRUN+1))
+  printf '[stage5b] OPTIONAL-NOT_RUN %d: %s（原因：%s）\n' "$STEP" "$*" "${2:-本轮未执行}"
+  printf '[stage5b]   该类项不阻塞已实测通过的 B 路径；也不表示它已通过\n'
+}
+
+# --- 超范围项（S）：产品效果，不属部署工程验收 ---
+# 这个记录器**不打印 PASS 字样**（selftest 断言这一点）：容器化/恢复演练通过 ≠ 题型抗 AI/抗 OCR 通过，
+# 人工可读性与 OCR 基线有各自的门禁（make blindtest / make ocr-baseline-real），这里只声明边界。
+scope_note() {
+  STEP=$((STEP+1)); S_NOTE=$((S_NOTE+1))
+  printf '[stage5b] OUT_OF_SCOPE %d: %s\n' "$STEP" "$*"
+  printf '[stage5b]   边界: %s\n' "${2:-不属本门禁的部署工程结论}"
+}
+
+# --- verdict：只看必需项 ---
+verdict_rc() {
+  if (( R_FAIL > 0 )); then return 1; fi
+  if (( R_BLOCKED > 0 || R_NOTRUN > 0 )); then return 3; fi
+  return 0
+}
+# 稳定机器可读行：selftest 用它比较"可选项加进去之后必需项计数有没有变"。
+emit_required_line() {
+  printf 'REQUIRED r_pass=%d r_fail=%d r_blocked=%d r_notrun=%d\n' \
+    "$R_PASS" "$R_FAIL" "$R_BLOCKED" "$R_NOTRUN"
+}
+
+# --- 分类逻辑的场景（每条都只调用记录器与 verdict，不碰磁盘/端口/docker）---
+scenario_dispatch() {
+  case "${1:-}" in
+    r-pass-only)     pass "a 通过"; pass "b 通过"; emit_required_line; verdict_rc ;;
+    r-fail)          pass "a 通过"; fail "b 失败"; emit_required_line; verdict_rc ;;
+    r-blocked)       pass "a 通过"; blocked "b 外部条件不足" "见文档"; emit_required_line; verdict_rc ;;
+    r-notrun)        pass "a 通过"; req_notrun "b 本轮未执行" "受控场景"; emit_required_line; verdict_rc ;;
+    r-only-optional-notrun)
+      pass "a 通过"; pass "b 通过"
+      opt_notrun "A 路径（容器内编译）" "需要 registry 与大磁盘"; emit_required_line; verdict_rc ;;
+    r-optional-mixed)
+      pass "a 通过"; pass "b 通过"
+      opt_notrun "amd64 交叉构建" "本机 arm64"
+      opt_blocked "UID 65534 场景" "需 root"
+      scope_note "人工可读性与抗 OCR" "属产品效果验收"; emit_required_line; verdict_rc ;;
+    o-pass-without-evidence) opt_pass "A 路径其实没跑" ""; ;;
+    o-pass-with-evidence)    opt_pass "B 路径已执行" "make docker-image-local"; emit_required_line; verdict_rc ;;
+    s-only-note)     pass "a 通过"; scope_note "抗 AI/抗 OCR 基线" "由 ocr-baseline-real 自己判定"; emit_required_line; verdict_rc ;;
+    *) abort "未知场景 ${1:-（空）}" ;;
+  esac
+}
+
+# --- 负向自测：证明分类与退出码本身是对的 ---
+selftest_classify() {
+  local bad=0 got out
+  # $1=场景 $2=期望退出码（"!" 表示只要非 0）$3=期望出现在输出里的串（可空）
+  run_case() {
+    got=0
+    # `|| got=$?` 是必需的：简单赋值的退出码就是命令替换的退出码，而这里**故意**要观察非 0。
+    out="$(bash "${BASH_SOURCE[0]}" --scenario "$1" 2>&1)" || got=$?
+    if [[ "$2" == '!' ]]; then
+      [[ $got -ne 0 ]] || { printf '[selftest] FAIL: %s 期望非 0，实际 %s\n' "$1" "$got" >&2; bad=$((bad+1)); }
+    elif [[ "$got" != "$2" ]]; then
+      printf '[selftest] FAIL: %s 期望 rc=%s，实际 rc=%s\n' "$1" "$2" "$got" >&2
+      printf '%s\n' "$out" | sed 's/^/[selftest]   输出: /' >&2
+      bad=$((bad+1))
+    fi
+    if [[ -n "${3:-}" ]] && ! printf '%s\n' "$out" | grep -qF -- "$3"; then
+      printf '[selftest] FAIL: %s 的输出里没有 %s\n' "$1" "$3" >&2; bad=$((bad+1))
+    fi
+    printf '%s\n' "$out"
+  }
+  # 1. 必需项 FAIL ⇒ 非 0（1）。
+  run_case r-fail 1 "REQUIRED r_pass=1 r_fail=1" >/dev/null
+  # 2. 必需项 BLOCKED / NOT_RUN ⇒ 非 0（3）：**必需项没执行时不可能绿**。
+  run_case r-blocked 3 "REQUIRED r_pass=1 r_fail=0 r_blocked=1" >/dev/null
+  run_case r-notrun 3 "REQUIRED r_pass=1 r_fail=0 r_blocked=0 r_notrun=1" >/dev/null
+  run_case r-pass-only 0 "REQUIRED r_pass=2 r_fail=0 r_blocked=0 r_notrun=0" >/dev/null
+  # 3. 可选项未执行 ⇒ 必须显示 NOT_RUN，且**不**改变必需项结论（仍是 0）。
+  #    与 r-pass-only 比较的是同一条 REQUIRED 计数行：可选项加进去，必需项计数必须一字不变。
+  local line_opt
+  line_opt="$(run_case r-only-optional-notrun 0 "OPTIONAL-NOT_RUN" | grep '^REQUIRED ' || true)"
+  if [[ "$line_opt" != "REQUIRED r_pass=2 r_fail=0 r_blocked=0 r_notrun=0" ]]; then
+    printf '[selftest] FAIL: 可选项的 NOT_RUN 改变了必需项计数：%s\n' "$line_opt" >&2; bad=$((bad+1))
+  fi
+  # 4. 可选项既不能被改写成 PASS（缺证据直接拒绝），也不能被计入必需项。
+  run_case o-pass-without-evidence '!' "必须给出实际执行的证据" >/dev/null
+  run_case o-pass-with-evidence 0 "OPTIONAL-PASS" >/dev/null
+  local line_mixed
+  line_mixed="$(run_case r-optional-mixed 0 "OPTIONAL-NOT_RUN" | grep '^REQUIRED ' || true)"
+  if [[ "$line_mixed" != "REQUIRED r_pass=2 r_fail=0 r_blocked=0 r_notrun=0" ]]; then
+    printf '[selftest] FAIL: 可选项/超范围项改变了必需项计数：%s\n' "$line_mixed" >&2; bad=$((bad+1))
+  fi
+  # 5. 超范围项永远不出 PASS 字样（"PASS：某项未测"这一类混合表达被结构上禁止）。
+  local s_out
+  s_out="$(run_case s-only-note 0 "OUT_OF_SCOPE")"
+  if printf '%s\n' "$s_out" | grep -q 'OUT_OF_SCOPE.*PASS'; then
+    printf '[selftest] FAIL: 超范围项的输出里出现了 PASS\n' >&2; bad=$((bad+1))
+  fi
+  if (( bad > 0 )); then
+    printf '[selftest] RESULT=selftest-fail（%d 条分类断言不成立）\n' "$bad" >&2
+    exit 1
+  fi
+  printf '[selftest] RESULT=selftest-pass（9 条场景断言成立：必需 FAIL/BLOCKED/NOT_RUN 都非 0，可选项不改判也不得 PASS，超范围项不出 PASS）\n'
+  exit 0
+}
+
+# 分派必须在任何副作用之前（上面这些函数此时已定义）。这里的 `set +e` 是刻意的：
+# 场景要**原样观察**"必需项 BLOCKED/NOT_RUN 时的非 0 退出码"，errexit 会在中途将码直接抛出去，
+# 那样验证的就不是 verdict 而是 shell 的中途退出。
+set +e
+case "${1:-}" in
+  --scenario) shift; scenario_dispatch "${1:-}"; exit $? ;;
+  --selftest-classify) selftest_classify; exit $? ;;
+esac
+set -e
+
+cd "$ROOT"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/epocha-stage5b.XXXXXX")"
 chmod 700 "$WORK"
 
@@ -32,26 +204,6 @@ BIN="$WORK/bin"
 LOGS="$WORK/logs"
 mkdir -p "$BIN" "$LOGS" "$D/data" "$D/keys" "$D/backups" "$D/isolated"
 
-STEP=0
-N_PASS=0
-N_FAIL=0
-N_BLOCKED=0
-N_NOTRUN=0
-REQUIRED_BLOCKED=0
-DOCKER_OK=0
-
-log()  { printf '[stage5b] %s\n' "$*"; }
-pass()    { STEP=$((STEP+1)); N_PASS=$((N_PASS+1)); printf '[stage5b] PASS %d: %s\n' "$STEP" "$*"; }
-fail()    { STEP=$((STEP+1)); N_FAIL=$((N_FAIL+1)); printf '[stage5b] FAIL %d: %s\n' "$STEP" "$*" >&2; }
-blocked() {
-  STEP=$((STEP+1)); N_BLOCKED=$((N_BLOCKED+1))
-  printf '[stage5b] BLOCKED %d: %s\n' "$STEP" "$*"
-  printf '[stage5b]   恢复执行: %s\n' "${2:-见 docs/STAGE5B.md}"
-  REQUIRED_BLOCKED=1
-}
-notrun() { STEP=$((STEP+1)); N_NOTRUN=$((N_NOTRUN+1)); printf '[stage5b] NOT_RUN %d: %s（原因：%s）\n' "$STEP" "$*" "${2:-本轮未执行}"; }
-abort()  { printf '[stage5b] 中止: %s\n' "$*" >&2; exit 1; }
-
 avail_kb() { df -Pk "$WORK" | awk 'NR==2 {print $4}'; }
 
 cleanup() {
@@ -59,6 +211,9 @@ cleanup() {
   trap - EXIT
   set +e
   # 只清理**本脚本自己**创建的容器/网络/目录；绝不 prune，也不碰别人留下的东西。
+  if [[ -n "${RECIPE_COMPOSE:-}" ]]; then
+    $RECIPE_COMPOSE down -v --remove-orphans >/dev/null 2>&1
+  fi
   ( cd "$ROOT/deploy/docker" && docker compose --project-name "$PROJECT" --env-file "$WORK/compose.env" down -v --remove-orphans ) >/dev/null 2>&1
   for name in epocha5b-second epocha5b-measure; do
     docker rm -f "$name" >/dev/null 2>&1
@@ -71,7 +226,6 @@ trap cleanup EXIT INT TERM
 compose() {
   ( cd "$ROOT/deploy/docker" && docker compose --project-name "$PROJECT" --env-file "$WORK/compose.env" "$@" )
 }
-cexec() { compose exec -T "$@"; }
 container_id() {
   local out
   out="$(compose ps -q epocha 2>/dev/null)" || return 1
@@ -111,9 +265,9 @@ for tool in docker curl jq; do
   command -v "$tool" >/dev/null 2>&1 || abort "缺少工具 $tool"
 done
 if ! docker info >/dev/null 2>&1; then
-  abort "docker daemon 不可达（第 2/4 步无法执行）"
+  abort "docker daemon 不可达（第 2/2.5/3/4 步都无法执行）"
 fi
-for p in "$PUBLIC_PORT" "$SECOND_PORT" "$MEASURE_PORT" 8081; do
+for p in "$PUBLIC_PORT" "$SECOND_PORT" "$MEASURE_PORT" "${EPOCHA_5B_RECIPE_PORT:-18183}" 8081; do
   rc=0
   port_listening "$p" || rc=$?
   if [[ $rc -eq 0 ]]; then
@@ -122,17 +276,29 @@ for p in "$PUBLIC_PORT" "$SECOND_PORT" "$MEASURE_PORT" 8081; do
     abort "ss 无法判定端口 $p（rc=$rc）：不能把“测不出来”当成“空闲”"
   fi
 done
+# 150MB 是"能开始"的下界，不是"跑得完"的保证：镜像重建 + 两套 compose + 演练数据目录
+# 都在同一条分区上。所以第 4 步之前还会**再量一次**，不够就把持续演练标成 BLOCKED（必需项），
+# 而不是让一个半路 ENOSPC 的容器把整场演练变成一次无法解释的失败。
 NEED_KB=$((150 * 1024))
 AVAIL_KB="$(avail_kb)"
 if (( AVAIL_KB >= NEED_KB )); then
   DOCKER_OK=1
-  pass "工具齐备、端口空闲（$PUBLIC_PORT/$SECOND_PORT/$MEASURE_PORT/8081），磁盘余量 $((AVAIL_KB / 1024))MB ≥ $((NEED_KB / 1024))MB"
+  pass "工具齐备、端口空闲（$PUBLIC_PORT/$SECOND_PORT/$MEASURE_PORT/${EPOCHA_5B_RECIPE_PORT:-18183}/8081），磁盘余量 $((AVAIL_KB / 1024))MB ≥ $((NEED_KB / 1024))MB"
 else
   blocked "磁盘余量 $((AVAIL_KB / 1024))MB < 容器演练所需 $((NEED_KB / 1024))MB ⇒ 第 2/3/4 步本轮不执行" \
     "释放磁盘后单独跑：bash docs/scripts/stage5b.sh（第 1 步的测试不受影响）"
 fi
 
 # --- 第 1 步：跨进程互斥的真实测试 + 一次回归 ---
+log "第 1 步：先自证分类逻辑，再跑运行锁的真实子进程测试"
+rc=0
+bash "${BASH_SOURCE[0]}" --selftest-classify >"$LOGS/selftest.log" 2>&1 || rc=$?
+if [[ $rc -ne 0 ]]; then
+  tail -n 20 "$LOGS/selftest.log"
+  fail "门禁自身的分类负向自测退出码 $rc（必需项没执行时必须非 0、可选项未执行必须显示 NOT_RUN）"
+else
+  pass "分类逻辑的 9 条负向断言成立（必需 FAIL⇒1、必需 BLOCKED/NOT_RUN⇒3、可选项不改判且缺证据不得 PASS、超范围项不出 PASS）"
+fi
 log "第 1 步：运行锁的测试（真实子进程）"
 rc=0
 go test -count=1 -race -timeout 600s ./internal/store/ ./cmd/server/ ./cmd/ops/ ./cmd/loadtest/ >"$LOGS/locktests.log" 2>&1 || rc=$?
@@ -412,8 +578,274 @@ else
   blocked "容器与宿主共享锁、就地恢复拒绝、在线备份等演练：磁盘不足" "释放磁盘后：bash docs/scripts/stage5b.sh"
 fi
 
-# --- 第 3 步：候选构建清单 ---
-log "第 3 步：部署候选清单（A 容器内编译 / B 宿主编译装配）"
+# --- 第 2.5 步：DEPLOYMENT §11 的启动配方（照文档的形状真跑一遍）---
+# 这一步的存在理由：文档里的命令只有"复制出去能不能起得来"这一个判据，而 shell 语法检查
+# 证明不了六件事：端口绑定形状、uid 与目录属主、变量名漂移、重跑不覆盖密钥、真实闭环的一次性
+# 消费、以及重建容器后这些状态是否还在。所以按 §11 的调用形状（仓库根 + -f/--project-directory，
+# 不 cd）在**隔离部署根**里真跑一次，全程只清理本步自己创建的那一套。
+log "第 2.5 步：启动配方演练（隔离部署根 $WORK/recipe）"
+RECIPE_PORT="${EPOCHA_5B_RECIPE_PORT:-18183}"
+EPR="$WORK/recipe"
+RECIPE_COMPOSE=""
+RC0=0
+port_listening "$RECIPE_PORT" || RC0=$?
+if [[ $RC0 -ne 1 ]]; then
+  fail "配方演练要求端口 $RECIPE_PORT 空闲（判定结果 rc=$RC0）：连到遗留进程会比失败更危险"
+elif [[ $DOCKER_OK -ne 1 ]]; then
+  req_notrun "启动配方演练（DEPLOYMENT §11）" "磁盘不足 ⇒ 这是必需项，不是可选项"
+else
+  mkdir -p "$EPR"
+  # 变量名双向对账：打错一个名字的表现不是报错，而是"用默认值静默启动"——
+  # 文档说的和实际跑的就成了两件事。这一条不需要 docker，纯文本判。
+  # 失败方向必须闭合：两个列表**取不到东西**（文件不在、pattern 不对）也算 FAIL。
+  # 空输入 ⇒ 无漂移 ⇒ PASS 就是"判据写反"，演练台上真的撞出来过一次。
+  drift=""
+  RC0=0
+  CVAR="$(grep -o '\${[A-Z][A-Z0-9_]*' deploy/docker/compose.yml | sed 's/[$]{//' | sort -u)" || RC0=$?
+  if [[ $RC0 -ne 0 || -z "$CVAR" ]]; then
+    fail "从 compose.yml 取不到任何 \${VAR} 引用（rc=$RC0）⇒ 双向对账没法做，不能把空输入读成通过"
+  fi
+  RC0=0
+  EVAR="$(grep -oE '^[A-Z][A-Z0-9_]*=' deploy/docker/.env.example | tr -d '=' | sort -u)" || RC0=$?
+  if [[ $RC0 -ne 0 || -z "$EVAR" ]]; then
+    fail "从 .env.example 取不到任何键（rc=$RC0）⇒ 双向对账没法做"
+  fi
+  for v in $CVAR; do
+    # 样例里两种存在形式都算"这个名字确实在"：`KEY=` 与被注释掉的 `# KEY=`（可选项）。
+    if ! grep -qE "^(# ?)?$v=" deploy/docker/.env.example; then drift="$drift ${v}(compose 读它但样例没给)"; fi
+  done
+  for v in $EVAR; do
+    if ! grep -q "\${$v" deploy/docker/compose.yml; then drift="$drift ${v}(样例里有但 compose 不读)"; fi
+  done
+  if [[ -n "$drift" ]]; then
+    fail "compose 与 .env.example 的变量名漂移:$drift"
+  else
+    pass "变量名双向对账通过（compose 引用 $(printf '%s\n' "$CVAR" | wc -l) 个变量，样例给出 $(printf '%s\n' "$EVAR" | wc -l) 个键，两边一一对应）"
+  fi
+
+  cp deploy/docker/compose.yml deploy/docker/.env.example "$EPR/"
+  # 与 §11 逐行同形状（`[[ -e ]] ||` 幂等 + set -C 兜底）。这里测的就是"重跑一遍这一段会不会毁密钥"。
+  # 函数体写成 `(...)`：bash 里 set -C 不会随函数返回而撤销，只有子 shell 才把它关在这里。
+  keys_section() (
+    set -C
+    mkdir -p "$EPR/data" "$EPR/keys" "$EPR/backups"
+    chmod 700 "$EPR/data" "$EPR/keys" "$EPR/backups"
+    for k in master pepper; do
+      [[ -e "$EPR/keys/$k" ]] || head -c32 /dev/urandom | base64 > "$EPR/keys/$k"
+      chmod 600 "$EPR/keys/$k"
+    done
+    [[ -e "$EPR/keys/admin" ]] || printf 'ak_%s' "$(head -c32 /dev/urandom | base64 | tr -d '/+=' | head -c48)" > "$EPR/keys/admin"
+    chmod 600 "$EPR/keys/admin"
+  )
+  RC0=0
+  keys_section || RC0=$?
+  if [[ $RC0 -ne 0 ]]; then
+    fail "§11 的密钥准备段第一次就跑不通（rc=$RC0）"
+  elif [[ ! -s "$EPR/keys/master" || ! -s "$EPR/keys/pepper" || ! -s "$EPR/keys/admin" ]]; then
+    fail "三把密钥文件不齐（master/pepper/admin）"
+  elif [[ "$(stat -c '%a' "$EPR/keys/master")$(stat -c '%a' "$EPR/keys/admin")" != "600600" ]]; then
+    fail "密钥文件权限不是 0600"
+  else
+    M1="$(sha "$EPR/keys/master")"
+    # set -C 到底拦不拦得住：对已存在文件做 `>` 必须失败。这是 §11 那句"重跑不毁密钥"的机制本身。
+    RC0=0
+    ( set -C; head -c32 /dev/urandom | base64 > "$EPR/keys/master" ) || RC0=$?
+    if [[ $RC0 -eq 0 ]]; then
+      fail "set -C 下仍然覆盖了已有 master——文档承诺的重跑保护不成立"
+    else
+      RC1=0
+      keys_section || RC1=$?      # 原样重跑整段
+      if [[ "$M1" != "$(sha "$EPR/keys/master")" ]]; then
+        fail "重跑密钥段改了 master（内容变了）"
+      elif [[ $RC1 -ne 0 ]]; then
+        fail "§11 的密钥段不能安全重跑（第二次 rc=$RC1，期望幂等）"
+      else
+        pass "密钥段幂等且带保护：set -C 拒绝覆盖已存在密钥（rc=$RC0 即那次拒绝），整段重跑后 master 未变且退出码 0"
+      fi
+    fi
+    cp "$EPR/.env.example" "$EPR/.env"
+    sed -i "s|^EPOCHA_UID=.*|EPOCHA_UID=$RUN_UID|;s|^EPOCHA_GID=.*|EPOCHA_GID=$RUN_GID|" "$EPR/.env"
+    sed -i "s|^# EPOCHA_ADMIN_KEY_FILE=.*|EPOCHA_ADMIN_KEY_FILE=/etc/epocha/keys/admin|" "$EPR/.env"
+    sed -i "s|^EPOCHA_PUBLIC_PORT=.*|EPOCHA_PUBLIC_PORT=$RECIPE_PORT|" "$EPR/.env"
+    sed -i "s|^EPOCHA_NETWORK=.*|EPOCHA_NETWORK=epocha5b-recipe|" "$EPR/.env"
+    sed -i "s|^EPOCHA_SUBNET=.*|EPOCHA_SUBNET=172.31.0.0/24|" "$EPR/.env"
+    sed -i "s|^EPOCHA_IMAGE=.*|EPOCHA_IMAGE=$IMAGE|" "$EPR/.env"
+    chmod 600 "$EPR/.env"
+    RECIPE_COMPOSE="docker compose -p epocha5brecipe -f $EPR/compose.yml --project-directory $EPR --env-file $EPR/.env"
+
+    RC0=0
+    $RECIPE_COMPOSE config >"$LOGS/recipe-config.yml" 2>&1 || RC0=$?
+    if [[ $RC0 -ne 0 ]]; then
+      tail -n 15 "$LOGS/recipe-config.yml"
+      fail "§11 的调用形状（仓库根、不 cd、-f/--project-directory/--env-file）渲染失败（rc=$RC0）"
+    else
+      # 渲染后的端口是**映射形式**（host_ip / target / published），不是 "8080:8080" 字符串：
+      # 断言必须照着真实渲染形状写，否则"省略宿主 IP"这类检查会因为找不到那个串而永远通过。
+      PORTBLK="$(awk '/^    ports:/{f=1;next} f && /^    [a-z]/{f=0} f' "$LOGS/recipe-config.yml")"
+      if ! printf '%s\n' "$PORTBLK" | grep -q "published: \"$RECIPE_PORT\""; then
+        fail "渲染结果里没有公共端口 $RECIPE_PORT 的发布项：$(printf '%s' "$PORTBLK" | tr '\n' ' ')"
+      elif ! printf '%s\n' "$PORTBLK" | grep -q "host_ip: 127.0.0.1"; then
+        fail "公共端口的发布项缺 host_ip（省略宿主 IP 会绑 0.0.0.0，等于把验证服务放到公网网卡）"
+      elif printf '%s\n' "$PORTBLK" | grep -q 'published: "8081"'; then
+        fail "管理端口 8081 被发布了"
+      else
+        pass "§11 调用形状合法：公共端口显式带 host_ip 127.0.0.1，管理端口 8081 没有任何发布项"
+      fi
+      if grep -q "source: $EPR/data" "$LOGS/recipe-config.yml"; then
+        pass "compose 里的 ./data 按**项目目录**解析到隔离部署根（$EPR/data），不会写进仓库目录"
+      else
+        fail "绑定挂载没解析到 $EPR/data：$(grep -A1 'type: bind' "$LOGS/recipe-config.yml" | grep source | tr '\n' ' ')"
+      fi
+    fi
+
+    RC0=0
+    $RECIPE_COMPOSE up -d --wait --wait-timeout 90 >"$LOGS/recipe-up.log" 2>&1 || RC0=$?
+    RU="http://127.0.0.1:$RECIPE_PORT"
+    if [[ $RC0 -ne 0 || "$(code "$RU/readyz")" != "200" ]]; then
+      tail -n 20 "$LOGS/recipe-up.log"
+      fail "按 §11 起不来或没就绪（rc=$RC0，readyz=$(code "$RU/readyz")）"
+    else
+      pass "① 文档命令真起得来：--wait 依 /readyz 判定可接流量（宿主 $RECIPE_PORT，容器 uid=$RUN_UID 与目录属主一致）"
+
+      # ② 容器内受控管理命令：引导凭据（EPOCHA_ADMIN_KEY_FILE）生效的唯一直接观察点。
+      RC0=0
+      $RECIPE_COMPOSE exec -T epocha /usr/local/bin/epocha-ops admin GET /api/admin/whoami \
+        </dev/null >"$LOGS/recipe-whoami.raw" 2>&1 || RC0=$?
+      sed -n '2,$p' "$LOGS/recipe-whoami.raw" >"$LOGS/recipe-whoami.json"   # 第一行是 ops 的 status=NNN
+      RWHO="$(jq -r '.key_id // ""' "$LOGS/recipe-whoami.json" 2>/dev/null || echo "")"
+      if [[ $RC0 -ne 0 || -z "$RWHO" ]]; then
+        fail "容器内管理命令失败（rc=$RC0）：$(tail -c 220 "$LOGS/recipe-whoami.raw")"
+      else
+        pass "② 容器内 epocha-ops admin 可用，EPOCHA_ADMIN_KEY_FILE 引导出的凭据通过鉴权（whoami=$RWHO）"
+      fi
+      RC0=0
+      port_listening 8081 || RC0=$?
+      if [[ $RC0 -eq 0 ]]; then
+        fail "宿主上出现了 8081 监听——管理面被发布了"
+      elif [[ $RC0 -ne 1 ]]; then
+        fail "ss 判不出 8081（rc=$RC0）：不能把测不出来当成没发布"
+      else
+        pass "管理端口 8081 在宿主上不可达（只有容器内 127.0.0.1:8081）"
+      fi
+
+      go build -trimpath -o "$BIN/devclient" ./cmd/devclient
+      admin_r() { # $1=METHOD $2=PATH $3=OUT(可选第 4 个参数=请求体)
+        local rc2=0
+        if [[ -n "${4:-}" ]]; then
+          printf '%s' "$4" | $RECIPE_COMPOSE exec -T epocha /usr/local/bin/epocha-ops admin "$1" "$2" \
+            >"$3.raw" 2>"$3.err" || rc2=$?
+        else
+          $RECIPE_COMPOSE exec -T epocha /usr/local/bin/epocha-ops admin "$1" "$2" </dev/null \
+            >"$3.raw" 2>"$3.err" || rc2=$?
+        fi
+        [[ $rc2 -eq 0 ]] || return $rc2
+        sed -n '2,$p' "$3.raw" >"$3"
+      }
+
+      # ③ 测试站点 + 一次真实闭环（challenge → 真解 PoW → redeem → /siteverify）。
+      #    限流抬高只写在这个测量站点上（§10.5：默认 60 IP-RPM 会先于容量起作用），不进 compose。
+      RSITE=""; RSECRET=""
+      RC0=0
+      admin_r POST /api/admin/sites "$LOGS/recipe-site.json" \
+        '{"name":"recipe-drill","verify_mode":"pow_only","allow_missing_origin":true,"pow_bits":12,"challenge_ttl_sec":180,"response_ttl_sec":120,"rate_ip_rpm":600,"rate_site_rpm":600}' || RC0=$?
+      RSITE="$(jq -r '.site.site_key // ""' "$LOGS/recipe-site.json" 2>/dev/null || echo "")"
+      RSECRET="$(jq -r '.secret // ""' "$LOGS/recipe-site.json" 2>/dev/null || echo "")"
+      RC0=0
+      admin_r POST /api/admin/sites "$LOGS/recipe-site2.json" \
+        '{"name":"recipe-drill-2","verify_mode":"pow_only","allow_missing_origin":true,"pow_bits":12,"rate_ip_rpm":600,"rate_site_rpm":600}' || RC0=$?
+      SITE2="$(jq -r '.site.site_key // ""' "$LOGS/recipe-site2.json" 2>/dev/null || echo "")"
+      SECRET2="$(jq -r '.secret // ""' "$LOGS/recipe-site2.json" 2>/dev/null || echo "")"
+      if [[ -z "$RSITE" || -z "$RSECRET" || -z "$SITE2" || -z "$SECRET2" ]]; then
+        # pow_bits 的下界是 12（internal/pow.MinBits）——填 10 会得到 400，而 400 的正文只在 stdout 里。
+        fail "建不出测试站点（site1=${RSITE:-空} site2=${SITE2:-空}）：stdout=$(tail -c 200 "$LOGS/recipe-site.raw" 2>/dev/null) stderr=$(tail -c 160 "$LOGS/recipe-site.err" 2>/dev/null)"
+      else
+        RC0=0
+        EPOCHA_SITE_SECRET="$RSECRET" "$BIN/devclient" --base "$RU" --site-key "$RSITE" --mode full \
+          >"$LOGS/recipe-flow.log" 2>&1 || RC0=$?
+        if [[ $RC0 -eq 0 ]] && grep -q "step=siteverify success=true" "$LOGS/recipe-flow.log"; then
+          pass "③ 真实闭环走通（pow_bits=12 由工具真解，四端点：challenge/redeem/siteverify 全过）"
+        else
+          fail "闭环没走通（rc=$RC0）：$(tail -c 220 "$LOGS/recipe-flow.log")"
+        fi
+
+        # ④ 同一个 token 第二次验证必须被拒（一次性消费）。
+        RC0=0
+        EPOCHA_SITE_SECRET="$SECRET2" "$BIN/devclient" --base "$RU" --site-key "$SITE2" \
+          --mode redeem-only --response-file "$WORK/resp-once" >"$LOGS/recipe-acq.log" 2>&1 || RC0=$?
+        if [[ $RC0 -ne 0 ]]; then
+          fail "拿不到未消费的 response：$(tail -c 200 "$LOGS/recipe-acq.log")"
+        else
+          FIRST="$(curl -sS --max-time 10 -X POST -d "secret=$SECRET2&response=$(cat "$WORK/resp-once")" "$RU/siteverify" 2>/dev/null || echo '')"
+          SECOND="$(curl -sS --max-time 10 -X POST -d "secret=$SECRET2&response=$(cat "$WORK/resp-once")" "$RU/siteverify" 2>/dev/null || echo '')"
+          if ! printf '%s' "$FIRST" | grep -q '"success":true'; then
+            fail "首次 siteverify 没过：$(printf '%s' "$FIRST" | tail -c 160)"
+          elif printf '%s' "$SECOND" | grep -q '"success":true'; then
+            fail "同一个 token 第二次验证仍然 success:true ⇒ 一次性消费没生效"
+          elif ! printf '%s' "$SECOND" | grep -q 'timeout-or-duplicate'; then
+            fail "重放被拒但不是 reCAPTCHA 族的 timeout-or-duplicate：$(printf '%s' "$SECOND" | tail -c 160)"
+          else
+            pass "④ 首次验证通过、同 token 重放被拒（timeout-or-duplicate，不透露第几层失败）"
+          fi
+
+          # ⑤ 重建容器：站点/凭据/消费状态都必须活下来（消费是权威账本，不是缓存）。
+          RC0=0
+          $RECIPE_COMPOSE up -d --force-recreate --wait --wait-timeout 90 >"$LOGS/recipe-recreate.log" 2>&1 || RC0=$?
+          if [[ $RC0 -ne 0 || "$(code "$RU/readyz")" != "200" ]]; then
+            fail "重建容器后没起来或没就绪（rc=$RC0）：$(tail -c 220 "$LOGS/recipe-recreate.log")"
+          else
+            RC0=0
+            EPOCHA_SITE_SECRET="$RSECRET" "$BIN/devclient" --base "$RU" --site-key "$RSITE" --mode full \
+              >"$LOGS/recipe-flow2.log" 2>&1 || RC0=$?
+            AFTER="$(curl -sS --max-time 10 -X POST -d "secret=$SECRET2&response=$(cat "$WORK/resp-once")" "$RU/siteverify" 2>/dev/null || echo '')"
+            if [[ $RC0 -ne 0 ]] || ! grep -q "step=siteverify success=true" "$LOGS/recipe-flow2.log"; then
+              fail "重建后同一个站点/凭据完不成闭环（rc=$RC0）：$(tail -c 200 "$LOGS/recipe-flow2.log")"
+            elif ! printf '%s' "$AFTER" | grep -q 'timeout-or-duplicate'; then
+              fail "重建后已消费的 token 又可验证 ⇒ 防重放账本没活过重启（响应=$(printf '%s' "$AFTER" | tail -c 160)）"
+            elif [[ ! -f "$EPR/data/epocha.lock" ]]; then
+              fail "重建后数据目录里没有 epocha.lock"
+            else
+              pass "⑤ 重建容器后：站点仍在用、已消费 token 仍被拒、运行锁仍在同一数据目录（权威状态在卷里，不在容器里）"
+            fi
+          fi
+
+          # ⑥ 停止后端口必须真释放（不是"容器还在但不响应"）。
+          RC0=0
+          $RECIPE_COMPOSE stop >"$LOGS/recipe-stop.log" 2>&1 || RC0=$?
+          RC1=0
+          port_listening "$RECIPE_PORT" || RC1=$?
+          if [[ $RC0 -ne 0 ]]; then
+            fail "compose stop 失败（rc=$RC0）：$(tail -c 200 "$LOGS/recipe-stop.log")"
+          elif [[ "$(code "$RU/readyz" 3)" != "000" || $RC1 -ne 1 ]]; then
+            fail "停止后端口 $RECIPE_PORT 仍可应答或仍在监听（http=$(code "$RU/readyz" 3) ss_rc=$RC1）"
+          else
+            pass "⑥ 停止后端口释放（HTTP 连不上且 ss 查不到监听）；SIGTERM 走优雅关闭"
+          fi
+
+          # ⑦ 定点清理：只删本步自己创建的那一套（项目名 + 网络 + 隔离目录）。
+          RC0=0
+          $RECIPE_COMPOSE down -v --remove-orphans >"$LOGS/recipe-down.log" 2>&1 || RC0=$?
+          if [[ $RC0 -ne 0 ]]; then
+            fail "清理配方项目失败（rc=$RC0）：$(tail -c 200 "$LOGS/recipe-down.log")"
+          elif docker network inspect epocha5b-recipe >/dev/null 2>&1; then
+            fail "配方网络 epocha5b-recipe 还在——down -v 没清干净"
+          elif [[ -n "$($RECIPE_COMPOSE ps -q 2>/dev/null)" ]]; then
+            fail "配方项目下仍有容器"
+          elif [[ -n "${CID:-}" ]] && [[ "$(code "http://127.0.0.1:$PUBLIC_PORT/readyz" 3)" != "200" ]]; then
+            fail "配方项目的定点清理波及了第 2 步那套（$PUBLIC_PORT 不再就绪）——down 只该作用于 -p epocha5brecipe"
+          else
+            OTHER="（第 2 步那套本轮未起，无从波及）"
+            [[ -n "${CID:-}" ]] && OTHER="（第 2 步那套仍在 $PUBLIC_PORT 就绪）"
+            pass "⑦ 本步资源已定点清理（容器/网络/卷都没剩）；$OTHER"
+          fi
+        fi
+      fi
+    fi
+  fi
+fi
+
+# --- 第 3 步：候选构建清单（受支持范围＝B 路径）---
+log "第 3 步：部署候选清单（必需＝B 路径；A 路径与未验证平台归为可选项）"
+LDFLAGS_TEXT="$(make -n build 2>/dev/null | grep -o '\-ldflags .*' | head -n1 || true)"
 {
   echo "生成时间: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "源码 commit: $(git rev-parse HEAD)  describe: $(git describe --tags --always --dirty 2>/dev/null || echo dev)"
@@ -422,7 +854,8 @@ log "第 3 步：部署候选清单（A 容器内编译 / B 宿主编译装配�
   # 而 scratch 运行时要求 0（5A 的实测教训）。写成一个笼统的"CGO_ENABLED=0"就是失准。
   echo "宿主 go 默认: GOOS=$(go env GOOS) GOARCH=$(go env GOARCH) CGO_ENABLED=$(go env CGO_ENABLED) GOTOOLCHAIN=$(go env GOTOOLCHAIN)"
   echo "镜像构建实际使用: CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-trimpath（deploy/docker/Dockerfile 与 make docker-image-local 一致）"
-  echo "ldflags: $(make -n build 2>/dev/null | grep -o '\-ldflags .*' | head -n1)"
+  echo "构建路径: B（宿主静态编译 → deploy/docker/.prebuilt/out → named build context 装配）"
+  echo "ldflags: ${LDFLAGS_TEXT:-（make -n build 未给出，需手工核对 Makefile 的 LDFLAGS）}"
   echo "Go: $(go version)"
   echo "宿主架构: $(uname -m)  docker: $(docker --version | awk '{print $3}')"
 } >"$LOGS/manifest.txt"
@@ -431,7 +864,8 @@ if [[ -f "$BIN/epocha-ops" ]]; then
     echo "进镜像的 epocha sha256:      $(sha deploy/docker/.prebuilt/out/epocha)"
     echo "进镜像的 epocha-ops sha256:  $(sha deploy/docker/.prebuilt/out/epocha-ops)"
     echo "演练用 epocha-ops sha256:    $(sha "$BIN/epocha-ops")"
-    echo "本地镜像 ID: $(docker image inspect "$IMAGE" --format '{{.Id}}')"
+    echo "本地镜像 ID: $(docker image inspect "$IMAGE" --format '{{.Id}}')   标签: $IMAGE"
+    echo "（本地 image ID 不是 registry digest：本轮不推送镜像，也就没有 digest）"
     echo "镜像大小: $(docker image inspect "$IMAGE" --format '{{.Size}}') 字节"
     echo "已测试的运行 UID/GID: $RUN_UID:$RUN_GID（镜像默认 USER 65534:65534，见 DEPLOYMENT §2）"
   } >>"$LOGS/manifest.txt"
@@ -444,7 +878,13 @@ if [[ -f "$BIN/epocha-ops" ]]; then
   else
     echo "schema 版本: 本轮没有可用备份（清单不完整）" >>"$LOGS/manifest.txt"
   fi
-  pass "候选清单已落盘（commit / Go / GOOS-ARCH / CGO / 两份进镜像二进制的 SHA-256 / 本地镜像 ID / schema / 运行 uid）：$LOGS/manifest.txt"
+  # 清单落到**忽略目录**里留档（deploy/docker/.prebuilt/ 已在 .gitignore）：
+  # 含当前 commit 的清单如果再提交进仓库就成了自引用循环（一改代码清单就过期）。
+  mkdir -p deploy/docker/.prebuilt
+  cp "$LOGS/manifest.txt" deploy/docker/.prebuilt/candidate-manifest.txt
+  pass "候选清单已落盘（commit / 工作树状态 / Go / GOOS-ARCH / CGO / 构建路径 / 两份进镜像二进制的 SHA-256 / 本地镜像 ID 与标签 / schema / 实测 uid）：deploy/docker/.prebuilt/candidate-manifest.txt"
+else
+  req_notrun "候选清单的二进制与镜像部分" "第 2 步没执行（磁盘不足）⇒ 清单无法绑定真实产物；释放磁盘后 bash docs/scripts/stage5b.sh"
 fi
 # 静态链接断言（scratch 运行时的前提）：断言对象必须包含**进镜像的那两份**，
 # 演练自己用的 ops 只是顺带——真正会在生产里起不来的是 .prebuilt/out/ 里那两份。
@@ -460,18 +900,31 @@ if command -v readelf >/dev/null 2>&1; then
   else
     pass "进镜像的两份二进制与演练用的 ops 都无 PT_INTERP（CGO_ENABLED=0 静态链接）"
   fi
+else
+  blocked "静态链接断言：本机没有 readelf" "安装 binutils 后单独跑第 3 步，或直接用 file/objdump 核对 .prebuilt/out 两份"
 fi
-# A 路径：本轮**不**为了全绿去拉 ~380MB 的 golang 镜像（任务明确禁止）
-notrun "A 路径（make docker-image，容器内 go build）" \
-  "需要 registry 可达 + ≥2GB 空闲磁盘（本轮起始仅 $(( $(avail_kb) / 1024 ))MB）；执行命令：make docker-image && bash docs/scripts/stage5b.sh"
+# --- 可选项：第一版正式支持范围之外的构建路径与平台（只如实登记，不决定退出码）---
+opt_notrun "A 路径（make docker-image，容器内 go build）" \
+  "未纳入第一版正式支持；执行需要 registry 可达 + ≥2GB 空闲磁盘（本轮起始 $(( $(avail_kb) / 1024 ))MB）。复现命令：make docker-image && bash docs/scripts/stage5b.sh"
+opt_notrun "amd64 交叉构建的镜像" "本机 linux/arm64 且无 amd64 验证环境；不引入交叉构建体系（5A 的同一决定）"
+opt_blocked "UID/GID 65534（镜像默认 USER）下的数据目录属主与 chown 动作" "需要 root：按 DEPLOYMENT §2/§5.5 执行后复测第 2 步"
+scope_note "题型的人工可读性盲测、抗 OCR/抗 AI 基线、生产默认档位" \
+  "属产品效果验收，分别由 make blindtest 与 make ocr-baseline-real 判定；容器化与恢复演练通过**不**构成它们的结论"
 if [[ $DOCKER_OK -eq 1 ]]; then
-  pass "B 路径（宿主 CGO_ENABLED=0 编译 + named build context 装配）本轮实际执行并通过"
+  # B 路径是**受支持路径**，所以它是必需项（不是"可选路径碰巧跑了"）：
+  # 证据就是第 2 步 make docker-image-local 的退出码 0 与 .prebuilt/out 里那两份产物。
+  pass "B 路径（宿主 CGO_ENABLED=0 静态编译 → .prebuilt/out → named build context 装配）本轮实际执行并通过"
+else
+  req_notrun "B 路径（受支持的构建路径）与镜像装配" "磁盘不足 ⇒ 这是必需项，不是可选项"
 fi
 cat "$LOGS/manifest.txt" | sed 's/^/[stage5b]   清单: /'
 
 # --- 第 4 步：约 5 分钟的节流持续演练 ---
 log "第 4 步：持续演练（1 CPU / 128MiB，节流约 1.5 闭环/秒，5 分钟硬上限）"
-if [[ $DOCKER_OK -eq 1 && -n "$CID" ]]; then
+# 磁盘余量在这里**再量一次**：前面几步已经用过一轮空间，而"5 分钟窗口跑到一半 ENOSPC"
+# 比"根本没开始"更难归因。不足 ⇒ BLOCKED（必需项）⇒ 退出码 3 ⇒ 不打完成标签。
+AVAIL_NOW="$(avail_kb)"
+if [[ $DOCKER_OK -eq 1 && -n "$CID" ]] && (( AVAIL_NOW >= 100 * 1024 )); then
   go build -trimpath -o "$BIN/loadtest" ./cmd/loadtest
   go build -trimpath -o "$BIN/devclient" ./cmd/devclient
   compose down >/dev/null 2>&1 || true
@@ -609,23 +1062,29 @@ if [[ $DOCKER_OK -eq 1 && -n "$CID" ]]; then
     docker rm -f "$MEAS" >/dev/null 2>&1 || true
   fi
 else
-  blocked "持续演练：磁盘不足或测量实例未就绪" "释放磁盘后：bash docs/scripts/stage5b.sh"
+  blocked "持续演练：磁盘余量 $((AVAIL_NOW / 1024))MB（下限 100MB）或第 2 步的服务容器不可用" \
+    "释放磁盘后单独跑：bash docs/scripts/stage5b.sh"
 fi
 
 # --- 汇总 ---
-log "汇总"
-printf '[stage5b] 工程项 PASS=%d FAIL=%d；外部条件 BLOCKED=%d；本轮未执行 NOT_RUN=%d\n' \
-  "$N_PASS" "$N_FAIL" "$N_BLOCKED" "$N_NOTRUN"
+log "汇总（结论只由必需项决定；可选项与超范围项如实列出）"
+printf '[stage5b] 必需项(B 路径部署工程) PASS=%d FAIL=%d BLOCKED=%d NOT_RUN=%d\n' \
+  "$R_PASS" "$R_FAIL" "$R_BLOCKED" "$R_NOTRUN"
+printf '[stage5b] 可选项(A 路径/未验证平台) PASS=%d FAIL=%d BLOCKED=%d NOT_RUN=%d\n' \
+  "$O_PASS" "$O_FAIL" "$O_BLOCKED" "$O_NOTRUN"
+printf '[stage5b] 超范围项(产品效果，本门禁不判定) 登记=%d\n' "$S_NOTE"
 if [[ -f "$LOGS/manifest.txt" ]]; then
-  printf '[stage5b] 候选清单文件：%s（本轮运行结束后会随临时目录删除；需要留档请用 bash docs/scripts/stage5b.sh 2>&1 | tee 出去）\n' "$LOGS/manifest.txt"
+  printf '[stage5b] 候选清单：deploy/docker/.prebuilt/candidate-manifest.txt（忽略目录里的构建产物，不入库以免自引用）\n'
 fi
-if [[ $N_FAIL -gt 0 ]]; then
-  printf '[stage5b] RESULT=fail（%d 项工程失败）\n' "$N_FAIL"
-  exit 1
-fi
-if [[ $N_BLOCKED -gt 0 || $N_NOTRUN -gt 0 ]]; then
-  printf '[stage5b] RESULT=blocked（无失败，但 BLOCKED=%d NOT_RUN=%d ⇒ 不算阶段完成）\n' "$N_BLOCKED" "$N_NOTRUN"
-  exit 3
-fi
-printf '[stage5b] RESULT=pass（%d 项全部通过）\n' "$N_PASS"
-exit 0
+RC=0
+verdict_rc || RC=$?
+case $RC in
+  1) printf '[stage5b] RESULT=fail（必需项 %d 条工程失败）\n' "$R_FAIL" ;;
+  3) printf '[stage5b] RESULT=blocked（必需项无失败，但 BLOCKED=%d NOT_RUN=%d ⇒ 不打完成标签）\n' \
+    "$R_BLOCKED" "$R_NOTRUN" ;;
+  *) printf '[stage5b] RESULT=pass（必需项 %d 条全部通过；可选项 NOT_RUN=%d 不阻塞交付，也未被写成通过）\n' \
+    "$R_PASS" "$O_NOTRUN" ;;
+esac
+# 直接跑脚本时这就是**真实退出码**；经 make 时会被折叠成 2（配方会把这里的数字打印出来）。
+printf '[stage5b] SCRIPT_RC=%d\n' "$RC"
+exit "$RC"

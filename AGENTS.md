@@ -68,6 +68,18 @@ CSP 四档 blob/worker-file/no-worker/none；默认 loopback 强制）、
 与 `restore`（按 `--out-dir`）取同一把锁，`--admin-base-url` 探活 flag 已删除；`backup`/`verify` **明确不取锁**
 （在线一致性快照允许与服务并发）；`ErrLockHeld`（被占用 → 先停服）与 `ErrLockAccess`（uid/挂载不对 → 换身份）分族；
 `cmd/loadtest --pace` 节流；`cmd/server`/`cmd/ops` 的**真实子进程**互斥测试；`docs/STAGE5B.md`、`make stage5b-check`。
+**5B 收尾轮新增**（ADR-017）：**第一版正式支持范围只含 B 路径**（宿主 `CGO_ENABLED=0` 静态编译 +
+named build context 装配），A 路径（容器内编译）保持**可选、NOT_RUN**——这是缩小支持范围，不是把它写成通过；
+`stage5b.sh` 的结论改为**只由必需项决定**（必需 FAIL⇒1、必需 BLOCKED/NOT_RUN⇒3、全 PASS⇒0），
+可选项（A 路径/amd64/UID 65534）如实输出不决定退出码且 `opt_pass` 缺执行证据直接拒绝，
+超范围项（人工可读性、抗 OCR/抗 AI、难度档）只登记边界、永不打印 PASS；分类逻辑自带 9 条负向自测
+（`bash docs/scripts/stage5b.sh --selftest-classify`，已用变异验证：删规则⇒2 条 FAIL、并进必需项⇒4 条 FAIL）；
+新增门禁**第 2.5 步＝启动配方演练**（照 `DEPLOYMENT` §11 在隔离部署根真起一套：readyz／容器内管理命令／
+真实闭环／同 token 重放被拒／`--force-recreate` 后消费状态仍在／stop 后端口释放／只定点清理本步资源），
+外加 compose↔`.env.example` 变量名**双向对账**与"相对绑定按项目目录解析"两条静态判据；
+`DEPLOYMENT` §4/§11 启动配方改写（旧版 `cd deploy/docker` 与"make 在仓库根执行"自相矛盾，
+且 `> keys/master` 无覆盖保护＝重跑毁密钥），改为仓库根 + `-f/--project-directory/--env-file` + `set -C`；
+修正 `Makefile` 的 `run:` 配方（`run: build` 后接 TAB 使 make 把 `@mkdir` 当 prerequisite，`make run` 自 5A 起就是坏的）。
 **5B 的两条口径**：(1) `flock` 是建议锁，只约束按规矩办事的进程——同等文件权限下绕开本仓库代码直接开库的程序
 不受它阻止，不得把它写成防恶意本地进程的机制；(2) "备份可信"只包含 checksum 与 `integrity_check` 两件事，
 manifest **无签名** ⇒ 不得宣称抵御恶意替换（备份目录的可写者就是备份内容的作者），也不得宣称快照具有保密性。
@@ -83,8 +95,14 @@ widget 的 `fallback_base` 与多站点配置面、阶段 4 的人工验收项�
 标签只打 `stage-3a-done`、`stage-3b-done`、`stage-4a-done`、`stage-4b-done`、`stage-5a-done`、`stage-5b-done`，**不打 `stage-3-done`、`stage-4-done`、`stage-5-done`**
 （第三层风险打分不存在；阶段 4 的人工验收项与非视觉通道仍未做；阶段 5 的后台页面/统计/淘汰不存在）。
 `make stage5a-check` 的退出码是**三态**：0=全 PASS、1=有 FAIL、3=无失败但有 BLOCKED/NOT_RUN（部署与恢复演练没跑完就不是验收通过，"文件都写好了"不算）。
-`make stage5b-check` 用同一套三态退出码。5B 的完成标签还额外要求：**跨进程与跨容器的互斥演练、恢复失败边界、
-持续演练**都实际跑过；A 路径（容器内编译）保留 NOT_RUN 不算失败，但也不能被写成通过。
+`make stage5b-check` 也用同一套三态，但结论**只由必需项（受支持的 B 路径）决定**：
+可选项（A 路径容器内编译、amd64、root 场景的 UID 65534）保持 NOT_RUN/BLOCKED **不阻塞**打完成标签，
+前提是把它们如实列成"未纳入正式支持范围"（ADR-017）——缩小支持范围是决定，不是通过。
+5B 完成标签还要求**跨进程与跨容器的互斥演练、恢复失败边界、启动配方演练、持续演练**都实际跑过。
+标签正文必须写明覆盖范围：仅 B 路径 / `linux/arm64` / 实测 UID/GID，**不**代表 A 路径、amd64、公网 TLS、
+人工可读性或抗 AI/抗 OCR 已通过。
+包装层实测：`make` 只会报 **0 或 2**（任何非 0 都被折叠成 2），所以"make stage5b-check 退出码 3"这种写法是错的；
+需要真码就 `bash docs/scripts/…`，或读脚本最后打印的 `RESULT=` 与 `SCRIPT_RC=` 行。
 
 ## 硬性技术约束
 - **只用 Go，纯 Go 依赖，禁止 cgo**。禁止引入 JVM、MongoDB、Postgres、Redis、外部二进制（ImageMagick/fontconfig/headless chrome）。
@@ -221,6 +239,12 @@ stage1/2/3a/3b 各跑一次并逐条记录退出码）/ `make browser-check`（�
 - 不要跳过 hook、不要 `--no-verify`、不要 force push。
 - 不要在未运行 `go test -race -count=1 ./...` 的情况下声称测试通过；UI/widget（阶段 4）无法浏览器实测时**必须明说"人工验证项未完成"**。
 - 不要把未实测的数字写成事实；遵守 `[目标]` / `[估算]` / `[实测]` 标注约定（ADR-006）。
+- 不要把**未纳入支持范围**写成"已通过"：可选项（A 路径容器内编译、amd64、UID 65534、公网 TLS）与超范围项
+  （人工可读性、抗 OCR/抗 AI）必须保持 NOT_RUN/BLOCKED/OUT_OF_SCOPE 的原样；缩小正式支持范围是一个**决定**
+  （ADR-017），它在门禁里的表达是"不决定退出码"，不是"计入 PASS"。
+- 不要把**空输入**当成"检查通过"。对账类判据（变量名双向对账、必需测试存在性、清单字段完整性）在"什么都没取到"
+  时必须 FAIL——`grep` 因路径写错而返回空、`| head`/`| tail` 掩盖上游退出码、断言找不到目标字符串，
+  这三种都会让失败方向**反过来**（看起来像通过，或看起来像被测系统坏了）。
 - 不要把"只有 checksum"说成"能证明备份来自我们"，也不要把 `flock` 说成"能挡住同等权限的本地恶意进程"；
   机制提供了什么、没提供什么，按 `docs/BACKUP-RESTORE.md` §2 的四维表与 ADR-015 的边界陈述。
 - 不要把测试工装里的高限流/演示凭据/已知答案数据写进部署配置；测量实例的配置只在演练脚本里显式给出。

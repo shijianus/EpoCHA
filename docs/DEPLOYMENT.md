@@ -52,17 +52,18 @@ sudo chmod 600 /etc/epocha/keys/admin
 也就是说：容器内进程能读的只有它自己 uid 能读的那几把密钥，而密钥目录还是 `:ro` 挂载——
 运行时无法换掉自己的密钥。
 
-## 3. 构建镜像：两条路径，同一个运行时层
+## 3. 构建镜像：受支持的是 B 路径，A 路径保持可选
 
 `deploy/docker/Dockerfile` 有两个阶段：`toolchain`（编译）与 `runtime`（`FROM scratch` + 两把静态二进制）。
 
 ```bash
-# A. 规范路径：在容器内编译。需要 registry 可达 + ≥2GB 空闲磁盘（Go 模块解包与编译中间产物）。
-make docker-image
-
-# B. 装配路径：toolchain 阶段用命名上下文替换成宿主已编译产物（`make build` + `make build-ops`）。
-#    磁盘不足或构建机无法访问 module proxy 时用这条；**运行时层与 A 完全相同**。
+# B. 受支持路径（第一版验收的就是这条）：宿主静态编译，toolchain 阶段用命名上下文替换成
+#    deploy/docker/.prebuilt/out 里已编译好的两份二进制。运行时层与 A 完全相同。
 make docker-image-local
+
+# A. 可选路径：在容器内编译。需要 registry 可达 + ≥2GB 空闲磁盘（Go 模块解包与编译中间产物）。
+#    第一版**不**把它列为受支持路径，也没在低磁盘机器上为它拉大镜像：保持 NOT_RUN（docs/STAGE5B.md §5.0）。
+make docker-image
 ```
 
 两条路径的差别只在"二进制由谁编译"，镜像里的文件集合、`USER`、`HEALTHCHECK`、`ENTRYPOINT` 一样；
@@ -70,26 +71,46 @@ make docker-image-local
 `/usr/local/bin/epocha` 与 `/usr/local/bin/epocha-ops`，没有 shell、curl、sqlite3、OCR、
 评测样本、ground truth、node/firefox）。
 
+**为什么 B 是"受支持"而不是"临时替代"**：B 的编译输入是仓库源码 + 本机 Go 工具链，构建过程可以在
+无外网的机器上复现，产物 SHA-256 可与候选清单逐字节对上；A 的复现依赖 registry 可达性。
+**代价**也必须写清楚：B 把"工具链一致性"交给了执行者的本机 Go（`GOTOOLCHAIN=local` 锁住版本，
+但不同机器的 Go 补丁版可能不同）。所以候选清单里 `Go: go1.24.5 linux/arm64` 那一行是**复现条件**，
+不是装饰。
+
 **架构**：本轮只在 `linux/arm64` 上真实构建与运行过（宿主即 arm64）。配方本身不含架构假设
 （`CGO_ENABLED=0` 的静态二进制 + scratch），x86-64 支持是**意图**，未实测；
 本轮没有引入跨架构构建体系（无 buildx/QEMU 配置）。在 x86-64 上构建时请用该架构的构建机，
 并按 §10 重跑一次资源演练。
 
+**运行身份**：镜像 `USER` 是 `65534:65534`，但**实测过的组合是 `1000:1000`**（本机无 root，
+数据目录属主就是执行者）。换成 65534 的那次 `chown`/`install -o 65534` 没有验证过（BLOCKED），
+上线时按 §2 执行并把 §5.5 的 uid 规则复测一遍。
+
 ## 4. 启动
 
+**整段从仓库根执行，不需要 `cd`**：compose 用 `-f` + `--project-directory` 指定文件与项目根，
+绑定挂载里的 `./data` 这类相对路径按**项目目录**（也就是 compose 文件所在目录）解析。
+把 `cd` 留在文档里是错的形状——它决定了同一段里 `make` 找哪个 Makefile、compose 找哪个 `.env`，
+而"记得先 cd"是人的纪律，不是命令本身的可读约束。
+
 ```bash
-cd deploy/docker
-cp .env.example .env        # 按需改端口/目录/uid；这里不写任何密钥
-docker compose up -d --wait # --wait 依镜像里的 /readyz 健康检查判定"可接流量"
-docker compose ps           # STATUS 应含 (healthy)
+EP=deploy/docker            # 部署根：compose 文件、.env、data/keys/backups 都在这里的相对位置
+COMPOSE="docker compose -f $EP/compose.yml --project-directory $EP --env-file $EP/.env"
+cp -n $EP/.env.example $EP/.env     # -n：已有 .env 不覆盖（按需改端口/目录/uid；这里不写任何密钥）
+make docker-image-local             # B 路径（受支持）：宿主静态编译 + named build context 装配
+$COMPOSE up -d --wait               # --wait 依镜像里的 /readyz 健康检查判定"可接流量"
+$COMPOSE ps                         # STATUS 应含 (healthy)
 ```
 
 停止与更新：
 
 ```bash
-docker compose stop          # SIGTERM → 排空在途请求 → 关闭 DB（stop_grace_period 15s）
-docker compose pull && docker compose up -d   # 更新镜像；数据卷与密钥文件不变
+$COMPOSE stop                        # SIGTERM → 排空在途请求 → 关闭 DB（stop_grace_period 15s）
+$COMPOSE pull && $COMPOSE up -d      # 更新镜像；数据卷与密钥文件不变
 ```
+
+> `$COMPOSE` 只在**当前这个 shell** 里有效。换了终端就重新赋值那一行，或改回
+> `cd deploy/docker && docker compose ...` 的形式——但一段命令里只能有一种，别混着用。
 
 ## 5. 端口与管理面边界（最容易读错的一节）
 
@@ -314,18 +335,58 @@ compose 里的硬限额：`cpus 1.0`、`memory 128m`、`memswap_limit 128m`（�
 
 ## 11. 复制即可执行的最小启动（本机演练，非公网）
 
+**这一整段从仓库根执行**，只赋值一次 `EP`。它是 §2/§4 的合并版，形状与 `docs/scripts/stage5b.sh`
+的容器演练一致（那条路径在 `make stage5b-check` 里被真实跑过：启动 → 容器内管理命令 →
+站点闭环 → 重放拒绝 → 重建容器后状态仍在 → 停止后端口释放）。
+
 ```bash
-cd deploy/docker
-mkdir -p data keys backups && chmod 700 data keys backups
-head -c32 /dev/urandom | base64 > keys/master; head -c32 /dev/urandom | base64 > keys/pepper
-chmod 600 keys/master keys/pepper
-cp .env.example .env
-# 没有 root 的机器上把 uid 设成当前用户（镜像默认 65534 需要目录属主匹配）
-sed -i "s/^EPOCHA_UID=.*/EPOCHA_UID=$(id -u)/;s/^EPOCHA_GID=.*/EPOCHA_GID=$(id -g)/" .env
-make docker-image-local          # 在仓库根执行
-(docker compose up -d --wait)    # 在 deploy/docker 执行
-curl -s http://127.0.0.1:8080/readyz
+EP=deploy/docker                                  # 部署根（可以是仓库外的任何目录，见下面第 4 条注释）
+set -C                                            # noclobber：这里的 `>` 永不覆盖已存在的文件
+mkdir -p "$EP/data" "$EP/keys" "$EP/backups"
+chmod 700 "$EP/data" "$EP/keys" "$EP/backups"
+
+# ① 密钥：只在**不存在时**生成。重跑这段绝不能把 master/pepper 换掉——
+#    换了 master 就等于撤销所有已签发 token，换了 pepper 就等于让站点摘要与管理凭据全部失效。
+for k in master pepper; do
+  [[ -e "$EP/keys/$k" ]] || head -c32 /dev/urandom | base64 > "$EP/keys/$k"
+  chmod 600 "$EP/keys/$k"
+done
+# ② 管理凭据引导文件（可选）：只在"库里还没有任何管理凭据"的那一次启动生效。
+[[ -e "$EP/keys/admin" ]] || printf 'ak_%s' "$(head -c32 /dev/urandom | base64 | tr -d '/+=' | head -c48)" > "$EP/keys/admin"
+chmod 600 "$EP/keys/admin"
+
+# ③ compose 变量：uid/gid 必须等于 data 与 keys 的**属主**，否则服务在取运行锁这一步
+#    直接返回 ErrLockAccess（§5.5），这是"身份不对"而不是"有人在用"。
+test -f "$EP/.env" || cp deploy/docker/.env.example "$EP/.env"
+sed -i "s|^EPOCHA_UID=.*|EPOCHA_UID=$(id -u)|;s|^EPOCHA_GID=.*|EPOCHA_GID=$(id -g)|" "$EP/.env"
+sed -i "s|^# EPOCHA_ADMIN_KEY_FILE=.*|EPOCHA_ADMIN_KEY_FILE=/etc/epocha/keys/admin|" "$EP/.env"
+chmod 600 "$EP/.env"
+
+# ④ 构建并启动。`make` 走仓库根的 Makefile（B 路径）；compose 走 $EP 里的文件与 .env。
+make docker-image-local
+COMPOSE="docker compose -f $EP/compose.yml --project-directory $EP --env-file $EP/.env"
+$COMPOSE up -d --wait
+curl -sS http://127.0.0.1:8080/readyz            # ready
+$COMPOSE exec epocha /usr/local/bin/epocha-ops admin GET /api/admin/whoami   # 管理面只在容器内可达
 ```
+
+> 同一台机器上要并存**多套**部署时，给每套加一个不同的 `-p <项目名>`，并在 `.env` 里给不同的
+> `EPOCHA_NETWORK`/`EPOCHA_SUBNET`/`EPOCHA_PUBLIC_PORT`。`stage5b.sh` 第 2.5 步就是这么并起两套
+> （两套各有自己的数据目录 ⇒ 各自持一把锁，互不冲突），并验证"定点清理只带走自己那套"。
+
+读法与边界：
+
+- **端口**：`.env` 里 `EPOCHA_PUBLIC_BIND=127.0.0.1` 不能省成 `8080:8080`（那会绑 0.0.0.0）；
+  管理端口 8081 在 compose 里**没有**发布项，`ss -ltn` 在宿主上查不到它。
+- **`EP` 在仓库外时**：`make docker-image-local` 仍然在仓库根跑（它编译源码并装配镜像），
+  只是 compose 与数据/密钥目录落在别处——这时把上面第 ③ 步的 `cp` 换成从仓库里拷
+  `deploy/docker/{compose.yml,.env.example}` 到 `$EP`。
+- **`set -C` 的作用域**：它让这一段里的 `>` 对已存在文件失败退出，正是"重跑不毁密钥"的机制。
+  它不影响 `cp -n`／`sed -i`／后续命令。
+- 密钥文件权限必须 0600/0400 且属主 = 容器 uid；`epocha --version` 与备份 manifest 里的
+  `app_version`/`commit` 应当对得上 `git describe`（§3 的 B 路径注入的就是这两个值）。
+- 这一段**不**做：反代与 TLS（§6/§7）、备份定时任务（§9）、题型难度选择（红线 14：
+  低档挡不住通用 OCR）、以及任何"把测试高限流写进部署配置"的事（测量用的大 RPM 只在 `stage5b.sh` 里出现）。
 
 ## 12. 上线前的人工确认清单（agent 无法替你完成）
 

@@ -157,7 +157,9 @@ RESULT=pass（必需项 <n> 条全部通过；可选项 NOT_RUN=2 不阻塞交�
 SCRIPT_RC=0
 ```
 
-收尾轮实测到的两次完整运行（§4 的运行 A／B）都是 `FAIL=0 BLOCKED=0 NOT_RUN=0` 且 `SCRIPT_RC=0`；
+收尾轮实测到的三次完整运行（§4 的运行 A／B／C）都是 `FAIL=0 BLOCKED=0 NOT_RUN=0` 且 `SCRIPT_RC=0`；
+`stage-5b-done` 打在运行 C 的那个提交（`993a792`）上——**只有真跑过验收的提交才配完成标签**，
+本文件在标签之后还有一次纯文档提交，用来把运行 C 的数字记进来；
 可选项固定是 A 路径与 amd64 两条 NOT_RUN、UID 65534 一条 BLOCKED；超范围项固定登记一条。
 权威记录是**该次运行自己落盘的清单**（`deploy/docker/.prebuilt/candidate-manifest.txt`）与上面那三行结论，
 本文件不复制易过期的计数。
@@ -276,8 +278,9 @@ uid/gid 与数据目录属主一致）。旧的"`cd deploy/docker` + 后面又 `
 限流抬高（`EPOCHA_RATE_IP_RPM=6000`）**只存在于测量实例的命令行**，不写进 compose——
 部署配置里不混入测试高限流、不混入演示凭据、不自动启用实验题型、不开放管理端口。
 
-收尾轮把门禁改成三类归属之后，持续演练在两个提交上各跑了一次完整窗口（运行时代码相同，
-差别只有门禁脚本与文档），形状一致——这也是"5 分钟窗口可复现"的一个交叉样本：
+收尾轮把门禁改成三类归属之后，持续演练在三个提交上各跑了一次完整窗口（运行时代码相同，
+差别只有门禁脚本与文档），形状一致——这也是"5 分钟窗口可复现"的三个交叉样本。
+**运行 C 就是 `stage-5b-done` 指向的那个提交**：
 
 ```
 # 运行 A（commit abf1c97，B 路径构建，工作树 clean）
@@ -287,8 +290,16 @@ wall=5m0.079s  flows=450  ok=450（0 失败、0 超时）  吞吐=1.50 闭环/�
 题池 ready 0→24 行，图片字节 149,620；库 139,264→450,560 字节；WAL 383,192→4,132,392 字节
 过期清理实际触发：msg=清理 responses=89 pool=0 challenges=90 audit=0
 
-# 运行 B（下一个提交，只有门禁脚本与文档不同）
+# 运行 B（commit 05de0fe，只有门禁脚本的记录器文案与文档不同）
 wall=4m59.988s  flows=450  ok=450  吞吐=1.50 闭环/秒；必需项 42 PASS / 0 FAIL / 0 BLOCKED / 0 NOT_RUN
+
+# 运行 C（commit 993a792 ＝ stage-5b-done；候选清单在这一次绑定该提交且工作树 clean）
+wall=5m0.183s  flows=450  ok=450  吞吐=1.50 闭环/秒
+必需项 42 PASS / 0 FAIL / 0 BLOCKED / 0 NOT_RUN；可选项 NOT_RUN=2 BLOCKED=1；超范围登记=1
+RESULT=pass  SCRIPT_RC=0
+结束时容器内存 8.789MiB / 128MiB；OOMKilled=false、RestartCount=0
+题池 ready 0→24 行，图片字节 150,265；库 139,264→450,560；WAL 383,192→4,140,632
+过期清理实际触发：msg=清理 responses=89 pool=0 challenges=90 audit=0
 ```
 
 更早一次（5B 主体，commit `f5f5c52` 之前）的同形状数据：`wall=5m0.054s`、内存 7.695→7.762MiB、
@@ -352,6 +363,11 @@ wall=4m59.988s  flows=450  ok=450  吞吐=1.50 闭环/秒；必需项 42 PASS / 
 **不**代表 A 路径、amd64、公网 TLS、人工可读性或抗 AI/抗 OCR 已通过。
 打标签的条件是必需项全部实测通过（互斥、恢复边界、候选构建、启动配方、持续演练）；
 只要其中任何一条没跑，就提交结果与原因，不打标签。
+
+实测落点：`stage-5b-done → 993a792`，该提交上 `bash docs/scripts/stage5b.sh` 给出
+必需项 42 PASS / 0 FAIL / 0 BLOCKED / 0 NOT_RUN、`SCRIPT_RC=0`，候选清单绑定该提交且工作树 clean
+（`deploy/docker/.prebuilt/candidate-manifest.txt`）。标签正文里逐条写了 A 路径/amd64/65534/公网 TLS/
+人工可读性/抗 AI 这些**不在覆盖范围内**的项目。
 
 ## 6. 本轮门禁自身修掉的假信号（记录，避免下次重犯）
 

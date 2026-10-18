@@ -462,6 +462,10 @@ if (typeof self !== "undefined") {
       fetchTimeoutMs: Math.min(Math.max(Number(o.fetchTimeoutMs) || 10000, 1000), 60000),
       maxAutoRetry: Math.min(Number(o.maxAutoRetry) || 0 || 2, 5),
       showExperimentalNote: o.showExperimentalNote !== false,
+      // form：<form> 元素或它的 id。容器不在目标 form 内时用它显式关联字段。
+      // 刻意不做的事：不接受跨文档元素、不接受选择器字符串（querySelector 会把"随便挑一个 form"
+      // 变成默认行为），也不接受服务端 challenge 里带回来的任何东西。
+      form: o.form === undefined || o.form === null || o.form === "" ? null : o.form,
       ariaLabel: o.ariaLabel || ""
     };
     if (opt.workerUrl) {
@@ -481,6 +485,23 @@ if (typeof self !== "undefined") {
       throw new TypeError("EpoCHA.render: fieldName 形态不合法");
     }
     return opt;
+  }
+
+  // resolveForm：把 `form` 选项解析成**当前文档里的真实 <form>**。
+  // 返回 null 表示"没关联上"，调用方据此 fail loudly —— 隐藏字段落在 form 外等于
+  // 什么都没提交，而页面看起来一切正常，是最难被发现的一类接入错误。
+  function resolveForm(spec, container) {
+    var doc = container.ownerDocument;
+    if (!doc) return null;
+    if (spec && typeof spec === "object" && spec.nodeType === 1) {
+      // 传元素：必须是同一文档里的 FORM。跨文档（iframe/adopted node）不参与本文档的提交。
+      return String(spec.tagName) === "FORM" && spec.ownerDocument === doc ? spec : null;
+    }
+    if (typeof spec === "string") {
+      var byId = doc.getElementById(spec);
+      return byId && String(byId.tagName) === "FORM" ? byId : null;
+    }
+    return null;
   }
 
   function Widget(id, container, o) {
@@ -513,9 +534,22 @@ if (typeof self !== "undefined") {
     // 隐藏字段必须挂在 **light DOM**：Shadow DOM 里的 input 不参与表单提交。
     this.field = null;
     if (o.fieldName) {
+      // 先定目标 form，再插入字段：反过来（先插再判定）就留下一枚"验证过但没提交"的孤儿 input。
+      var implicit = typeof this.container.closest === "function" ? this.container.closest("form") : null;
+      var want = o.form ? resolveForm(o.form, this.container) : implicit;
+      if (o.form && !want) {
+        throw new TypeError("EpoCHA.render: form 选项没有指向当前文档里的真实 <form>");
+      }
+      if (!want) {
+        // 静默不提交是比报错更糟的结果：宁可接入期就炸，也不让线上"验证过了但后端收不到"。
+        throw new TypeError("EpoCHA.render: fieldName 要求把字段提交出去，但容器不在任何 <form> 内。"
+          + "把容器放进目标 form、用 form 选项显式关联，或设 fieldName:'' 只走 onSuccess/getResponse。");
+      }
       this.field = el("input", { type: "hidden", name: o.fieldName });
       this.field.setAttribute("data-epocha-field", this.id);
-      this.container.appendChild(this.field);
+      // 容器已在目标 form 内 ⇒ 字段落进容器（跟着容器一起移动/移除）；
+      // 显式 form 关联 ⇒ 字段落进那个 form，容器可以在页面任意位置。
+      (want.contains(this.container) ? this.container : want).appendChild(this.field);
     }
 
     this.host = el("div", { "data-epocha-widget": this.id });

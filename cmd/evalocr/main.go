@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/shijianus/EpoCHA/internal/eval"
+	"github.com/shijianus/EpoCHA/internal/generator"
 )
 
 // exitBlocked 是"评测没能执行"的专用退出码：与 1（跑出错）区分开，
@@ -62,7 +63,7 @@ func run(args []string) (int, error) {
 	fs.Var(&stringList{dst: &o.ocrArgs}, "ocr-arg", "OCR 参数，可重复；{image} 会替换成图片路径")
 	fs.IntVar(&timeoutSec, "timeout-sec", 20, "单张超时（秒，1..120）")
 	fs.IntVar(&o.limit, "limit", 0, "只跑前 N 张（0 = 全部）")
-	fs.StringVar(&o.normalize, "normalize", "upper", "比较前如何归一化：upper | none")
+	fs.StringVar(&o.normalize, "normalize", "textimage", "归一化实现：textimage（= 生产 generator.TextImage.NormalizeAnswer，默认）| none（逐字节比较）")
 	if err := fs.Parse(args); err != nil {
 		return 1, fmt.Errorf("命令行参数: %w", err)
 	}
@@ -153,7 +154,11 @@ func measure(o *options) (int, error) {
 		}
 		fmt.Printf("预测已写入 %s\n", o.out)
 	}
-	m, err := eval.Score(ground, preds, normalizer(o.normalize))
+	norm, err := normalizer(o.normalize)
+	if err != nil {
+		return 1, err
+	}
+	m, err := eval.Score(ground, preds, norm)
 	if err != nil {
 		return 1, err
 	}
@@ -167,7 +172,7 @@ func report(m eval.Metrics, o *options, bin string) {
 	fmt.Printf("样本量          : %d（有输出 %d，缺测 %d，未知文件 %d）\n",
 		m.Total, m.Predicted, m.Missing, m.Unknown)
 	fmt.Printf("工具失败        : %d\n", m.ToolFailures)
-	fmt.Printf("整串正确        : %d（答错 %d）\n", m.Exact, m.Mismatched)
+	fmt.Printf("整串正确        : %d（答错 %d，畸形输出 %d）\n", m.Exact, m.Mismatched, m.Malformed)
 	fmt.Printf("严格通过率      : %.2f%%（= 正确 / 全部样本；缺测与失败都算不通过）\n", m.StrictAccuracy*100)
 	fmt.Printf("有效样本通过率  : %.2f%%（= 正确 / 成功跑完的样本；剔除工具失败与未知文件）\n", m.ScoredAccuracy*100)
 	fmt.Printf("字符级正确率    : %.2f%%（只统计与答案等长的输出）\n", m.CharAccuracy*100)
@@ -207,29 +212,23 @@ func runOCR(bin string, o *options, image string) (string, int64, string) {
 	return out, ms, ""
 }
 
-// normalizer 决定"什么算完全一致"。upper 是最宽松的一档（OCR 常按自身大小写习惯输出），
-// 但**不做**任何字符替换：把 0 当 O、1 当 I 的宽容会把测量结果系统性抬高。
-func normalizer(kind string) func(string) string {
+// normalizer 决定"什么算一个可比较的答案"。**默认走生产实现**
+// （generator.TextImage.NormalizeAnswer：裁首尾空白、含内部空白即畸形、长度必须恰好 6、
+// 字符必须在字符集内、大小写折叠），而不是这里再写一份"看起来差不多"的归一化。
+//
+// 为什么这是本轮修掉的一个真实缺陷：旧的 `upper` 档会把 OCR 常见的字符间空格**删掉**，
+// 于是 "A B C D E F" 被算成正确；而服务端对同一个串会直接 400 invalid-request。
+// 用宽容版归一化测出来的通过率是**虚高**的，且虚高多少完全取决于 OCR 的输出习惯——
+// 那正是"为了让指标好看而放宽口径"。`none` 保留给逐字节对照实验。
+func normalizer(kind string) (eval.Normalizer, error) {
 	switch kind {
+	case "", "textimage":
+		var g generator.TextImage
+		return g.NormalizeAnswer, nil
 	case "none":
-		return nil
-	case "upper", "":
-		return func(s string) string {
-			var b strings.Builder
-			for i := 0; i < len(s); i++ {
-				c := s[i]
-				switch {
-				case c == ' ' || c == '\t' || c == '\n' || c == '\r':
-					continue // OCR 常在字符间插空白
-				case c >= 'a' && c <= 'z':
-					c -= 'a' - 'A'
-				}
-				b.WriteByte(c)
-			}
-			return b.String()
-		}
+		return nil, nil // 逐字节比较（eval.Score 的 nil 分支）
 	default:
-		return nil
+		return nil, fmt.Errorf("--normalize 只支持 textimage | none，实得 %q", kind)
 	}
 }
 

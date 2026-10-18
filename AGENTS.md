@@ -61,8 +61,11 @@ widget 的 `fallback_base` 与多站点配置面、阶段 4B 的人工验收项�
   SQLite-backed Durable Objects（ADR-001 已更正旧的错误断言）。CF 边缘是阶段 5 之后的评估项，不在阶段 1。
 - 前端 widget：原生 JS 零依赖，gzip `[目标]` <30KB，中英双语，键盘可完成、`aria-live` 播报、移动端适配。
   4A 的 `[实测]`：`v1.js` 原文 48,412 B / **gzip 16,687 B**（预算内，由 `make widget-size` 守护）。
-  **移动端 375px 无横向溢出尚未实测**（Firefox BiDi 不给视口设置命令 ⇒ 该项 BLOCKED，需人工确认），
-  不得把它写成"已验证"。
+  **移动端 375px 已在阶段 4B 真实测过**（原表述是错的）：Firefox 147.0.2 的 BiDi 端点**支持**
+  W3C 规范的 `browsingContext.setViewport`，375×667 与 414×896 都能设进去（断言 `innerWidth`/`clientWidth`
+  实测相等）；此前记成"BiDi 不给视口设置命令 ⇒ BLOCKED"，实际是客户端只试过 `browsingContext.resize`
+  与 `emulation.setViewport` 两个**不存在**的命令。教训：**能力边界必须由能力测试给出**，
+  不要把"我没实现的那个调用失败了"读成"平台不提供"。这仍不等于真机移动端测试（DPR 是被设进去的）。
 
 ## 安全红线（违反即视为 bug，不接受"以后再说"）
 1. token 必须 HMAC-SHA256 签名，含过期与站点绑定；签名密钥用**带域分隔的 HMAC 派生**（按 purpose + kid，DESIGN §6）。

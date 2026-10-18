@@ -174,6 +174,16 @@ TTL_CREATE="$(curl -sS "${ADMIN[@]}" -H 'Content-Type: application/json' -X POST
   "verify_mode":"pow_question","generator_id":"text-image-v1","difficulty":1,"response_ttl_sec":2,
   "origins":["http://127.0.0.1:8396"],"allow_missing_origin":false}')"
 TTL_SECRET="$(printf '%s' "$TTL_CREATE" | json 'd.get("secret","")')"
+# 第四个演示站点：bits=24（服务端允许的上限），**只**给"计算超时"这条负面用例用。
+# 为什么需要它：powTimeoutMs 的下限是 1000ms（更小会被钳上去），而 bits=20 的实测最快
+# 一次只有 309ms ⇒ 在 bits=20 上"预算到点"约 1/3 概率抢不来，测试是靠运气而不是靠约束。
+# bits=24 把单次抢跑概率压到 ~2.5%，浏览器用例再叠一层有界重抽。
+# 这**不是**在生产里抬难度：默认站点仍 bits=12，bits=20 那条仍按原样做时延实测。
+SLOW_CREATE="$(curl -sS "${ADMIN[@]}" -H 'Content-Type: application/json' -X POST "$ABASE/api/admin/sites" -d '{
+  "name":"stage4a 超时预算专用","site_key":"pk_stage4a_slow","pow_bits":24,
+  "verify_mode":"pow_question","generator_id":"text-image-v1","difficulty":1,
+  "origins":["http://127.0.0.1:8394"],"allow_missing_origin":false}')"
+SLOW_KEY="pk_stage4a_slow"
 [[ -n "$HARD_SECRET" ]] || fail "建高难度演示站点失败：$HARD_CREATE"
 [[ -n "$HARD_SECRET" && "$HARD_SECRET" != "None" ]] || fail "高难度演示站点建不出来：$HARD_CREATE"
 [[ -n "$SITE_SECRET" && "$SITE_SECRET" != "None" ]] || fail "建站没拿到验证凭据：$CREATE"
@@ -186,6 +196,9 @@ printf '%s' "$GENS" | grep -q '"production_ready":false' || fail "视觉题型�
 pass "站点与题型登记：pow_question + text-image-v1（experimental:true / production_ready:false）"
 
 log "第六步：受控注入 50 道题（答案只落在临时目录；浏览器用例每题消耗一条）"
+# 50 是 devseed 的 maxCount 上限。**够不够不能靠猜**：第十一步之后会用
+# `pool 里剩余 ready 行数` 实测余量并设下限，用例增加导致池吃紧时在那里直接失败，
+# 而不是让"池空 ⇒ 503 challenge-unavailable"伪装成组件缺陷。
 "$WORK/devseed" --db "$DB_PATH" --out-dir "$WORK/seed" --generator text-image-v1 --difficulty 1 --count 50 \
   > "$WORK/devseed.log" 2>&1 || fail "devseed 注入失败：$(tail -n 5 "$WORK/devseed.log")"
 SEED_JSON="$WORK/seed/seeded-answers.json"
@@ -315,7 +328,7 @@ else
     BIDI_WS="ws://127.0.0.1:$BIDI_PORT/session" \
     EPOCHA_API="$BASE" EXAMPLE_URL="http://127.0.0.1:8391/" EXAMPLE_NOWORKER_URL="http://127.0.0.1:8392/" \
     SEED_JSON="$SEED_JSON" SEED_DIR="$WORK/seed" SITE_KEY="$SITE_KEY" \
-    HARD_SITE_KEY="$HARD_KEY" \
+    HARD_SITE_KEY="$HARD_KEY" SLOW_SITE_KEY="$SLOW_KEY" \
     EXAMPLE_WORKERFILE_URL="http://127.0.0.1:8393/" EXAMPLE_HARD_URL="http://127.0.0.1:8394/" \
     EXAMPLE_TTL_URL="http://127.0.0.1:8396/" TTL_SITE_KEY="pk_stage4a_ttl" \
       node --test docs/scripts/browser/widget_browser.test.mjs 2>&1 | tee "$WORK/browser.log"
@@ -326,31 +339,77 @@ else
     # node:test 的 skip 是"这条没执行"，不是"这条过了"。这里**逐项核对跳过了什么**：
     # 原先只判断"有没有 skip"，然后把任何一条都当成 375px 那一项——于是"高难度取消"
     # "方案 B 同源 worker 文件""过期清空 token"这三条必需交互只要没跑，门禁照样绿。
-    # 现在这三条的编排变量已改成硬要求（缺失即抛错），此处再钉一道身份与数量。
     SKIP_COUNT="$(awk '/^# skipped /{print $3}' "$WORK/browser.log")" || SKIP_COUNT=0
     PASS_COUNT="$(awk '/^# pass /{print $3}' "$WORK/browser.log")" || PASS_COUNT=0
     SKIP_COUNT="${SKIP_COUNT:-0}"; PASS_COUNT="${PASS_COUNT:-0}"
     case "$SKIP_COUNT$PASS_COUNT" in (*[!0-9]*|'') fail "读不到 node:test 的 pass/skipped 计数（报告格式变了？）";; esac
-    # "pass 计数够多"不等于"必需项都跑了"：一条用例改名后没被收集、或整条被注释掉，
-    # skipped 仍是 1、门禁仍绿，只是少测了一项。所以按**声明数**核账：
-    # 文件里 `^test(` 有几条，pass + skip 就必须等于几条，且 skip 只能是 375px 那一项。
+    [[ $SKIP_COUNT -eq 0 ]] \
+      || fail "浏览器用例跳过 $SKIP_COUNT 项：本文件现在不该有任何 skip（窄屏已由 browsingContext.setViewport 真实执行）"
+
+    # **按身份核对**，不只数条数：数 `^test(` 只能发现"少了几条"，发现不了"关键那条被改名/换成了
+    # 一条更弱但同名的断言"。下面逐条要求它作为**通过项**出现在 TAP 输出里。
+    # 用子串匹配（不是正则）：用例标题里有全角括号与 → 之类，正则化只会带来转义事故。
+    OK_TITLES="$(grep -E '^ok [0-9]+ - ' "$WORK/browser.log" || true)"
+    REQUIRED_TESTS=(
+      "闭环：显示图片 → 输入 → 浏览器内 PoW → redeem → 业务表单 → 服务端写入"
+      "答错即终结：同一题不能重试；换题拿到的是另一道题"
+      "一次性：同一个 token 重复提交必然被服务端拒绝"
+      "多实例隔离 + 隐藏字段：各自领题、各自写字段、销毁不串台"
+      "晚到的旧响应不能覆盖新题（刷新换代）"
+      "reset 与 destroy：清空 token/输入、移除 DOM 与隐藏字段、注销注册表"
+      "计算超时是真实约束：预算到点即明确失败，不去兑换"
+      "高难度站点：取消正在进行的计算不会晚到生效"
+      "CSP 禁止 Worker：明确失败，绝不假装通过"
+      "键盘可完成：Tab 到达输入框与按钮，Enter 提交"
+      "过期时清空 token 与隐藏字段（客户端倒计时跟着服务端的 response_ttl）"
+      "方案 B：同源 worker 文件路径可用（该页 CSP 禁 blob:，能过就说明确实走的是文件）"
+      "页面与组件的请求面：只打 /api/challenge 与 /api/redeem，不带凭据"
+      "窄屏 375×667：视口真的设成 375，布局不溢出、图片比例正确、控件全部可命中"
+      "窄屏 375：真实鼠标点击 + 键盘输入走完验证与业务提交"
+      "窄屏 375：错误文案不撑破布局（CSP 禁 Worker 的档位）"
+      "窄屏 414×896（较宽手机档）回归：无横向溢出、控件可命中、容器不吃满超宽"
+      "文档最小示例 fixture：deferred 脚本顺序确定，init 里 EpoCHA 已定义，字段属于目标 form"
+      "文档最小示例 fixture：FormData 带上 token，原生 form POST 真写入；没验证时同一按钮被服务端拒"
+      "隐藏字段的三种归属：form 外无关联即抛错且不留孤儿字段、显式 form 关联可用、fieldName:'' 不建字段"
+      "fixture：reset 从 FormData 里拿掉 token，destroy 移除字段本身"
+    )
+    MISSING=()
+    for want in "${REQUIRED_TESTS[@]}"; do
+      [[ "$OK_TITLES" == *"$want"* ]] || MISSING+=("$want")
+    done
+    [[ ${#MISSING[@]} -eq 0 ]] || fail "下列必需浏览器交互没有作为通过项出现：${MISSING[*]}"
+
+    # 反向也要成立：文件里新增的用例如果没进必需清单，就会"跑了但没人核对"。
+    # 这条把"清单与用例同步维护"变成门禁要求，而不是靠自觉。
+    while IFS= read -r title; do
+      covered=0
+      for want in "${REQUIRED_TESTS[@]}"; do
+        [[ "$want" == "$title" ]] && covered=1
+      done
+      [[ $covered -eq 1 ]] || fail "用例「$title」存在于测试文件但不在必需清单里：请把它纳入核对"
+    done < <(grep -oP '^test\("\K[^"]+' docs/scripts/browser/widget_browser.test.mjs)
+
+    # 再钉一道总量：文件里声明了几条，pass 就必须是几条（防止"必需项全过、额外项被悄悄删掉"）。
     DECLARED="$(grep -c '^test(' docs/scripts/browser/widget_browser.test.mjs || true)"
     DECLARED="${DECLARED:-0}"
     case "$DECLARED" in (''|*[!0-9]*) fail "读不到浏览器用例的声明条数";; esac
     [[ $DECLARED -gt 0 ]] || fail "浏览器用例文件里一条 test 都没声明"
-    [[ $((PASS_COUNT + SKIP_COUNT)) -eq $DECLARED ]] \
-      || fail "浏览器用例对不上账：声明 $DECLARED 条，实测 pass=$PASS_COUNT + skipped=$SKIP_COUNT ⇒ 有必需交互没被执行"
-    if [[ $SKIP_COUNT -gt 1 ]]; then
-      fail "浏览器用例跳过 $SKIP_COUNT 项：必需交互必须逐项真实执行，只有 375px 视口一项允许换算成 BLOCKED"
-    fi
-    if [[ $SKIP_COUNT -eq 1 ]]; then
-      grep -q "375px 宽度检查未执行" "$WORK/browser.log" \
-        || fail "跳过的那一条不是 375px 视口检查 ⇒ 有必需交互没跑，不能算通过"
-      grep -E "BLOCKED" "$WORK/browser.log" | sed 's/^/  /'
-      blocked "浏览器交互项之一未执行：Firefox BiDi 不提供视口设置命令 ⇒ 375px 移动端无横向溢出没被测到（需人工确认）"
-    fi
+    [[ $PASS_COUNT -eq $DECLARED ]] \
+      || fail "浏览器用例对不上账：声明 $DECLARED 条，实测 pass=$PASS_COUNT skip=$SKIP_COUNT"
     BROWSER_RAN=1
-    pass "真实浏览器交互断言：$DECLARED 条用例全数对账（$PASS_COUNT 项真实执行通过、$SKIP_COUNT 项换算 BLOCKED），Node 内置 WebSocket + Firefox BiDi，退出码 $browser_rc"
+    pass "真实浏览器交互断言：${#REQUIRED_TESTS[@]} 条必需用例**逐条按标题**通过，总量对账 $DECLARED 条声明 = $PASS_COUNT pass / $SKIP_COUNT skip（Node 内置 WebSocket + Firefox BiDi，退出码 $browser_rc）"
+
+    # 题池余量：每个 openPage/refresh 都消耗一道**不同的**受控题，注入上限是 devseed 的 50。
+    # 这里实测还剩多少，低于下限就失败 —— 让"用例增加把池吃光"在下一次加用例时暴露，
+    # 而不是某天变成一个查不出原因的 503。
+    POOL_LEFT="$(python3 -c '
+import sqlite3,sys
+c=sqlite3.connect(sys.argv[1])
+print(c.execute("select count(*) from pool where status=\"ready\"").fetchone()[0]); c.close()' "$DB_PATH")"
+    case "$POOL_LEFT" in (''|*[!0-9]*) fail "读不到题池剩余 ready 行数";; esac
+    log "  题池余量：注入 $SEED_COUNT 条，浏览器跑完剩 $POOL_LEFT 条 ready"
+    [[ $POOL_LEFT -ge 5 ]] || fail "题池余量只剩 $POOL_LEFT 条：再加用例就会撞 503，需同步提高 devseed 的 maxCount 并说明理由"
+    pass "题池余量实测：剩 $POOL_LEFT 条 ready（≥5 才算编排还留有余地）"
   fi
 fi
 
@@ -436,8 +495,11 @@ run_regress stage3b     bash docs/scripts/stage3b.sh
 pass "回归全部通过（退出码 0）：fmt-check / vet / race / size / secret-scan / widget-size / stage1 / stage2 / stage3a / stage3b"
 
 log "第十六步：效果类结论（不写 PASS）"
-blocked "OCR 效果实测：仍未执行 —— 本机无离线 OCR，未获授权安装工具或下载模型（同阶段 3B）"
-notrun "人工可读性：本轮未执行（4A 没有新的人工参与数据；盲测入口仍在 cmd/preview）"
+# 这两项原先写成"BLOCKED：本机没有 OCR"。阶段 4B 之后那句话不再成立：
+# 本机有 Docker，OCR 基线由 docs/scripts/ocr/run-baseline.sh 真实执行。
+# 它**不属于本门禁**，所以正确状态是 NOT_RUN（本轮没跑）而不是 BLOCKED（条件不足）。
+notrun "OCR 效果实测：不在本门禁范围内 ⇒ 本轮未执行（由阶段 4B 的 docs/scripts/ocr/run-baseline.sh 跑，结果见 docs/STAGE4B.md）"
+notrun "人工可读性：不在本门禁范围内 ⇒ 本轮未执行（盲测入口见 make blindtest，需真人完成）"
 notrun "widget 完整无障碍合规（音频/非视觉等价通道）：本阶段只交付视觉通道，缺口记录在 docs/WIDGET.md"
 
 log "工程项 $N_PASS 项 PASS；BLOCKED $N_BLOCKED；NOT_RUN $N_NOTRUN"
@@ -451,5 +513,5 @@ if [[ $BROWSER_RAN -ne 1 ]]; then
   printf '[stage4a] 结果: 浏览器必需验收本轮**没有真实执行**（见上面的 BLOCKED）⇒ 退出码 1\n' >&2
   exit 1
 fi
-log "结论口径：widget 与业务接入的工程闭环 + 真实浏览器交互 = PASS；OCR 效果 BLOCKED；人工可读性 NOT_RUN。"
+log "结论口径：widget 与业务接入的工程闭环 + 真实浏览器交互 = PASS；OCR 效果与人工可读性都不在本门禁内（NOT_RUN）。"
 log "本脚本**不**声称抗 AI/抗 OCR，也**不**等于阶段 4 完成（正式 widget 的其余项在 4B）。"

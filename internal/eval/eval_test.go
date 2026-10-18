@@ -118,7 +118,9 @@ func TestScoreAppliesNormalizer(t *testing.T) {
 	if m, _ := Score(ground, pred, nil); m.Exact != 0 {
 		t.Fatal("不归一化时大小写与空白应算不一致")
 	}
-	norm := func(s string) string {
+	// 故意用一个"宽容"的注入实现，证明评分器只按调用方给的口径计数。
+	// （真实题型用的是 generator 的 NormalizeAnswer；cmd/evalocr 里有断言证明两者同源。）
+	norm := func(s string) (string, bool) {
 		out := []byte{}
 		for i := 0; i < len(s); i++ {
 			c := s[i]
@@ -129,10 +131,34 @@ func TestScoreAppliesNormalizer(t *testing.T) {
 				out = append(out, c)
 			}
 		}
-		return string(out)
+		return string(out), true
 	}
 	if m, _ := Score(ground, pred, norm); m.Exact != 1 {
 		t.Fatalf("归一化后应判为一致：%+v", m)
+	}
+	// 注入实现判"畸形"时：既不算 Exact，也不算 Mismatched，而是单独的 Malformed，
+	// 且**留在分母里**（剔除它会虚高通过率）。
+	// 长度≠6 就畸形——这样 ground truth（6 位）仍然合法，只有带空白的预测被判畸形，
+	// 这正是"评分器拒绝为坏样本集静默兜底"的边界。
+	reject := func(s string) (string, bool) {
+		if len(s) != 6 {
+			return "", false
+		}
+		return s, true
+	}
+	m, err := Score(ground, pred, reject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Exact != 0 || m.Mismatched != 0 || m.Malformed != 1 {
+		t.Fatalf("畸形应单独计数：%+v", m)
+	}
+	if m.Predicted != 1 || m.ScoredAccuracy != 0 {
+		t.Fatalf("畸形不该被剔出分母：%+v", m)
+	}
+	// 字符级正确率只统计"合法且等长"的输出，畸形串不能靠长度巧合蹭分。
+	if m.CharAccuracy != 0 {
+		t.Fatalf("畸形输出不应参与字符级统计：%v", m.CharAccuracy)
 	}
 }
 

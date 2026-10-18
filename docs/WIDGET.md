@@ -18,26 +18,42 @@ URL 是**版本化**的：改协议或有不兼容变更就发 `v2.js`，不要�
 
 ## 1. 最小接入
 
+**这一节有可运行版本**：`cmd/exampleapp` 的 `/fixture` 页面就是下面这段代码，
+由 `docs/scripts/browser/widget_browser.test.mjs` 在真实浏览器里加载并**原生提交**验证
+（`FormData` 里有 token、POST 打到业务后端、服务端写库）。文档示例最容易出两种错误，
+它们都不在文字里，只有真加载 + 真提交才现形：
+
+- 跨域 widget 脚本带 `defer`，后面紧跟一个**同步**内联脚本立刻调 `EpoCHA.render`
+  ⇒ 加载顺序竞争，首屏偶发 `EpoCHA is not defined`（缓存热了就复现不出来）。
+- 容器放在 `<form>` **外** ⇒ 自动生成的隐藏字段不属于目标表单，页面显示"验证通过"，
+  但 POST 里根本没有 token。
+
 ```html
-<div id="captcha"></div>
 <form id="order" method="post" action="/order">
-  <!-- epocha_response 由 widget 自己创建并维护，见 §4 -->
+  <label for="item">商品</label>
+  <input id="item" name="text" type="text" maxlength="500">
+  <div id="captcha"></div>            <!-- 容器在 form 内：隐藏字段才属于这个表单 -->
   <button type="submit">下单</button>
 </form>
+
+<!-- 两个脚本都带 defer。deferred 脚本按文档顺序执行，所以 init 一定跑在 EpoCHA 定义之后。 -->
 <script src="https://captcha.example.com/widget/v1.js" defer></script>
-<script>
-  var captchaId = EpoCHA.render(document.getElementById('captcha'), {
-    apiBase: 'https://captcha.example.com',
-    siteKey: 'pk_your_site_key',
-    language: 'zh-CN',            // 或 'en'；缺省按 navigator.language
-    onSuccess: function (token) { /* 只是 UI 信号，**不是**授权 */ }
+<script src="/js/epocha-init.js" defer></script>
+```
+
+`/js/epocha-init.js` —— 外部文件，**不是**内联块（严格 CSP 因此不需要 `unsafe-inline`）：
+
+```js
+"use strict";
+document.addEventListener("DOMContentLoaded", function () {
+  EpoCHA.render(document.getElementById("captcha"), {
+    apiBase: "https://captcha.example.com",
+    siteKey: "pk_your_site_key",      // 浏览器侧只出现 site_key
+    language: "zh-CN",                // 或 'en'
+    fieldName: "epocha_response",     // 与后端读取的字段名保持一致
+    onSuccess: function (token) { /* UI 信号，**不是**授权 */ }
   });
-  // 提交前：业务后端自己调 /siteverify；这里只演示怎么取 token
-  document.getElementById('order').addEventListener('submit', function () {
-    // 隐藏字段已自动填好；若要程序化取值：
-    // var token = EpoCHA.getResponse(captchaId);
-  });
-</script>
+});
 ```
 
 服务端（业务后端，**永远不要在浏览器里做**）：
@@ -51,6 +67,26 @@ curl -sX POST https://captcha.example.com/siteverify \
 `onSuccess` **不是**授权信号：它是浏览器里的回调，攻击者可以随意伪造"看起来成功"的页面状态。
 授权只由服务端 `/siteverify` 的 `success:true` 决定 —— `cmd/exampleapp` 的页面故意让提交按钮**一直可点**，
 就是为了让人亲眼看到"没验证也会被服务端拒"。
+
+上面的 `<script src="https://captcha.example.com/…">` 是**你自己的 epocha 源站**，不是公共 CDN。
+如果改从第三方 CDN 分发，请按 §6 自托管或加 `integrity` + `crossorigin`：上游被攻陷就等于
+在你的 origin 上执行任意代码。
+
+### 1.1 容器不在 form 内怎么办
+
+隐藏字段落在 form 外等于什么都没提交，所以组件**不会**静默放过这种情况：
+`fieldName` 非空但容器不在任何 `<form>` 内时，`render()` 直接 `throw TypeError`，
+且不会留下一个孤儿 input。三种正确写法（都有浏览器用例覆盖）：
+
+```js
+EpoCHA.render(el, { …, fieldName: "" })                          // 只要回调/getResponse，不要字段
+EpoCHA.render(el, { …, form: document.getElementById("order") }) // 传 form 元素
+EpoCHA.render(el, { …, form: "order" })                          // 或传同文档内 form 的 id
+```
+
+`form` 只接受**当前文档里的真实 `<form>`**（元素或其 id）。选择器字符串、跨文档元素、
+不存在的 id 都抛错 —— 目的是把"随便挑一个表单"这种默认行为挡掉：字段进了错误的表单，
+比没有表单更难排查。
 
 ## 2. API
 
@@ -71,7 +107,8 @@ curl -sX POST https://captcha.example.com/siteverify \
 | `apiBase` | **必填** | 验证服务基址（widget 只打它的 `/api/challenge`、`/api/redeem`） |
 | `siteKey` | **必填** | 公开站点标识。形态不合法直接 `throw`（不静默降级） |
 | `language` | `navigator.language` | `zh-CN` / `en`（其他值按前缀归一到这两档） |
-| `fieldName` | `"epocha_response"` | 隐藏字段名；给 `""` 就**不**创建字段 |
+| `fieldName` | `"epocha_response"` | 隐藏字段名；给 `""` 就**不**创建字段。非空时容器必须在目标 form 内，或用 `form` 关联，否则 `render()` 抛 `TypeError` |
+| `form` | — | 目标 `<form>` 元素或其在**当前文档**里的 id。容器在 form 外时用它显式关联 |
 | `onSuccess(token, id)` | — | 验证通过一次（**每个 token 只触发一次**） |
 | `onExpired(id)` | — | token 过期：同时**已清空** token 与隐藏字段 |
 | `onError({code,message,retryable,widgetId})` | — | 受控错误：`code` 是固定集合，`message` 是本地化文案，**不含服务端原文** |
@@ -123,8 +160,12 @@ idle → loading → ready → solving → submitting → verified
 ```
 
 - 字段名可配（`fieldName`），值**只**放 response token。
+- **字段必须属于目标 form**：容器在 form 内 ⇒ 字段建在容器里（跟着容器一起移动/移除）；
+  容器在 form 外 ⇒ 必须用 `form` 选项关联，否则 `render()` 抛 `TypeError`（不静默造一个提交不到的字段，见 §1.1）。
 - `reset` / `refresh` / 过期 / 答错 / `destroy` 都会清空或移除它。
 - 多实例各写自己那个字段：同名字段落在不同 `<form>` 里互不覆盖（实测断言）。
+- 上面这些不是推断：`/fixture` 页面用 `new FormData(form)` 与**原生 form POST** 双重验证过
+  ——`FormData` 里的值与 `getResponse()` 一致，且服务端确实收到并写库（`docs/STAGE4B.md` §2）。
 
 ## 5. PoW 与 Worker
 
@@ -183,7 +224,15 @@ worker-src  blob:                                       # 方案 A
 
 已做：`<label for>` 绑定输入框；`role="status" aria-live="polite"` 播报；错误不只靠颜色
 （`data-kind` + 文案，输入框 `aria-invalid`）；键盘可完成整题（Tab 到达输入框与按钮、Enter 提交）；
-不自动抢焦点（除用户主动交互外不 `focus()`）；图片 `alt` 只描述用途**不含答案**；375px 级宽度自适应。
+不自动抢焦点（除用户主动交互外不 `focus()`）；图片 `alt` 只描述用途**不含答案**。
+
+**窄屏是真实测量，不是推断**（阶段 4B）：用 W3C BiDi `browsingContext.setViewport`
+把 Firefox 147.0.2 的视口**真的**设成 375×667 与 414×896（先断言 `window.innerWidth`
+与 `documentElement.clientWidth` 等于目标值，再量布局），检查文档无横向溢出、
+组件盒不超右缘、图片完整且比例不变形、输入框与两个按钮在 shadow DOM 内**中心点可命中**、
+错误文案不撑破状态区，并在 375 下用真实鼠标点击 + 键盘输入走完验证与业务提交。
+这不等于真机移动端测试：`devicePixelRatio` 是被设进去的 2，不是某台设备的像素密度；
+没有触屏手势、没有浏览器工具栏占用、没有低端 Android WebView 的排版差异。
 
 **未做，也不声称已做**：
 

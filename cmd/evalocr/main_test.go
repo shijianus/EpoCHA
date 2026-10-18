@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/shijianus/EpoCHA/internal/eval"
+	"github.com/shijianus/EpoCHA/internal/generator"
 )
 
 // fakeOCR 写一个可执行脚本：按文件名尾号决定输出，用于制造各种结果。
@@ -71,7 +72,7 @@ exit 0`)
 
 	o := &options{
 		groundTruth: gt, imageDir: dir, ocrCmd: script,
-		ocrArgs: []string{"{image}"}, timeout: 5 * time.Second, normalize: "upper",
+		ocrArgs: []string{"{image}"}, timeout: 5 * time.Second, normalize: "textimage",
 	}
 	code, err := measure(o)
 	if err != nil {
@@ -87,7 +88,11 @@ exit 0`)
 		{File: "c.png", Err: "exec-failed"},
 		{File: "d.png", Err: "empty-output"},
 	}
-	m, err := eval.Score(loadGroundMust(t, gt), preds, normalizer("upper"))
+	norm, err := normalizer("textimage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := eval.Score(loadGroundMust(t, gt), preds, norm)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +122,7 @@ func TestMeasureWritesPredictionsAndRespectsLimit(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "predictions.jsonl")
 	code, err := measure(&options{
 		groundTruth: gt, imageDir: dir, ocrCmd: script, ocrArgs: []string{"{image}"},
-		timeout: 5 * time.Second, normalize: "upper", limit: 1, out: out,
+		timeout: 5 * time.Second, normalize: "textimage", limit: 1, out: out,
 	})
 	if err != nil || code != 0 {
 		t.Fatalf("code=%d err=%v", code, err)
@@ -144,7 +149,7 @@ func TestMeasureBlockedWhenToolMissing(t *testing.T) {
 	gt := writeGround(t, dir, eval.Sample{File: "a.png", Answer: "ABCD23"})
 	code, err := measure(&options{
 		groundTruth: gt, imageDir: dir, ocrCmd: "/nonexistent/ocr-tool-here",
-		ocrArgs: []string{"{image}"}, timeout: time.Second, normalize: "upper",
+		ocrArgs: []string{"{image}"}, timeout: time.Second, normalize: "textimage",
 	})
 	if err != nil {
 		t.Fatalf("阻塞不是错误：%v", err)
@@ -170,7 +175,7 @@ func TestGroundTruthCannotEscapeImageDir(t *testing.T) {
 	predsPath := filepath.Join(t.TempDir(), "p.json")
 	if code, err := measure(&options{
 		groundTruth: gt, imageDir: sub, ocrCmd: script, ocrArgs: []string{"{image}"},
-		timeout: time.Second, normalize: "upper", out: predsPath,
+		timeout: time.Second, normalize: "textimage", out: predsPath,
 	}); err != nil || code != 0 {
 		t.Fatalf("code=%d err=%v", code, err)
 	}
@@ -184,16 +189,83 @@ func TestGroundTruthCannotEscapeImageDir(t *testing.T) {
 }
 
 func TestNormalizerPolicy(t *testing.T) {
-	n := normalizer("upper")
-	if got := n(" ab cd23\n"); got != "ABCD23" {
-		t.Fatalf("upper 归一化结果 %q", got)
+	// 默认档必须**就是**生产实现。这条断言是整个评测口径的地基：
+	// 评分器与判分器一旦用两套归一化，测出来的通过率就不再是"服务端会接受多少"。
+	n, err := normalizer("textimage")
+	if err != nil {
+		t.Fatal(err)
 	}
-	// 刻意**不做** 0↔O / 1↔I 替换：那种宽容会系统性抬高通过率
-	if got := n("ABCD0O"); got != "ABCD0O" {
-		t.Fatalf("不应做易混字符替换：%q", got)
+	if n == nil {
+		t.Fatal("textimage 档不应回落到逐字节比较")
 	}
-	if normalizer("none") != nil {
+	var g generator.TextImage
+	for _, in := range []string{"abcd23", " ABCD23 ", "ABCD23", "AB\tCD23"} {
+		want, wantOK := g.NormalizeAnswer(in)
+		got, gotOK := n(in)
+		if got != want || gotOK != wantOK {
+			t.Fatalf("与生产 NormalizeAnswer 不一致 %q：eval=(%q,%v) prod=(%q,%v)", in, got, gotOK, want, wantOK)
+		}
+	}
+	// 大小写折叠是"同一答案的另一种写法"，OCR 常见，服务端也接受。
+	if got, ok := n("abcd23"); !ok || got != "ABCD23" {
+		t.Fatalf("大小写折叠结果不对：%q %v", got, ok)
+	}
+	// 关键回归点：**含内部空白**的输出在生产路径是畸形（400），不是"删掉空格就算对"。
+	// 旧的 upper 档会把它归一化成正确答案，从而把通过率抬高——那正是被禁止的口径放宽。
+	if got, ok := n("AB CD23"); ok {
+		t.Fatalf("含内部空白的输出不应被判为合法输入（旧 upper 档就是错在这里）：%q", got)
+	}
+	// 易混字符替换同样不允许：0↔O、1↔I 的宽容会系统性抬高通过率
+	if got, ok := n("ABCD0O"); ok {
+		t.Fatalf("0/O 不在字符集内，不应合法：%q", got)
+	}
+	// 长度必须恰好 6：OCR 少读一个字符就是错，不该被"归一化"救回来
+	if _, ok := n("ABCD2"); ok {
+		t.Fatal("长度不足 6 不应判为合法")
+	}
+	if _, err := normalizer("upper"); err == nil {
+		t.Fatal("upper 档已废除：它会比服务端更宽容，测出来的通过率不可信")
+	}
+	if n2, err := normalizer("none"); err != nil || n2 != nil {
 		t.Fatal("none 应返回 nil，由评分器逐字节比较")
+	}
+}
+
+// 畸形输出必须单独可见：把它混进"答错"会让人以为 OCR 读出了内容只是读歪了。
+func TestScoreCountsMalformedSeparately(t *testing.T) {
+	n, err := normalizer("textimage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ground := []eval.Sample{{File: "a.png", Answer: "ABCD23"}, {File: "b.png", Answer: "ABCD23"}}
+	preds := []eval.Prediction{
+		{File: "a.png", Text: "A B C D 2 3"}, // OCR 插了空格：服务端会 400，而不是接受
+		{File: "b.png", Text: "ABCD24"},      // 格式合法但答错
+	}
+	m, err := eval.Score(ground, preds, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Exact != 0 || m.Malformed != 1 || m.Mismatched != 1 {
+		t.Fatalf("畸形与答错应分开计数：%+v", m)
+	}
+	if m.StrictAccuracy != 0 {
+		t.Fatalf("通过率应为 0：%v", m.StrictAccuracy)
+	}
+	// 分母仍然是全部样本：畸形输出不能从口径里被删掉。
+	if m.ScoredAccuracy != 0 || m.Predicted != 2 {
+		t.Fatalf("畸形不应被剔出分母：%+v", m)
+	}
+}
+
+// ground truth 自己畸形 = 样本集坏了，必须炸而不是静默少测。
+func TestScoreRejectsMalformedGroundTruth(t *testing.T) {
+	n, err := normalizer("textimage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eval.Score([]eval.Sample{{File: "a.png", Answer: "AB CD"}}, nil, n); err == nil {
+		t.Fatal("ground truth 畸形应当报错")
 	}
 }
 

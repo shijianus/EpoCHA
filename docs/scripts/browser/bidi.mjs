@@ -178,6 +178,43 @@ export class BiDi {
         return n ? n.textContent : null;})()`);
   }
 
+  // setViewport：按 W3C WebDriver BiDi 规范调 `browsingContext.setViewport`。
+  // 参数形状是 `{context, viewport:{width,height}|null, devicePixelRatio?}`。
+  //
+  // 为什么显式写这个方法而不是"启动时加个窗口尺寸参数"：headless Firefox 默认视口
+  // 1366×768，把 CSS 容器缩到 375px **不会**改变 window.innerWidth，于是"测了窄屏"
+  // 其实是"测了宽屏上的一个小盒子"——媒体查询、换行、溢出全都不是 375px 那套。
+  // 调用成功不代表浏览器一定应用了，所以调用方**必须**再断言 innerWidth/clientWidth
+  // （widget_browser.test.mjs 的窄屏用例就是这么做的）。
+  //
+  // 实测（Firefox 147.0.2 / linux-arm64）：该命令真实生效，375×667 与 414×896 都能设进去，
+  // devicePixelRatio 也可覆写。旧文档里"BiDi 不提供视口命令"的说法是错的。
+  async setViewport(context, width, height, devicePixelRatio = null) {
+    const params = { context, viewport: { width, height } };
+    if (devicePixelRatio !== null) params.devicePixelRatio = devicePixelRatio;
+    return this.send("browsingContext.setViewport", params);
+  }
+
+  // viewportMetrics：读回浏览器**自己**认为的视口尺寸。
+  // 用它来证明 setViewport 真的生效了，而不是相信启动参数或命令返回值。
+  async viewportMetrics(context) {
+    return this.evaluateJSON(context,
+      `({innerWidth:window.innerWidth, clientWidth:document.documentElement.clientWidth,
+          innerHeight:window.innerHeight, devicePixelRatio:window.devicePixelRatio,
+          scrollWidth:document.documentElement.scrollWidth,
+          bodyScrollWidth:(document.body?document.body.scrollWidth:null),
+          docScrollWidth:document.scrollingElement?document.scrollingElement.scrollWidth:null})`);
+  }
+
+  // subscribeEvents：订阅 BiDi 事件（log.entryAdded 等）。
+  // `contexts` 省略时**不发送**该字段 = 订阅整个会话的所有上下文；传空数组在规范里含义不同，
+  // 所以这里刻意不把它折叠成 []。
+  async subscribeEvents(events, contexts) {
+    const params = { events };
+    if (Array.isArray(contexts) && contexts.length > 0) params.contexts = contexts;
+    return this.send("session.subscribe", params);
+  }
+
   async consoleErrors() {
     return this.events
       .filter((e) => e.method === "log.entryAdded" && (e.params.level === "error" || e.params.level === "warn"))

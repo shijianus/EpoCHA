@@ -21,6 +21,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net"
@@ -239,7 +240,10 @@ func (a *app) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /app.css", a.handleStatic)
 	mux.HandleFunc("GET /app.js", a.handleStatic)
+	mux.HandleFunc("GET /fixture-init.js", a.handleStatic)
 	mux.HandleFunc("GET /", a.handlePage)
+	mux.HandleFunc("GET /fixture", a.handleFixture)
+	mux.HandleFunc("POST /guestbook-form", a.handleFormPost)
 	mux.HandleFunc("GET /guestbook", a.handleList)
 	mux.HandleFunc("POST /guestbook", a.handlePost)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -283,6 +287,27 @@ func (a *app) handlePage(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	a.writePage(w, pageTemplate)
+}
+
+// handleFixture 渲染**文档里那份最小接入示例的可运行版本**（docs/WIDGET.md §1）。
+//
+// 为什么要专门做一个页面：文档示例最容易犯的两种错都不在文字里，只在浏览器里现形——
+//
+//	(a) 跨域 widget 脚本用 defer，后面紧跟的内联脚本立即调 EpoCHA.render ⇒ 竞争，
+//	    首屏偶发 "EpoCHA is not defined"；本机缓存热了就测不出来。
+//	(b) 容器放在 form 外 ⇒ 隐藏字段不属于目标 form，验证"成功"了但 POST 里根本没有 token。
+//
+// 这两条只有真加载、真提交才看得见，所以这里给一个能被浏览器用例驱动的页面，
+// 而不是让用例去 grep 文档字符串。
+func (a *app) handleFixture(w http.ResponseWriter, r *http.Request) {
+	a.writePage(w, fixtureTemplate)
+}
+
+// writePage 注入**只有公开值**的配置块，并按 --widget-origin 决定脚本来源。
+// 验证凭据不在这里，也不在任何响应里（按值扫描由 stage4b.sh 与 Go 测试各做一次）。
+// 首页与 fixture 共用它：CSP 与注入方式都必须一致，否则"文档示例能跑"就推不出"页面能跑"。
+func (a *app) writePage(w http.ResponseWriter, page string) {
 	if csp := a.cspFor(); csp != "" {
 		w.Header().Set("Content-Security-Policy", csp)
 	}
@@ -290,8 +315,6 @@ func (a *app) handlePage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	// 注入的只有**公开值**：apiBase、site_key、widget 地址。验证凭据不在这里，
-	// 也不在任何响应里（按值扫描由 stage4a.sh 与 Go 测试各做一次）。
 	cfg := map[string]any{
 		"api_base":   a.o.APIBase,
 		"site_key":   a.siteKey,
@@ -313,17 +336,58 @@ func (a *app) handlePage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "config", http.StatusInternalServerError)
 		return
 	}
-	page := strings.Replace(pageTemplate, "{{CFG}}", templateJSEscape(string(blob)), 1)
+	page = strings.Replace(page, "{{CFG}}", templateJSEscape(string(blob)), 1)
+	tag := `<script src="` + a.widgetSrc + `" defer></script>`
 	if a.o.WidgetFrom == "self" {
-		page = strings.Replace(page, "{{WIDGET_TAG}}", `<script src="/widget/v1.js" defer></script>`, 1)
-	} else {
-		page = strings.Replace(page, "{{WIDGET_TAG}}",
-			`<script src="`+a.widgetSrc+`" defer></script>`, 1)
+		tag = `<script src="/widget/v1.js" defer></script>`
 	}
-	_, _ = io.WriteString(w, page)
+	_, _ = io.WriteString(w, strings.Replace(page, "{{WIDGET_TAG}}", tag, 1))
 }
 
-// handleStatic 提供页面自己的 CSS 与 JS。放在**同源静态文件**里而不是内联，
+// handleFormPost 收**原生表单**的 POST（application/x-www-form-urlencoded），
+// 与 JSON 路径共用 commitProtected。它的存在是为了回答一个只有真提交才能回答的问题：
+// "隐藏字段到底有没有跟着 form 走"。
+func (a *app) handleFormPost(w http.ResponseWriter, r *http.Request) {
+	if !a.sameSite(r) {
+		a.log.Info("表单提交被来源拒绝", "origin", r.Header.Get("Origin"), "reason", "not-same-site")
+		a.renderResult(w, http.StatusForbidden, errOrigin, "只接受来自本示例页面所在站的提交。")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+	if err := r.ParseForm(); err != nil {
+		a.renderResult(w, http.StatusRequestEntityTooLarge, errTooLarge, "请求体过大或表单不可解析。")
+		return
+	}
+	// 表单版同样走**字段白名单**：原生 form 的字段是页面里任何 input 都能加的，
+	// 若这里宽松读取，"浏览器指定验证目标"就会从 POST 表单这条路绕回来。
+	for k := range r.PostForm {
+		if k != "text" && k != "epocha_response" {
+			a.renderResult(w, http.StatusBadRequest, "epocha-bad-request", "表单里出现了未预期的字段。")
+			return
+		}
+	}
+	status, machine, message := a.commitProtected(r.Context(), r.PostForm.Get("text"), r.PostForm.Get("epocha_response"))
+	a.renderResult(w, status, machine, message)
+}
+
+// renderResult 把结论写成**可断言**的 HTML：data-status/data-machine 给自动化用，
+// 人也能直接读懂。不用 JSON 是因为这一页是浏览器导航的目标（form POST 的响应）。
+func (a *app) renderResult(w http.ResponseWriter, status int, machine, message string) {
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; base-uri 'none'")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	// 三个插值都走 HTML 转义：这一页是浏览器导航目标，把结论当纯文本拼进 HTML
+	// 就是给自己留一个"错误消息变成标记"的注入面。
+	_, _ = io.WriteString(w, strings.NewReplacer(
+		"{{STATUS}}", strconv.Itoa(status),
+		"{{MACHINE}}", html.EscapeString(machine),
+		"{{MESSAGE}}", html.EscapeString(message),
+	).Replace(resultTemplate))
+}
+
+// handleStatic 提供页面自己的 CSS 与 JS。放在**同源静态文件**而不是内联，
 // 是为了让示例页面在严格 CSP（不给 'unsafe-inline'）下真的能跑：
 // 实测内联写法被 script-src 挡下，页面看起来"就是不动"，而 curl 什么都看不出来。
 func (a *app) handleStatic(w http.ResponseWriter, r *http.Request) {
@@ -333,6 +397,8 @@ func (a *app) handleStatic(w http.ResponseWriter, r *http.Request) {
 		body, ct = pageCSS, "text/css; charset=utf-8"
 	case "/app.js":
 		body, ct = pageJS, "text/javascript; charset=utf-8"
+	case "/fixture-init.js":
+		body, ct = fixtureInitJS, "text/javascript; charset=utf-8"
 	default:
 		http.NotFound(w, r)
 		return
@@ -386,62 +452,71 @@ func (a *app) handlePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	text := strings.TrimSpace(req.Text)
+	status, machine, message := a.commitProtected(r.Context(), text, req.Response)
+	if status != http.StatusCreated {
+		a.reject(w, status, machine, message)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"ok": true, "message": message,
+	})
+}
+
+// commitProtected 是"受保护操作"的**唯一**实现：JSON 接口（app.js 的 fetch）与
+// 原生表单 POST（/fixture 的 form）都走这一个函数。
+//
+// 为什么强调唯一：接入示例的价值在于"照抄就不会错"。若表单路径另写一份校验，
+// 两份就会在"什么算已授权"上漂移，而漂移的方向通常是新那份更松。
+//
+// 返回 (status, machine, message)；status==201 才代表真的写入了。
+func (a *app) commitProtected(ctx context.Context, text, response string) (int, string, string) {
+	text = strings.TrimSpace(text)
 	if text == "" || len([]rune(text)) > maxTextLen {
-		a.reject(w, http.StatusBadRequest, "epocha-bad-request", "留言不能为空且不超过 500 字。")
-		return
+		return http.StatusBadRequest, "epocha-bad-request", "留言不能为空且不超过 500 字。"
 	}
-	if len(req.Response) > maxTokenLen {
-		a.reject(w, http.StatusBadRequest, "epocha-bad-request", "response 太长。")
-		return
+	if len(response) > maxTokenLen {
+		return http.StatusBadRequest, "epocha-bad-request", "response 太长。"
 	}
-	if req.Response == "" {
+	if response == "" {
 		// 关键演示点：**前端的 onSuccess 不是授权**。没带 token 就是没授权，
 		// 哪怕页面看起来"已经绿了"。
-		a.reject(w, http.StatusForbidden, errMissingToken, "没有人机验证凭据，不能写入留言。")
-		return
+		return http.StatusForbidden, errMissingToken, "没有人机验证凭据，不能写入留言。"
 	}
 
-	ok, codes, verifyErr := a.callSiteVerify(r.Context(), req.Response)
+	ok, codes, verifyErr := a.callSiteVerify(ctx, response)
 	if verifyErr != nil {
 		// 验证服务不可达/超时/响应不可解析 ⇒ fail closed。
 		a.log.Error("siteverify 调用失败", "err", errKind(verifyErr))
-		a.reject(w, http.StatusServiceUnavailable, errVerifyDown,
-			"验证服务暂时不可用，留言**没有**写入。请稍后重新验证。")
-		return
+		return http.StatusServiceUnavailable, errVerifyDown,
+			"验证服务暂时不可用，留言**没有**写入。请稍后重新验证。"
 	}
 	if !ok {
 		code := strings.Join(codes, ",")
-		status := http.StatusForbidden
-		machine := errInvalidTok
 		if strings.Contains(code, "timeout-or-duplicate") {
-			status, machine = http.StatusConflict, errDuplicateTok
+			a.log.Info("验证未通过，留言未写入", "code", code)
+			return http.StatusConflict, errDuplicateTok, "人机验证未通过（token 无效、已过期或已被使用）。请重新验证。"
 		}
 		a.log.Info("验证未通过，留言未写入", "code", code)
-		a.reject(w, status, machine, "人机验证未通过（token 无效、已过期或已被使用）。请重新验证。")
-		return
+		return http.StatusForbidden, errInvalidTok, "人机验证未通过（token 无效、已过期或已被使用）。请重新验证。"
 	}
 
 	// 到这一步服务端已经**消费**了这条 response（一次性账本已落账）。
 	// 因此下面业务写入若失败，绝不能"把成功缓存起来下次再用"：那等于绕过一次性语义。
 	if a.shouldFailWrite() {
 		a.log.Error("留言写入失败（token 已被消费）")
-		a.reject(w, http.StatusInternalServerError, "epocha-write-failed",
-			"留言写入失败，而这次验证凭据**已经作废**（一次性）。请重新验证后再提交。")
-		return
+		return http.StatusInternalServerError, "epocha-write-failed",
+			"留言写入失败，而这次验证凭据**已经作废**（一次性）。请重新验证后再提交。"
 	}
 	verifiedAt := time.Now().UTC().Format(time.RFC3339)
-	prefix := req.Response[:minInt(len(req.Response), 12)]
+	prefix := response[:minInt(len(response), 12)]
 	if _, err := a.gb.Exec(`INSERT INTO guestbook(text, verified_at, token_prefix) VALUES (?,?,?)`,
 		text, verifiedAt, prefix); err != nil {
 		a.log.Error("留言写入失败（token 已被消费）", "err", errKind(err))
-		a.reject(w, http.StatusInternalServerError, "epocha-write-failed",
-			"留言写入失败，而这次验证凭据**已经作废**（一次性）。请重新验证后再提交。")
-		return
+		return http.StatusInternalServerError, "epocha-write-failed",
+			"留言写入失败，而这次验证凭据**已经作废**（一次性）。请重新验证后再提交。"
 	}
 	a.log.Info("留言已写入", "verified_at", verifiedAt)
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"ok": true, "verified_at": verifiedAt, "message": "留言已写入",
-	})
+	return http.StatusCreated, "", "留言已写入"
 }
 
 // shouldFailWrite 消费掉一次注入的失败标志（测试用）。
@@ -493,12 +568,17 @@ func (a *app) callSiteVerify(ctx context.Context, response string) (bool, []stri
 // 但仍然挡掉任意页面发起的跨站 POST（Origin 与 Sec-Fetch-Site 由浏览器强制设置，脚本改不了）。
 // 既没有 Origin 也没有 Sec-Fetch-Site 的请求是非浏览器客户端（curl、自动化脚本）：
 // 示例应用允许它（否则没法演示脚本路径），真实业务应当在这里拒绝。
+//
+// `Origin: null` 不是"另一个站"，而是**不透明来源**的表示：实测 Firefox 在原生 form
+// POST 导航时会发 `Origin: null`（直接把 `"null"` 当 URL 解析会得到空 Host，于是每个
+// 真实表单提交都被误拒）。这种请求不能凭 Origin 判定，必须回落到 Sec-Fetch-Site；
+// 而 Sec-Fetch-Site 是浏览器强制设置的 forbidden header，脚本改不了，判定强度不降。
 func (a *app) sameSite(r *http.Request) bool {
 	host := r.Host
 	if host == "" {
 		host = a.o.Listen
 	}
-	if o := r.Header.Get("Origin"); o != "" {
+	if o := r.Header.Get("Origin"); o != "" && o != "null" {
 		u, err := url.Parse(o)
 		if err != nil {
 			return false
@@ -510,6 +590,11 @@ func (a *app) sameSite(r *http.Request) bool {
 		return false
 	case "same-origin", "same-site", "none":
 		return true
+	}
+	// Origin: null 且没有 Sec-Fetch-Site：无法证明同源。示例应用仍放行（它是演示程序，
+	// 且没有会话凭据可被 CSRF），但把这件事记进日志，避免被当成"来源检查起作用了"。
+	if r.Header.Get("Origin") == "null" {
+		a.log.Info("Origin 为 null 且无 Sec-Fetch-Site，按示例策略放行", "path", r.URL.Path)
 	}
 	return true
 }
@@ -700,6 +785,93 @@ const pageTemplate = `<!DOCTYPE html>
 // pageCSS / pageJS 是**同源静态文件**而不是内联块：严格 CSP 下不给 'unsafe-inline'，
 // 内联样式与脚本都会被挡（本轮实测过：页面看起来"就是不动"，curl 完全看不出来）。
 // 配置走 <script type="application/json"> 数据块 —— 它不会被执行，因此不受 script-src 约束。
+// fixtureTemplate 是 docs/WIDGET.md §1 的最小接入示例**原样可运行版**。
+//
+// 三处刻意的设计，都是为了堵掉两个只在浏览器里现形的错误：
+//  1. 容器 `<div id="captcha">` 在 `<form>` **内** —— 放在 form 外时隐藏字段不属于目标表单，
+//     页面看着"验证通过"，POST 里却没有 token。
+//  2. widget 脚本与初始化脚本**都带 defer**：deferred 脚本按文档顺序执行，
+//     所以 init 一定跑在 EpoCHA 定义之后。一个 defer 一个同步才是竞争源头。
+//  3. 初始化在**外部同源文件**里（/fixture-init.js），不靠内联 `<script>` 换便利：
+//     CSP 保持 `script-src 'self' <apiBase>`，不需要 unsafe-inline。
+const fixtureTemplate = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>epocha 最小接入示例（fixture）</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<h1>最小接入示例（可运行 fixture）</h1>
+<p class="sub">这一页就是文档 §1 那段示例的可运行版本：容器在 form 内、两个脚本都 defer 保序、
+初始化走外部文件。受保护操作 = 原生表单 POST 到 /guestbook-form，服务端只有 /siteverify
+返回 success:true 才写入。</p>
+
+<form id="order" method="post" action="/guestbook-form">
+  <h2>下单</h2>
+  <label for="item">商品与备注</label>
+  <input id="item" name="text" type="text" maxlength="500" value="一件示例商品">
+  <div id="captcha"></div>
+  <p id="wstate" class="sub">组件状态：<code>idle</code></p>
+  <button type="submit">提交订单</button>
+  <p class="sub">注意：提交按钮**一直可点**。没完成验证也会被服务端拒绝 —— 前端的
+     onSuccess 不是授权。</p>
+</form>
+
+<script id="cfg" type="application/json">{{CFG}}</script>
+{{WIDGET_TAG}}
+<script src="/fixture-init.js" defer></script>
+</body>
+</html>
+`
+
+// fixtureInitJS 是页面自己的初始化脚本（同源、非内联）。它只用 site_key，
+// 手里没有任何凭据，也不会去调 /siteverify —— 那一步只在业务后端。
+const fixtureInitJS = `"use strict";
+(function () {
+  var CFG = JSON.parse(document.getElementById('cfg').textContent);
+  var out = document.getElementById('wstate');
+  var form = document.getElementById('order');
+  // 状态一律走 textContent：拼 HTML 字符串会被门禁的按值扫描拦下，
+  // 而且服务端/组件的错误文案是外部输入，不该有变成标记的机会。
+  function setWState(s) { out.textContent = '组件状态：' + s; }
+  var widgetId = window.EpoCHA.render(document.getElementById('captcha'), {
+    apiBase: CFG.api_base,
+    siteKey: CFG.site_key,
+    language: CFG.lang,
+    workerUrl: CFG.worker_url || '',
+    fieldName: 'epocha_response',   // 与后端表单字段白名单一致
+    form: form,                     // 容器已在 form 内时等价；表单外挂载就靠它显式关联
+    onState: setWState,
+    onSuccess: function () { setWState('verified（可以提交了；授权仍由服务端判定）'); },
+    onExpired: function () { setWState('expired（凭据已清空，请重新验证）'); },
+    onError: function (e) { setWState('error: ' + e.code); }
+  });
+  // 给自动化用的只读把手：不改变行为，只是让用例能拿到同一个实例句柄。
+  window.__fixture = { id: widgetId, formId: 'order' };
+})();
+`
+
+// resultTemplate 是原生表单 POST 的响应页（浏览器导航目标，所以是 HTML 不是 JSON）。
+// data-* 两个属性让自动化能机器断言，同时人读得到同一句结论。
+const resultTemplate = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>表单提交结果</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<h1>表单提交结果</h1>
+<p id="post-result" role="status" data-status="{{STATUS}}" data-machine="{{MACHINE}}">{{MESSAGE}}</p>
+<p class="sub">HTTP 状态：<code>{{STATUS}}</code>　机器码：<code>{{MACHINE}}</code></p>
+<a href="/fixture">回到示例页</a>
+</body>
+</html>
+`
+
 const pageCSS = `body{font:15px/1.6 system-ui,sans-serif;margin:0 auto;max-width:46rem;padding:1.5rem 1rem 3rem}
 h1{font-size:1.2rem;margin:0 0 .25rem}
 h2{font-size:1rem;margin:0 0 .5rem}

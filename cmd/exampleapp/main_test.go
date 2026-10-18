@@ -481,3 +481,237 @@ func TestListDoesNotLeakTokenPrefix(t *testing.T) {
 	}
 	fmt.Fprint(io.Discard, got.Messages[0].At)
 }
+
+// --- 最小接入示例 fixture 与原生表单 POST ---
+//
+// 这一组测的是"文档示例的后端半边"：页面结构是否真的把容器放进 form、
+// 脚本顺序是否确定、原生表单提交是否走**同一条**授权判定。
+// 浏览器侧（FormData 里有没有 token、真提交后有没有写库）由 widget_browser.test.mjs 负责。
+
+func getAs(t *testing.T, a *app, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Host = a.o.Listen
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+func postForm(t *testing.T, a *app, values url.Values, headers map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/guestbook-form", strings.NewReader(values.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Host = a.o.Listen
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+func TestFixturePageStructure(t *testing.T) {
+	a, _ := newTestApp(t, nil)
+	rec := getAs(t, a, "/fixture")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /fixture = %d", rec.Code)
+	}
+	htmlBody := rec.Body.String()
+	if !strings.Contains(rec.Header().Get("Content-Security-Policy"), "worker-src blob:") {
+		t.Fatalf("fixture 页面没带上本档 CSP：%q", rec.Header().Get("Content-Security-Policy"))
+	}
+	// 容器必须在 <form> **之内**：放外面时隐藏字段不属于目标表单，验证"成功"却什么都不提交。
+	formOpen := strings.Index(htmlBody, `<form id="order"`)
+	formClose := strings.Index(htmlBody, `</form>`)
+	captchaAt := strings.Index(htmlBody, `<div id="captcha"></div>`)
+	if formOpen < 0 || formClose < 0 || captchaAt < 0 {
+		t.Fatalf("fixture 结构缺元素：form=%d /form=%d captcha=%d", formOpen, formClose, captchaAt)
+	}
+	if !(formOpen < captchaAt && captchaAt < formClose) {
+		t.Fatal("widget 容器不在目标 form 内 —— 这正是要防的接入错误")
+	}
+
+	// 逐个解析 <script **开始标签**（不切片窗口，避免越界）：
+	// 两个脚本都必须 defer，且 widget 在 init **之前** —— deferred 脚本按文档顺序执行，
+	// 这是"EpoCHA 在 init 运行时已定义"的唯一确定保证。
+	var opens []struct {
+		pos  int
+		head string
+	}
+	for i := 0; i+7 <= len(htmlBody); {
+		j := strings.Index(htmlBody[i:], "<script")
+		if j < 0 {
+			break
+		}
+		abs := i + j
+		k := strings.Index(htmlBody[abs:], ">")
+		if k < 0 {
+			t.Fatal("页面里有未闭合的 <script 开始标签")
+		}
+		opens = append(opens, struct {
+			pos  int
+			head string
+		}{abs, htmlBody[abs : abs+k+1]})
+		i = abs + k + 1
+	}
+	find := func(sub string) string {
+		for _, o := range opens {
+			if strings.Contains(o.head, sub) {
+				return o.head
+			}
+		}
+		return ""
+	}
+	widgetTag := find("/widget/v1.js")
+	initTag := find("/fixture-init.js")
+	if widgetTag == "" || initTag == "" {
+		t.Fatalf("缺脚本标签：widget=%q init=%q（页面：%s）", widgetTag, initTag, htmlBody)
+	}
+	if !strings.HasSuffix(widgetTag, " defer>") {
+		t.Fatalf("widget 脚本没有 defer，与后面的 init 之间是加载顺序竞争：%s", widgetTag)
+	}
+	if !strings.HasSuffix(initTag, " defer>") {
+		t.Fatalf("初始化脚本没有 defer：%s", initTag)
+	}
+	if strings.Index(htmlBody, widgetTag) > strings.Index(htmlBody, initTag) {
+		t.Fatal("widget 脚本排在 init 之后：init 会撞上 EpoCHA is not defined")
+	}
+	// 除配置数据块外不得有任何**无 src** 的 <script>：那就是内联脚本，严格 CSP 下不执行。
+	for _, o := range opens {
+		if strings.Contains(o.head, "src=") || strings.Contains(o.head, `type="application/json"`) {
+			continue
+		}
+		t.Fatalf("fixture 页面出现内联 <script>%s —— 需要 unsafe-inline，文档示例不该这样", o.head)
+	}
+	if strings.Contains(htmlBody, "sk_EXAMPLE_TEST_SECRET_DO_NOT_LEAK") {
+		t.Fatal("页面里出现了验证凭据")
+	}
+}
+
+func TestFormPostWritesOnlyWhenVerifySucceeds(t *testing.T) {
+	a, sb := newTestApp(t, nil)
+	v := url.Values{"text": {"原生表单提交"}, "epocha_response": {"tok-form"}}
+	if rec := postForm(t, a, v, nil); rec.Code != http.StatusCreated {
+		t.Fatalf("表单带有效 token 应写入：%d %s", rec.Code, rec.Body.String())
+	}
+	if sb.count() != 1 || sb.lastURL != "/siteverify" {
+		t.Fatalf("表单路径应恰好调用一次 /siteverify，实得 %d（%s）", sb.count(), sb.lastURL)
+	}
+	if got := countMessages(t, a); got != 1 {
+		t.Fatalf("留言数 = %d，期望 1", got)
+	}
+}
+
+func TestFormPostRejectsMissingToken(t *testing.T) {
+	a, sb := newTestApp(t, nil)
+	rec := postForm(t, a, url.Values{"text": {"没有凭据"}}, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("无 token 的表单提交应 403，实得 %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), errMissingToken) {
+		t.Fatalf("结果页缺机器码：%s", rec.Body.String())
+	}
+	if sb.count() != 0 {
+		t.Fatal("没有 token 却仍然去调了验证服务")
+	}
+	if got := countMessages(t, a); got != 0 {
+		t.Fatalf("无 token 竟然写入：%d", got)
+	}
+}
+
+// 原生表单的字段是页面上任何 input 都能加的。若后端宽松读取，
+// "浏览器指定验证目标"就会从这条路绕回来 —— 所以白名单必须是**拒收**而不是忽略。
+func TestFormPostRejectsUnexpectedField(t *testing.T) {
+	for _, extra := range []string{"target", "api_base", "secret", "response"} {
+		a, sb := newTestApp(t, nil)
+		v := url.Values{"text": {"带额外字段"}, "epocha_response": {"tok-x"}, extra: {"http://127.0.0.1:1/"}}
+		rec := postForm(t, a, v, nil)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("字段 %s 应被白名单拒收 400，实得 %d %s", extra, rec.Code, rec.Body.String())
+		}
+		if sb.count() != 0 {
+			t.Fatalf("字段 %s：竟然还是调用了验证服务", extra)
+		}
+		if got := countMessages(t, a); got != 0 {
+			t.Fatalf("字段 %s：竟然写入了留言", extra)
+		}
+	}
+}
+
+func TestFormPostReplayRejected(t *testing.T) {
+	a, sb := newTestApp(t, func(call int, _ url.Values) (int, any) {
+		if call == 1 {
+			return http.StatusOK, map[string]any{"success": true}
+		}
+		return http.StatusOK, map[string]any{"success": false, "error-codes": []string{"timeout-or-duplicate"}}
+	})
+	v := url.Values{"text": {"重放"}, "epocha_response": {"tok-once"}}
+	if rec := postForm(t, a, v, nil); rec.Code != http.StatusCreated {
+		t.Fatalf("首次表单提交应成功：%d", rec.Code)
+	}
+	rec := postForm(t, a, v, nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("重放应 409，实得 %d %s", rec.Code, rec.Body.String())
+	}
+	if got := countMessages(t, a); got != 1 {
+		t.Fatalf("重放后留言数 = %d，期望仍然 1", got)
+	}
+	if sb.count() != 2 {
+		t.Fatalf("重放应在服务端被拒（两次 /siteverify），实得 %d", sb.count())
+	}
+}
+
+// 结果页是浏览器导航目标：结论必须是**文本**，不能把任何输入当标记拼回去。
+func TestFormResultPageDoesNotReflectInput(t *testing.T) {
+	a, _ := newTestApp(t, nil)
+	canary := "<img src=x onerror=alert(1)>"
+	v := url.Values{"text": {canary}, "epocha_response": {"tok"}}
+	rec := postForm(t, a, v, nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("应写入成功：%d %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, canary) || strings.Contains(body, "onerror") {
+		t.Fatalf("结果页把用户输入原样拼进了 HTML：%s", body)
+	}
+	if strings.Contains(body, "<script") {
+		t.Fatalf("结果页不应含任何 script 标记：%s", body)
+	}
+}
+
+// Firefox 在**原生 form POST** 上会发 `Origin: null`（不透明来源的表示），这不是"另一个站"。
+// 把 "null" 当 URL 解析得到空 Host ⇒ 每一次真实表单提交都被误拒（本轮浏览器用例就是这么抓到的）。
+// 正确语义是回落到 Sec-Fetch-Site——同样是浏览器强制设置、脚本改不了的头。
+func TestOriginNullFallsBackToSecFetchSite(t *testing.T) {
+	cases := []struct {
+		name   string
+		sfs    string
+		wantOK bool
+	}{
+		{"same-origin 放行", "same-origin", true},
+		{"same-site 放行", "same-site", true},
+		{"cross-site 必须拒", "cross-site", false},
+		{"cross-origin 必须拒", "cross-origin", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := newTestApp(t, nil)
+			v := url.Values{"text": {"表单"}, "epocha_response": {"tok-null"}}
+			rec := postForm(t, a, v, map[string]string{"Origin": "null", "Sec-Fetch-Site": tc.sfs})
+			if got := rec.Code == http.StatusCreated; got != tc.wantOK {
+				t.Fatalf("Origin:null + Sec-Fetch-Site:%s ⇒ %d（body=%s），期望放行=%v",
+					tc.sfs, rec.Code, firstLine(rec.Body.String()), tc.wantOK)
+			}
+			if !tc.wantOK && countMessages(t, a) != 0 {
+				t.Fatal("跨站的 null Origin 竟然写入了留言")
+			}
+		})
+	}
+	// 真·跨站 Origin（不是 null）仍然直接拒，且不看 Sec-Fetch-Site。
+	a, _ := newTestApp(t, nil)
+	rec := postForm(t, a, url.Values{"text": {"跨站"}, "epocha_response": {"tok"}},
+		map[string]string{"Origin": "http://evil.example", "Sec-Fetch-Site": "same-origin"})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("恶意 Origin 应 403，实得 %d", rec.Code)
+	}
+}

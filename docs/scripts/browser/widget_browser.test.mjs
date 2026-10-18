@@ -22,8 +22,13 @@
 //   TTL_SITE_KEY           短 TTL 演示站点 site_key
 //
 // 为什么这些是硬要求而不是 skip：一条**必需**交互因为编排没给齐变量就"跳过并算过"，
-// 比直接失败更危险（门禁会绿在错误的原因上）。真正的外部条件不足只有 375px 视口那一项，
-// 它由 Firefox BiDi 的能力边界决定，用 skip 表达并由 stage4a.sh 换算成 BLOCKED。
+// 比直接失败更危险（门禁会绿在错误的原因上）。
+//
+// 本文件现在**没有任何 t.skip**：375px 窄屏原先被记成"BiDi 不提供视口命令"而 BLOCKED，
+// 实际是客户端只试过 `browsingContext.resize` / `emulation.setViewport` 两个不存在的命令，
+// W3C 规范的 `browsingContext.setViewport` 在 Firefox 147.0.2 上真实生效（innerWidth 实测 375/414）。
+// 所以窄屏那几条是**执行**的用例，不是待办。若将来再出现真正的外部条件不足，必须用 t.skip
+// 表达并由 stage4b.sh 换算成 BLOCKED，不许用"直接 return"冒充通过。
 
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -45,6 +50,7 @@ const SEED_DIR = need("SEED_DIR");
 const SITE_KEY = need("SITE_KEY");
 const HARD_URL = need("EXAMPLE_HARD_URL");
 const HARD_SITE_KEY = need("HARD_SITE_KEY");
+const SLOW_SITE_KEY = need("SLOW_SITE_KEY");
 const WORKERFILE_URL = need("EXAMPLE_WORKERFILE_URL");
 const TTL_URL = need("EXAMPLE_TTL_URL");
 const TTL_SITE_KEY = need("TTL_SITE_KEY");
@@ -60,15 +66,18 @@ for (const s of seeds) {
 }
 
 const WIDGET_HOST = "#widget [data-epocha-widget]";
+// 辅助函数默认服务首页（容器 #widget）；fixture 页的容器是 #captcha，所以把容器选择器做成参数。
+// 刻意不让用例各自拼 shadow 选择器：shadow DOM 的进入方式只该有一处实现。
+const hostOf = (container) => `${container} [data-epocha-widget]`;
 let bidi;
 const openTabs = [];
 
 // 预加载脚本：把 shadow DOM 里状态区的每次变化记进 window.__statusLog。
 // PoW 的耗时（worker 上报的 ms）就藏在那段文本里，事后读不到，必须在页面里当场记录。
-const PRELOAD = `()=>{
+const preloadFor = (container) => `()=>{
   window.__statusLog = [];
   const tick = () => {
-    const host = document.querySelector('#widget [data-epocha-widget]');
+    const host = document.querySelector(${JSON.stringify(hostOf(container))});
     if (!host || !host.shadowRoot) { setTimeout(tick, 25); return; }
     const st = host.shadowRoot.querySelector('[role=status]');
     if (!st || window.__observing) { setTimeout(tick, 25); return; }
@@ -81,15 +90,33 @@ const PRELOAD = `()=>{
   tick();
 }`;
 
-async function openPage(url) {
+async function openPage(url, { viewport = null, container = "#widget" } = {}) {
   const c = await bidi.newTab();
   openTabs.push(c);
-  const pre = await bidi.send("script.addPreloadScript", { functionDeclaration: PRELOAD }).catch(() => null);
+  // 视口必须在导航**之前**设：页面加载时的布局、图片解码尺寸都按当时的视口算。
+  // 加载完再 resize 虽然也会重排，但那测的是"重排后的样子"，不是"窄屏进来时的样子"。
+  if (viewport) await setViewportChecked(c, ...viewport);
+  const pre = await bidi.send("script.addPreloadScript", { functionDeclaration: preloadFor(container) }).catch(() => null);
   await bidi.goto(c, url);
-  await bidi.waitUntil(c, `!!document.querySelector(${JSON.stringify(WIDGET_HOST)})`,
+  await bidi.waitUntil(c, `!!document.querySelector(${JSON.stringify(hostOf(container))})`,
     { timeoutMs: 20000, label: "widget 容器出现" });
   if (pre && pre.script) await bidi.send("script.removePreloadScript", { script: pre.script }).catch(() => {});
   return c;
+}
+
+// setViewportChecked：调规范的 browsingContext.setViewport，然后**读回浏览器自己的度量**
+// 来证明它真的生效。命令返回 {} 不等于视口变了；只相信启动参数或返回值就是"冒充已验证"。
+// width 用 CSS px，断言 window.innerWidth 与 documentElement.clientWidth 两处一致。
+async function setViewportChecked(c, width, height, dpr = null) {
+  await bidi.setViewport(c, width, height, dpr);
+  const m = await bidi.viewportMetrics(c);
+  assert.equal(m.innerWidth, width,
+    `setViewport(${width}×${height}) 之后 innerWidth 实得 ${m.innerWidth} ⇒ 视口没真的设进去，窄屏结论无效：${JSON.stringify(m)}`);
+  assert.equal(m.clientWidth, width,
+    `clientWidth 实得 ${m.clientWidth}，与 innerWidth 不一致（滚动条占位差异需单独判断）：${JSON.stringify(m)}`);
+  assert.ok(m.innerHeight >= height - 40,
+    `innerHeight 实得 ${m.innerHeight}，远低于请求的 ${height}（高方向没生效？）`);
+  return m;
 }
 
 // 返回**对象**的表达式一律走 evaluateJSON：BiDi 对对象给句柄而不是内联值（见 bidi.mjs）。
@@ -97,13 +124,13 @@ const STATE_PROBE = `(()=>{const ids=window.EpoCHA?EpoCHA.ids():[];
   return {count:ids.length, ids, states:ids.map(i=>EpoCHA.state(i)), tokens:ids.map(i=>EpoCHA.getResponse(i))};})()`;
 const probeState = (c) => bidi.evaluateJSON(c, STATE_PROBE);
 
-async function waitFirstState(c, want, timeoutMs = 30000) {
+async function waitFirstState(c, want, timeoutMs = 30000, container = "#widget") {
   try {
     await bidi.waitUntil(c,
     `(()=>{const ids=window.EpoCHA?EpoCHA.ids():[];return ids.length>0 && EpoCHA.state(ids[0])===${JSON.stringify(want)};})()`,
       { timeoutMs, label: `第一个实例进入 ${want}` });
   } catch (e) {
-    const why = await bidi.evaluateJSON(c, `(()=>{const h=document.querySelector(${JSON.stringify(WIDGET_HOST)});
+    const why = await bidi.evaluateJSON(c, `(()=>{const h=document.querySelector(${JSON.stringify(hostOf(container))});
       const ids=window.EpoCHA?EpoCHA.ids():'NO_EPOCHA';
       return {status: h&&h.shadowRoot ? h.shadowRoot.querySelector('[role=status]').textContent : '组件没挂载',
         ids, states: Array.isArray(ids) ? ids.map(i=>EpoCHA.state(i)) : null,
@@ -114,22 +141,22 @@ async function waitFirstState(c, want, timeoutMs = 30000) {
   return bidi.evaluateJSON(c, STATE_PROBE);
 }
 
-async function currentImageB64(c) {
-  return bidi.evaluate(c, `(()=>{const h=document.querySelector(${JSON.stringify(WIDGET_HOST)});
+async function currentImageB64(c, container = "#widget") {
+  return bidi.evaluate(c, `(()=>{const h=document.querySelector(${JSON.stringify(hostOf(container))});
     const img=h&&h.shadowRoot&&h.shadowRoot.querySelector('img');
     return img&&img.src?img.src.split('base64,')[1]:null;})()`);
 }
 
-async function answerOfCurrent(c) {
-  const b64 = await currentImageB64(c);
+async function answerOfCurrent(c, container = "#widget") {
+  const b64 = await currentImageB64(c, container);
   assert.ok(b64, "页面上没有可读取的题目图片");
   const a = answerByImageB64.get(b64);
   assert.ok(a, "当前显示的题目不在受控注入集合里（注入不足或来源被污染）");
   return { answer: a, imageB64: b64 };
 }
 
-async function typeAnswer(c, text) {
-  await bidi.evaluate(c, `document.querySelector(${JSON.stringify(WIDGET_HOST)})
+async function typeAnswer(c, text, container = "#widget") {
+  await bidi.evaluate(c, `document.querySelector(${JSON.stringify(hostOf(container))})
     .shadowRoot.querySelector('input.ans').focus()`);
   await bidi.send("input.performActions", {
     context: c,
@@ -140,17 +167,40 @@ async function typeAnswer(c, text) {
   });
 }
 
-async function statusText(c) {
-  return bidi.evaluate(c, `(()=>{const h=document.querySelector(${JSON.stringify(WIDGET_HOST)});
+async function statusText(c, container = "#widget") {
+  return bidi.evaluate(c, `(()=>{const h=document.querySelector(${JSON.stringify(hostOf(container))});
     const s=h&&h.shadowRoot&&h.shadowRoot.querySelector('[role=status]');
     return s?s.textContent:null;})()`);
 }
 
-async function clickWidgetButton(c, which) {
+async function clickWidgetButton(c, which, container = "#widget") {
   // which: "submit" | "refresh" —— 按 shadow DOM 里的顺序定位，然后**真实鼠标点击**。
   const sel = which === "submit" ? "button:nth-of-type(1)" : "button:nth-of-type(2)";
-  return bidi.clickDeep(c, "#widget", sel);
+  return bidi.clickDeep(c, container, sel);
 }
+
+// 窄屏布局度量表达式：全部在**真实窄视口**下取。
+// 每一项回答的是"用户在这个宽度上能不能看见、能不能摸到"，而不是"CSS 里写了 max-width"。
+// 命中测试用 shadowRoot.elementFromPoint：document 级的 elementFromPoint 会把 shadow 内容
+// 重定向成宿主元素，那样"可命中"就退化成"宿主页面上有个块"，测不到里面的控件。
+const NARROW_PROBE = `(()=>{
+  const host=document.querySelector(${JSON.stringify(WIDGET_HOST)});
+  const sr=host&&host.shadowRoot; if(!sr) return {noShadow:true};
+  const vw=window.innerWidth, vh=window.innerHeight;
+  const box=sr.querySelector('.box'), img=sr.querySelector('img'),
+        inp=sr.querySelector('input.ans'), btns=[...sr.querySelectorAll('button')];
+  const R=(el)=>{ if(!el) return null; const r=el.getBoundingClientRect();
+    return {x:Math.round(r.x),y:Math.round(r.y),w:Math.round(r.width),h:Math.round(r.height),
+      right:Math.round(r.right),bottom:Math.round(r.bottom),
+      hit:(r.width>0&&r.height>0)?(sr.elementFromPoint(r.left+r.width/2, r.top+r.height/2)===el):false};};
+  const imgs = img ? {natural:[img.naturalWidth,img.naturalHeight],
+                      rendered:[Math.round(img.getBoundingClientRect().width),Math.round(img.getBoundingClientRect().height)],
+                      complete:img.complete} : null;
+  const st=sr.querySelector('[role=status]');
+  return {vw,vh,
+    box:R(box), input:R(inp), buttons:btns.map(R), img:imgs,
+    docScroll:document.documentElement.scrollWidth, bodyScroll:document.body.scrollWidth,
+    statusOverflow:st?{sw:st.scrollWidth,cw:st.clientWidth,text:st.textContent}:null};})()`;
 
 async function listCount() {
   const res = await fetch(EXAMPLE_URL.replace(/\/+$/, "") + "/guestbook", { cache: "no-store" });
@@ -373,29 +423,56 @@ test("reset 与 destroy：清空 token/输入、移除 DOM 与隐藏字段、注
   assert.equal(await bidi.evaluate(c, `EpoCHA.ids().length`), 0, "destroy 之后注册表应为空");
 });
 
-test("计算超时是真实约束：高难度站点上 powTimeoutMs 到点即明确失败，不去兑换", async () => {
-  const c = await openPage(HARD_URL);
+test("计算超时是真实约束：预算到点即明确失败，不去兑换", async () => {
+  // 为什么用 bits=24 的专用站点，而不是首页那个 bits=20：
+  // `powTimeoutMs` 服务端语义上**下限是 1000ms**（`Math.max(v,1000)`），而 bits=20 本机实测
+  // 最快一次只有 309ms ⇒ 约 1/3 概率计算会抢在预算前解出来，那时看到的是"答错被终结"
+  // 而不是"超时"。原先的写法（还写着 400ms，实际被钳成 1000ms）就是靠运气通过。
+  // bits=24 把单次抢跑概率压到 ~2.5%，下面再叠一层**有界重抽**并要求至少观察到一次真实超时。
+  // 这是为了让负面路径可判定，**不是**在生产里抬难度：默认站点仍是 bits=12，
+  // bits=20 的时延实测由"高难度站点：取消…"那条继续产出。
+  const c = await openPage(HARD_URL);          // bits=24 站点的允许来源就是这个页面的 origin
   await waitFirstState(c, "ready");
-  // 在同一个高难度页面（bits=20，浏览器要算上百万次）上再挂一个**超时预算只有 400ms** 的实例。
-  // 用公开配置面制造超时，而不是靠运气让 1ms 定时器抢在一次几毫秒的求解前面。
-  const id2 = await bidi.evaluateJSON(c, `(()=>{
-    const d=document.createElement('div'); d.id='wto'; document.body.appendChild(d);
-    return EpoCHA.render(d, {apiBase: ${JSON.stringify(EPOCHA_API)}, siteKey: ${JSON.stringify(HARD_SITE_KEY)},
-      language:'zh-CN', fieldName:'', powTimeoutMs: 400});
-  })()`);
-  await bidi.waitUntil(c, `EpoCHA.state(${JSON.stringify(id2)})==='ready'`, { timeoutMs: 40000, label: "预算实例进入 ready" });
-  await bidi.evaluate(c, `(()=>{const hs=document.getElementById('wto').querySelector('[data-epocha-widget]');
-    hs.shadowRoot.querySelector('input.ans').value='ABCDEF';})()`);
-  const pos = await bidi.deepCenter(c, "#wto", "button:nth-of-type(1)");
-  assert.ok(pos, "找不到超时实例的提交按钮");
-  await bidi.pointerClick(c, pos[0], pos[1]);
-  await bidi.waitUntil(c, `EpoCHA.state(${JSON.stringify(id2)})==='error'`,
-    { timeoutMs: 20000, label: "powTimeoutMs=400 应给出超时错误" });
-  const txt = await bidi.evaluate(c, `(()=>{const hs=document.getElementById('wto').querySelector('[data-epocha-widget]');
-    return hs.shadowRoot.querySelector('[role=status]').textContent;})()`);
-  assert.match(txt, /超时/, `超时文案不对：${txt}`);
-  assert.equal(await bidi.evaluate(c, `EpoCHA.getResponse(${JSON.stringify(id2)})`), "", "超时后不该留着 token");
-  await bidi.evaluate(c, `EpoCHA.destroy(${JSON.stringify(id2)})`);
+  const BUDGET_MS = 1000;                       // 明确写成钳位后的真实下限，不留"400"这种幻觉
+  const MAX_TRIES = 3;
+  const seen = [];
+  let timedOut = null;
+  for (let attempt = 1; attempt <= MAX_TRIES && !timedOut; attempt++) {
+    const host = `wt${attempt}`;
+    const id = await bidi.evaluateJSON(c, `(()=>{
+      const d=document.createElement('div'); d.id=${JSON.stringify(host)}; document.body.appendChild(d);
+      return EpoCHA.render(d, {apiBase: ${JSON.stringify(EPOCHA_API)}, siteKey: ${JSON.stringify(SLOW_SITE_KEY)},
+        language:'zh-CN', fieldName:'', powTimeoutMs: ${BUDGET_MS}});
+    })()`);
+    await bidi.waitUntil(c, `EpoCHA.state(${JSON.stringify(id)})==='ready'`,
+      { timeoutMs: 60000, label: `第 ${attempt} 次：预算实例进入 ready` });
+    const sel = `#${host} [data-epocha-widget]`;
+    await bidi.evaluate(c, `(()=>{const hs=document.querySelector(${JSON.stringify(sel)});
+      hs.shadowRoot.querySelector('input.ans').value='ABCDEF';})()`);
+    const pos = await bidi.deepCenter(c, `#${host}`, "button:nth-of-type(1)");
+    assert.ok(pos, `第 ${attempt} 次：找不到预算实例的提交按钮`);
+    await bidi.pointerClick(c, pos[0], pos[1]);
+    await bidi.waitUntil(c, `(()=>{const s=EpoCHA.state(${JSON.stringify(id)});
+      return s==='error' || s==='verified';})()`,
+      { timeoutMs: 90000, label: `第 ${attempt} 次：预算实例走到终态` });
+    const txt = await bidi.evaluate(c, `(()=>{const hs=document.querySelector(${JSON.stringify(sel)});
+      return hs.shadowRoot.querySelector('[role=status]').textContent;})()`);
+    const st = await bidi.evaluate(c, `EpoCHA.state(${JSON.stringify(id)})`);
+    const tok = await bidi.evaluate(c, `EpoCHA.getResponse(${JSON.stringify(id)})`);
+    seen.push({ attempt, state: st, text: String(txt).slice(0, 40), tokenLen: String(tok || "").length });
+    if (st === "error" && /超时/.test(String(txt))) timedOut = { attempt, txt };
+    await bidi.evaluate(c, `EpoCHA.destroy(${JSON.stringify(id)})`);
+  }
+  assert.ok(timedOut,
+    `${MAX_TRIES} 次尝试都没观察到超时分支（每次都在 1000ms 预算内解出来了？）：${JSON.stringify(seen)}`);
+  // 超时分支必须同时满足三件事：明确失败、文案说清是超时、**没有留下可兑换的 token**。
+  const last = seen[seen.length - 1];
+  assert.equal(last.state, "error", `超时后状态应是 error，实得 ${JSON.stringify(seen)}`);
+  assert.equal(last.tokenLen, 0, `超时后不该留着 token：${JSON.stringify(seen)}`);
+  // 第 2..N 次尝试的存在本身就证明"抢跑"不是失败：只有观察不到超时才算缺陷。
+  if (timedOut.attempt > 1) {
+    console.log(`  [实测] 超时分支在第 ${timedOut.attempt}/${MAX_TRIES} 次尝试观察到；前几次抢跑：${JSON.stringify(seen.slice(0, -1))}`);
+  }
 });
 
 test("高难度站点：取消正在进行的计算不会晚到生效", async () => {
@@ -475,32 +552,227 @@ test("键盘可完成：Tab 到达输入框与按钮，Enter 提交", async () =
   await waitFirstState(c, "verified");
 });
 
-test("手机宽度（375px）不产生横向溢出", async (t) => {
-  // Firefox 的 BiDi 目前没有稳定的视口设置命令；能设就测，不能设就**明确报 BLOCKED**，
-  // 不拿桌面宽度结果冒充移动端结论。
-  let resized = false;
-  const c = await bidi.newTab();
-  openTabs.push(c);
-  for (const [method, params] of [
-    ["browsingContext.resize", { context: c, width: 375, height: 812 }],
-    ["emulation.setViewport", { context: c, viewport: { width: 375, height: 812 } }],
-  ]) {
-    try { await bidi.send(method, params); resized = true; break; } catch (e) { /* 继续试下一条 */ }
-  }
-  if (!resized) {
-    // skip 而不是 return：return 会被 node:test 记成"通过"，那正是"PASS：未测"的混合表达。
-    t.diagnostic("BLOCKED：Firefox BiDi 没有可用的视口设置命令 ⇒ 375px 宽度检查未执行（需人工在真机或 DevTools 响应式模式下确认）");
-    t.skip("375px 视口不可设置");
-    return;
-  }
-  await bidi.goto(c, EXAMPLE_URL);
+test("窄屏 375×667：视口真的设成 375，布局不溢出、图片比例正确、控件全部可命中", async () => {
+  const c = await openPage(EXAMPLE_URL, { viewport: [375, 667] });
+  // openPage 里已断言 innerWidth===375；这里再读一次，确认导航之后仍是 375
+  const vp = await bidi.viewportMetrics(c);
+  assert.equal(vp.innerWidth, 375, `导航后视口回落到 ${vp.innerWidth} ⇒ 后面所有窄屏结论无效`);
+  void vp.devicePixelRatio; // DPR 只记录不假定：headless 下它是被我们设进去的值，不等于真机像素密度
   await waitFirstState(c, "ready");
-  const over = await bidi.evaluateJSON(c, `(()=>{
-    const h=document.querySelector(${JSON.stringify(WIDGET_HOST)});
-    const box=h.shadowRoot.querySelector('.box').getBoundingClientRect();
-    return {boxRight:Math.round(box.right), inner:window.innerWidth, docScroll:document.documentElement.scrollWidth};})()`);
-  assert.ok(over.boxRight <= over.inner + 1, `组件超出视口：${JSON.stringify(over)}`);
-  assert.ok(over.docScroll <= over.inner + 1, `页面出现横向滚动：${JSON.stringify(over)}`);
+  const m = await bidi.evaluateJSON(c, NARROW_PROBE);
+  assert.equal(m.vw, 375);
+  assert.ok(m.docScroll <= m.vw + 1, `文档出现横向滚动：docScroll=${m.docScroll} vw=${m.vw}`);
+  assert.ok(m.bodyScroll <= m.vw + 1, `body 横向溢出：${m.bodyScroll}`);
+  assert.ok(m.box.right <= m.vw + 1, `组件盒子超出视口右缘：${JSON.stringify(m.box)}`);
+  assert.ok(m.box.w > 0 && m.box.h > 0, `组件盒子塌成零尺寸：${JSON.stringify(m.box)}`);
+  // 图片：完整显示（宽度不超视口）+ 比例不变形（rendered 比例 ≈ natural 比例）
+  assert.ok(m.img && m.img.complete, `题目图片在窄屏下没加载完或不存在：${JSON.stringify(m.img)}`);
+  const [nw, nh] = m.img.natural, [rw, rh] = m.img.rendered;
+  assert.ok(rw <= m.vw, `图片宽度 ${rw} 超过视口 ${m.vw}（会挤出横向滚动）`);
+  const want = nw / nh, got = rw / rh;
+  assert.ok(Math.abs(want - got) / want < 0.02,
+    `图片比例变形：natural ${nw}×${nh}=${want.toFixed(3)}，rendered ${rw}×${rh}=${got.toFixed(3)}`);
+  assert.ok(m.img.rendered[0] > 40 && m.img.rendered[1] > 20,
+    `图片被压缩到不可读的尺寸：${JSON.stringify(m.img.rendered)}`);
+  // 控件可达：非零尺寸 + 在视口内 + 中心点命中测试拿到的就是它自己（在 shadowRoot 内做命中）
+  assert.ok(m.input && m.input.hit && m.input.right <= m.vw + 1,
+    `输入框在窄屏下不可命中或超出视口：${JSON.stringify(m.input)}`);
+  assert.equal(m.buttons.length, 2, `窄屏下按钮数量不对：${JSON.stringify(m.buttons)}`);
+  for (const [i, b] of m.buttons.entries()) {
+    assert.ok(b && b.hit && b.right <= m.vw + 1, `第 ${i + 1} 个按钮不可命中或超出视口：${JSON.stringify(b)}`);
+  }
+});
+
+test("窄屏 375：真实鼠标点击 + 键盘输入走完验证与业务提交", async () => {
+  const c = await openPage(EXAMPLE_URL, { viewport: [375, 667] });
+  await waitFirstState(c, "ready");
+  const { answer } = await answerOfCurrent(c);
+  await typeAnswer(c, answer);
+  await clickWidgetButton(c, "submit");   // 真实 pointer 动作，坐标按 375 宽算
+  await waitFirstState(c, "verified");
+  const id = (await probeState(c)).ids[0];
+  assert.ok((await bidi.evaluate(c, `EpoCHA.getResponse(${JSON.stringify(id)})`)).length > 20,
+    "窄屏下验证没拿到 token");
+  // 业务提交也要在 375 下真跑通（这一档页面用 fetch 提交；带字段的原生 form 见 fixture 用例）
+  const before = await listCount();
+  await bidi.evaluate(c, `document.getElementById('text').value='窄屏 375 真实提交';1`);
+  await bidi.click(c, "#send");
+  await bidi.waitUntil(c,
+    `(async()=>{const r=await fetch('/guestbook',{cache:'no-store'});const j=await r.json();
+      return j.count===${before + 1};})()`,
+    { timeoutMs: 20000, label: "窄屏下业务写入成功" });
+});
+
+test("窄屏 375：错误文案不撑破布局（CSP 禁 Worker 的档位）", async () => {
+  const c = await openPage(NOWORKER_URL, { viewport: [375, 667] });
+  // 这一档 CSP 是 worker-src 'none'：领题成功后建 worker 必然失败 ⇒ 组件进 error 并写长文案
+  await bidi.waitUntil(c,
+    `(()=>{const ids=window.EpoCHA?EpoCHA.ids():[];return ids.length>0 && EpoCHA.state(ids[0])==='error';})()`,
+    { timeoutMs: 30000, label: "CSP 禁 Worker 时进入 error" });
+  const m = await bidi.evaluateJSON(c, NARROW_PROBE);
+  assert.equal(m.vw, 375, `错误态下视口不是 375：${JSON.stringify(m).slice(0, 200)}`);
+  assert.ok(m.statusOverflow && m.statusOverflow.text.length > 0, "错误文案是空的");
+  assert.ok(m.docScroll <= m.vw + 1,
+    `错误文案撑破文档宽度：docScroll=${m.docScroll} vw=${m.vw} 文案=${JSON.stringify(m.statusOverflow.text).slice(0, 80)}`);
+  assert.ok(m.box.right <= m.vw + 1, `错误态下组件盒超出右缘：${JSON.stringify(m.box)}`);
+  assert.ok(m.statusOverflow.sw <= m.statusOverflow.cw + 1,
+    `错误文案在状态区内横向溢出（滚动不可达）：sw=${m.statusOverflow.sw} cw=${m.statusOverflow.cw}`);
+});
+
+test("窄屏 414×896（较宽手机档）回归：无横向溢出、控件可命中、容器不吃满超宽", async () => {
+  const c = await openPage(EXAMPLE_URL, { viewport: [414, 896] });
+  await waitFirstState(c, "ready");
+  const m = await bidi.evaluateJSON(c, NARROW_PROBE);
+  assert.equal(m.vw, 414);
+  assert.ok(m.docScroll <= m.vw + 1, `414 档出现横向滚动：${m.docScroll}`);
+  assert.ok(m.box.right <= m.vw + 1, `414 档组件超出右缘：${JSON.stringify(m.box)}`);
+  assert.ok(m.input && m.input.hit, `414 档输入框不可命中：${JSON.stringify(m.input)}`);
+  for (const b of m.buttons) assert.ok(b && b.hit, `414 档按钮不可命中：${JSON.stringify(b)}`);
+  // :host 的 max-width:360px 应当让它比视口窄，而不是被拉成 414
+  const hostMax = await bidi.evaluate(c, `(()=>{const h=document.querySelector(${JSON.stringify(WIDGET_HOST)});
+    return Math.round(h.getBoundingClientRect().width);})()`);
+  assert.ok(hostMax <= 361, `容器宽度 ${hostMax} 突破了 :host 的 max-width:360px`);
+});
+
+// --- 文档 §1 最小接入示例的可运行 fixture ---
+//
+// 这一组用例的存在理由：文档示例的两类错误（脚本顺序竞争、容器在 form 外）
+// 都只在"真加载 + 真提交"时现形，grep 文档字符串永远测不到。
+// fixture 与首页共用同一个 exampleapp 进程与同一份 CSP，所以"示例页能跑"不能替它作证。
+const FIXTURE_URL = EXAMPLE_URL.replace(/\/+$/, "") + "/fixture";
+const FIXTURE_CONTAINER = "#captcha";
+
+test("文档最小示例 fixture：deferred 脚本顺序确定，init 里 EpoCHA 已定义，字段属于目标 form", async () => {
+  await bidi.subscribeEvents(["log.entryAdded"]);
+  const c = await openPage(FIXTURE_URL, { container: FIXTURE_CONTAINER });
+  // 走到这里已经证明：容器被挂载 ⇒ init 脚本执行了 ⇒ 它读到了 EpoCHA。
+  // 若 widget 脚本没 defer 或顺序反了，ReferenceError 会让容器根本不出现，openPage 直接超时。
+  const handle = await bidi.evaluateJSON(c, `(()=>({
+    fixture: window.__fixture || null,
+    hasEpoCHA: typeof window.EpoCHA === 'object' && typeof (window.EpoCHA||{}).render === 'function',
+    inForm: !!(document.querySelector('#captcha') && document.querySelector('#captcha').closest('form') === document.getElementById('order')),
+  }))()`);
+  assert.ok(handle.hasEpoCHA, "页面上没有 EpoCHA.render");
+  assert.ok(handle.fixture && typeof handle.fixture.id === "string", `init 没拿到实例句柄：${JSON.stringify(handle)}`);
+  assert.equal(handle.inForm, true, "widget 容器不在 #order 这个 form 内");
+  const st = await bidi.evaluate(c, `EpoCHA.state(${JSON.stringify(handle.fixture.id)})`);
+  assert.equal(st, "ready", `fixture 上的实例没进入 ready（实得 ${st}）`);
+  // 隐藏字段必须**真的属于**目标 form：属于别的 form 或不属于任何 form 都等于没提交。
+  const own = await bidi.evaluateJSON(c, `(()=>{
+    const f=document.getElementById('order');
+    const i=f.querySelector('input[name="epocha_response"]');
+    return {fieldInForm: !!i, fieldFormId: i && i.form ? i.form.id : null,
+      widgetInsideForm: f.contains(document.querySelector('#captcha'))};})()`);
+  assert.deepEqual(own, { fieldInForm: true, fieldFormId: "order", widgetInsideForm: true },
+    `字段归属不对：${JSON.stringify(own)}`);
+  const errs = (await bidi.consoleErrors()).filter((e) => /EpoCHA|ReferenceError|is not defined/.test(e));
+  assert.deepEqual(errs, [], `fixture 加载期出现脚本错误：${JSON.stringify(errs)}`);
+});
+
+test("文档最小示例 fixture：FormData 带上 token，原生 form POST 真写入；没验证时同一按钮被服务端拒", async () => {
+  // 反面先来：不完成验证直接按原生提交 —— 页面结构完全一样，差别只在 token。
+  const cneg = await openPage(FIXTURE_URL, { container: FIXTURE_CONTAINER });
+  await waitFirstState(cneg, "ready", 30000, FIXTURE_CONTAINER);
+  await bidi.click(cneg, "form#order button[type=submit]");
+  await bidi.waitUntil(cneg, `(()=>{const p=document.getElementById('post-result');
+    return p && p.getAttribute('data-status')!=='200';})()`,
+    { timeoutMs: 20000, label: "未验证提交后拿到结果页" });
+  const neg = await bidi.evaluateJSON(cneg, `(()=>{const p=document.getElementById('post-result');
+    return {status:p.getAttribute('data-status'), machine:p.getAttribute('data-machine')};})()`);
+  assert.equal(neg.status, "403", `未验证的原生提交不该被接受：${JSON.stringify(neg)}`);
+  assert.equal(neg.machine, "epocha-missing-response", `未验证提交的机器码不对：${JSON.stringify(neg)}`);
+
+  const before = await listCount();
+  const c = await openPage(FIXTURE_URL, { container: FIXTURE_CONTAINER });
+  await waitFirstState(c, "ready", 30000, FIXTURE_CONTAINER);
+  const id = (await bidi.evaluateJSON(c, `window.__fixture.id`));
+  const { answer } = await answerOfCurrent(c, FIXTURE_CONTAINER);
+  await typeAnswer(c, answer, FIXTURE_CONTAINER);
+  await clickWidgetButton(c, "submit", FIXTURE_CONTAINER);
+  await waitFirstState(c, "verified", 40000, FIXTURE_CONTAINER);
+
+  // FormData 视角：字段里就是 getResponse() 的那个 token —— 证明"提交时会带上"。
+  const fd = await bidi.evaluateJSON(c, `(()=>{
+    const d=new FormData(document.getElementById('order'));
+    const v=d.get('epocha_response');
+    return {has:d.has('epocha_response'), value: v?String(v):null, keys:[...d.keys()].sort(),
+            live: EpoCHA.getResponse(${JSON.stringify(id)})};})()`);
+  assert.ok(fd.has, "FormData 里没有 epocha_response 字段");
+  assert.equal(fd.value, fd.live, "FormData 里的 token 与 getResponse() 不一致");
+  assert.ok(String(fd.value).length > 20, `token 看起来是空的：${JSON.stringify(fd.value)}`);
+  assert.deepEqual(fd.keys, ["epocha_response", "text"], `表单字段集合不是预期的两个：${JSON.stringify(fd.keys)}`);
+
+  // 真实导航提交（不是 fetch）：服务端只有 /siteverify 返回 success:true 才写库。
+  await bidi.click(c, "form#order button[type=submit]");
+  await bidi.waitUntil(c, `(()=>{const p=document.getElementById('post-result');
+    return p && p.getAttribute('data-status')!=='200';})()`,
+    { timeoutMs: 25000, label: "原生表单提交后拿到结果页" });
+  const res = await bidi.evaluateJSON(c, `(()=>{const p=document.getElementById('post-result');
+    return {status:p.getAttribute('data-status'), machine:p.getAttribute('data-machine'), text:p.textContent};})()`);
+  assert.equal(res.status, "201", `原生提交应写入成功：${JSON.stringify(res)}`);
+  assert.equal(await listCount(), before + 1, "结果页说成功，但留言列表没增加");
+});
+
+test("隐藏字段的三种归属：form 外无关联即抛错且不留孤儿字段、显式 form 关联可用、fieldName:'' 不建字段", async () => {
+  const c = await openPage(EXAMPLE_URL);
+  await waitFirstState(c, "ready");
+  const probe = await bidi.evaluateJSON(c, `(()=>{
+    const out = {throws:[], orphanFields:0, associated:null, noField:null, extra:[]};
+    const base = {apiBase:${JSON.stringify(EPOCHA_API)}, siteKey:${JSON.stringify(SITE_KEY)}, language:'zh-CN'};
+    // (1) 容器不在任何 form 内、也没给 form ⇒ 必须**抛错**。
+    //     静默创建一个"永远不会被提交"的字段，等于把接入错误留到线上。
+    const loose = document.createElement('div'); document.body.appendChild(loose);
+    try { EpoCHA.render(loose, base);
+      out.throws.push('no-throw'); } catch (e) { out.throws.push(e instanceof TypeError ? 'TypeError' : String(e).slice(0,30)); }
+    out.orphanFields = loose.querySelectorAll('input[type=hidden]').length;
+    // (2) 容器在 form 外，但用 form 选项显式关联 ⇒ 字段落进那个 form，FormData 才拿得到。
+    const far = document.createElement('div'); document.body.appendChild(far);
+    const f2 = document.createElement('form'); f2.id='assoc'; document.body.appendChild(f2);
+    const id2 = EpoCHA.render(far, Object.assign({}, base, {fieldName:'assoc_response', form: f2}));
+    out.extra.push(id2);
+    out.associated = { inForm: !!f2.querySelector('input[name="assoc_response"]'),
+      state: EpoCHA.state(id2),
+      containerInsideForm: f2.contains(far) };
+    // (3) fieldName:'' ⇒ 一个隐藏字段都不该出现（只要回调/getResponse 的接入方）。
+    const f3 = document.createElement('form'); document.body.appendChild(f3);
+    const d3 = document.createElement('div'); f3.appendChild(d3);
+    const id3 = EpoCHA.render(d3, Object.assign({}, base, {fieldName:''}));
+    out.extra.push(id3);
+    out.noField = f3.querySelectorAll('input[type=hidden]').length;
+    return out;})()`);
+  assert.deepEqual(probe.throws, ["TypeError"],
+    `form 外挂载且没给 form 应当抛 TypeError，实得 ${JSON.stringify(probe.throws)}`);
+  assert.equal(probe.orphanFields, 0, `抛错路径不应留下孤儿 hidden input，实得 ${probe.orphanFields}`);
+  assert.equal(probe.associated.inForm, true, "显式 form 关联没把字段放进目标 form");
+  assert.equal(probe.associated.containerInsideForm, false,
+    "用例前提变了：容器竟已在目标 form 内，那这条测的就不是显式关联");
+  assert.ok(probe.associated.state, "显式关联的实例没有状态");
+  assert.equal(probe.noField, 0, `fieldName:'' 仍然创建了隐藏字段（${probe.noField} 个）`);
+  // 附加实例会各占一道题：不销毁就会挤掉后面用例需要的受控题目（题池只有注入的那几十条）。
+  await bidi.evaluate(c, `(()=>{(${JSON.stringify(probe.extra)}).forEach(i=>EpoCHA.destroy(i)); return 1;})()`);
+});
+
+test("fixture：reset 从 FormData 里拿掉 token，destroy 移除字段本身", async () => {
+  const c = await openPage(FIXTURE_URL, { container: FIXTURE_CONTAINER });
+  await waitFirstState(c, "ready", 30000, FIXTURE_CONTAINER);
+  const id = await bidi.evaluateJSON(c, `window.__fixture.id`);
+  const { answer } = await answerOfCurrent(c, FIXTURE_CONTAINER);
+  await typeAnswer(c, answer, FIXTURE_CONTAINER);
+  await clickWidgetButton(c, "submit", FIXTURE_CONTAINER);
+  await waitFirstState(c, "verified", 40000, FIXTURE_CONTAINER);
+  const read = () => bidi.evaluateJSON(c, `(()=>{const d=new FormData(document.getElementById('order'));
+    return {has:d.has('epocha_response'), value:(d.get('epocha_response')||'').length,
+      live:EpoCHA.getResponse(${JSON.stringify(id)}).length};})()`);
+  assert.ok((await read()).value > 0, "verified 之后 FormData 里没有 token");
+
+  await bidi.evaluate(c, `EpoCHA.reset(${JSON.stringify(id)})`);
+  const afterReset = await read();
+  assert.equal(afterReset.value, 0, `reset 后 FormData 里仍留着 token：${JSON.stringify(afterReset)}`);
+  assert.equal(afterReset.live, 0, "reset 后 getResponse 还有值");
+
+  await bidi.evaluate(c, `EpoCHA.destroy(${JSON.stringify(id)})`);
+  const gone = await bidi.evaluateJSON(c, `document.querySelectorAll('#order input[name="epocha_response"]').length`);
+  assert.equal(gone, 0, "destroy 之后隐藏字段还在 DOM 里");
 });
 
 test("方案 B：同源 worker 文件路径可用（该页 CSP 禁 blob:，能过就说明确实走的是文件）", async () => {

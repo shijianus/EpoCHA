@@ -152,6 +152,22 @@ for _ in $(seq 1 100); do
 done
 curl -fsS "http://127.0.0.1:$BLIND_PORT/healthz" >/dev/null 2>&1 || die "记录服务没起来：$(cat "$WORK/blindtest.log")"
 
+# 页面里的 widget 脚本必须**真的取得到**：漏掉 <script src> 或地址写错时，页面照常显示、
+# 按钮照常能点，只有组件永远不出现——真人会以为"工具坏了"。（本轮真实浏览器里踩过。）
+say "  核对页面引入的 widget 脚本可取回"
+curl -fsS "http://127.0.0.1:$BLIND_PORT/" -o "$WORK/page.html" || die "读不到盲测页面"
+wsrc="$(python3 -c '
+import re,sys
+h=open(sys.argv[1],encoding="utf-8").read()
+m=re.search(r"<script src=\"([^\"]*widget/v1\.js)\" defer>",h)
+print(m.group(1) if m else "")' "$WORK/page.html")"
+[[ -n "$wsrc" ]] || die "页面里没有 deferred 的 widget 脚本标签（EpoCHA 必然未定义）"
+hdrs="$(curl -sS -D - -o "$WORK/widget.js" "$wsrc")"
+printf '%s' "$hdrs" | grep -qi '^HTTP/1.1 200' || die "widget 脚本取不回：$wsrc（$(printf '%s' "$hdrs" | head -n1)）"
+printf '%s' "$hdrs" | grep -qi '^content-type: text/javascript' || die "widget 脚本内容类型不对：$wsrc"
+grep -q 'epocha widget' "$WORK/widget.js" || die "取回的内容不像 widget 脚本：$wsrc"
+say "  widget 脚本可取回：$wsrc"
+
 say ""
 say "盲测入口：http://127.0.0.1:$BLIND_PORT/"
 say "每档 $BATCH 题，共 ${#DIFFS[@]} 档。做完点页面上的「导出 CSV / 导出 JSON」。"

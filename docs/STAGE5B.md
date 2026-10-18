@@ -288,6 +288,25 @@ uid/gid 与数据目录属主一致）。旧的"`cd deploy/docker` + 后面又 `
   （`candidate-manifest-<旧提交短sha>.txt` 与新的 `candidate-manifest.txt` 并存）；
 - 新候选的版本标识会带上 `stage-5b-done-<n>-g<sha>`，那是同一次构建的自然结果，不是又一轮阶段。
 
+**已执行的第二个候选**（同一次运行里生成，机器实测）：
+
+```
+绑定提交  be95275（工作树 clean，describe stage-5b-done-5-gbe95275）
+构建路径  B；Go go1.24.5 linux/arm64；CGO_ENABLED=0；schema 4；实测 uid 1000:1000
+门禁结果  必需项 36 PASS / 0 FAIL / 1 BLOCKED / 0 NOT_RUN ⇒ SCRIPT_RC=3
+BLOCKED 的那一项是第 4 步持续演练：检查时磁盘余量 76MB < 下限 100MB
+旧候选记录  candidate-manifest-993a792.txt（未被覆盖）
+```
+
+第 2 步与第 2.5 步都在**含修复的二进制**上跑过了：容器与宿主共享同一把锁、宿主 `admin-recover`
+在服务运行时被拒、停服后 `admin-recover` 成功且只打印 `key_id`、在线备份照常成功、就地恢复被拒且
+工作库逐字节不变、隔离恢复成功、pepper 不配对拒绝且不留产物；启动配方七条也全过。
+**缺的是 5 分钟窗口**，而且不能拿"服务代码没改"糊过去——尽管依赖层的证据是：
+`cmd/server`、`internal/api`、`internal/admin`、`internal/pool` 里没有任何一处调用
+`RecoverAdminKey` 或 `AdminKeyAdopted`（grep 为空），所以服务路径的行为不可能被这次修改影响；
+但镜像里的二进制字节确实变了（版本串本身就随提交变），所以窗口结果要在新候选上重跑才算。
+命令：`bash docs/scripts/stage5b.sh`（磁盘余量需要 ≥250MB 才能跑完第 4 步的下限检查）。
+
 ## 4. 持续演练（约 5 分钟，硬上限）
 
 形状：1 CPU / 128MiB / 只读根 / 非 root / `GOMEMLIMIT=56MiB`，并发 1、`--pace 660ms`、450 次闭环封顶。

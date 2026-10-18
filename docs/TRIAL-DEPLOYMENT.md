@@ -12,6 +12,8 @@
 | 交付标签 | `stage-5b-done` → 提交 `993a792`（标签正文限定：B 路径、`linux/arm64`、实测 uid `1000:1000`） |
 | 构建路径 | **只有 B 路径受支持**：宿主 `CGO_ENABLED=0` 静态编译 → `deploy/docker/.prebuilt/out` → named build context 装配。A 路径（容器内编译）NOT_RUN |
 | 候选清单 | `deploy/docker/.prebuilt/candidate-manifest.txt`（忽略目录里的构建产物，绑定干净提交；不入库以免自引用） |
+| **当前应该用的候选** | `be95275`（`candidate-manifest.txt`，含 ADR-018 的恢复边界修复）。`stage-5b-done` 指向的 `993a792` **不包含**该修复，其记录保存在 `candidate-manifest-993a792.txt` |
+| `be95275` 的验收完成度 | 必需项 36 PASS / 0 FAIL / **1 BLOCKED**：5 分钟持续演练当时磁盘余量 76MB < 100MB 下限。互斥、恢复边界、启动配方都在含修复的二进制上重跑过。部署前建议补跑：`bash docs/scripts/stage5b.sh`（需要 ≥250MB） |
 | 未覆盖 | amd64、UID 65534 的 `chown` 路径、公网 TLS/DNS、人工可读性、抗 OCR/抗 AI |
 
 **待确认第 0 项就是架构**：如果 VPS 是 x86-64，现有候选（arm64 二进制 + `scratch`）**不能直接用**，

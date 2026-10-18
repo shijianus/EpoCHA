@@ -35,14 +35,31 @@ CSP 四档 blob/worker-file/no-worker/none；默认 loopback 强制）、
 `docs/scripts/ocr-baseline.sh`（把退出码分层变成可执行事实）。
 后端新增一条**收紧**规则：`site_key` 在 URL 与请求体（redeem 时是 URL 与 token 所属站点）同时出现时必须一致，
 冲突一律 400 `invalid-request`，且**排在任何状态消费之前**（被拒的 redeem 不消耗唯一作答机会）。
+**4B 新增**：`cmd/exampleapp` 的 `/fixture` + `/fixture-init.js` + `POST /guestbook-form`（文档最小接入示例的
+**可运行版本**：容器在 form 内、两个脚本都 defer 保序、初始化走外部同源文件、原生表单 POST；表单与 JSON
+共用同一个 `commitProtected`，表单侧同样走字段白名单）、widget 的 `form` 选项（元素或当前文档内 form 的 id；
+`fieldName` 非空而容器不在任何 form 内 ⇒ `render()` 抛 `TypeError` 且不留孤儿字段）、
+`bidi.mjs` 的 `setViewport/viewportMetrics/subscribeEvents`（真实窄视口）、
+`internal/eval` 的 `Normalizer`（`(string,bool)`，默认注入**生产** `generator.TextImage.NormalizeAnswer`，
+畸形输出单独计 `Malformed` 且留在分母里；旧的会删内部空白的 `upper` 档已删除）、
+`docs/scripts/ocr/{Dockerfile,ocr1.sh,run-baseline.sh}`（隔离 OCR 容器：`--network none`、样本只读挂载、
+`ground-truth` 从不进容器；`make ocr-container / ocr-baseline-real`）、
+`cmd/blindtest` + `docs/scripts/blindtest.sh` + `make blindtest`（一条命令的人工盲测入口，导出无凭据）、
+`docs/scripts/stage4b.sh` + `make stage4b-check`、`docs/STAGE4B.md`。
+后端另一条收紧：`Origin: null` 不再被当 URL 解析（Firefox 原生 form POST 实测就发这个），
+改为回落 `Sec-Fetch-Site` 判定；真跨站 Origin 仍直接拒。
+**4B 的 OCR 真实数字**（tesseract 5.3.4 + eng 4.1.0，固定最强配置，holdout 各 100 张，分母含工具失败与畸形）：
+低档 **96%** / 中档 **31%** / 高档 **3%** 整串严格通过率 ⇒ **低档挡不住通用 OCR**，
+生产默认不得落在低档；高档好看也**不**改变 `production_ready:false`（DESIGN §8.4、红线 14）。
 **尚未实现**：题型权重与多生成器选择、风险打分、自动淘汰、非视觉等价通道（音频等）、
-widget 的 `fallback_base` 与多站点配置面、阶段 4B 的人工验收项（"题型人工各过 5 次"等）、
+widget 的 `fallback_base` 与多站点配置面、阶段 4 的人工验收项（"题型人工各过 5 次"、辅助技术实测）、
+真机移动端验证（本轮窄屏是 headless 真实视口，不是真设备）、
 后台页面/容器/边缘（阶段 5 及之后）。
 **阶段 3A 只有"文本基线题型 + 题池工程骨架"两层（PoW + 一次性题目）**：第三层风险打分不存在，
 且 `arithmetic-baseline-v1` 的答案**可由公开 payload 程序化推出**——不得在响应或文档里把它说成抗 AI/抗 OCR 题型，
 也不得用"随机实例多"论证安全性（DESIGN §8.4、ADR-011、红线 14）。
-阶段边界与验收：`make stage1-check` / `stage2-check` / `stage3a-check` / `stage3b-check`；
-标签只打 `stage-3a-done`、`stage-3b-done`、`stage-4a-done`，**不打 `stage-3-done`、`stage-4-done`**
+阶段边界与验收：`make stage1-check` / `stage2-check` / `stage3a-check` / `stage3b-check` / `stage4a-check` / `stage4b-check`；
+标签只打 `stage-3a-done`、`stage-3b-done`、`stage-4a-done`、`stage-4b-done`，**不打 `stage-3-done`、`stage-4-done`**
 （第三层风险打分不存在；阶段 4 的人工验收项与非视觉通道仍未做）。
 
 ## 硬性技术约束
@@ -57,10 +74,15 @@ widget 的 `fallback_base` 与多站点配置面、阶段 4B 的人工验收项�
   字体许可与传递依赖 `golang.org/x/text v0.34.0` 记录在 `docs/NOTICE.md`）。
   除此之外仍**只有标准库**；新增任何其它依赖、系统级安装、在线调用必须停下问我。
 - **`GOTOOLCHAIN=local`（已写入 Makefile）**：构建不得下载/切换 Go 版本；不升级工具链（本机 go1.24.5 / linux-arm64）。
+- **OCR 容器是开发期评测工具，不是依赖**：`docs/scripts/ocr/Dockerfile` 里的 tesseract 只在隔离容器里跑
+  （官方基础镜像 + 官方仓库；识别阶段 `--network none`、样本只读挂载、答案文件不进容器），
+  `cmd/server` 与生产镜像**不含**也不调用它。"禁止引入外部二进制"这条约束的对象是服务运行时，
+  不要把它读成"不许在本机做离线测量"，也不许把它变成服务依赖。
 - 权威状态（防重放账本、题池、统计）在 VPS 源站 SQLite。**这是工程选择，不是平台限制**——Cloudflare 免费计划**可以**使用
   SQLite-backed Durable Objects（ADR-001 已更正旧的错误断言）。CF 边缘是阶段 5 之后的评估项，不在阶段 1。
 - 前端 widget：原生 JS 零依赖，gzip `[目标]` <30KB，中英双语，键盘可完成、`aria-live` 播报、移动端适配。
-  4A 的 `[实测]`：`v1.js` 原文 48,412 B / **gzip 16,687 B**（预算内，由 `make widget-size` 守护）。
+  4A 的 `[实测]`：`v1.js` 原文 48,412 B / **gzip 16,687 B**；4B 加了 `form` 归属规则后是
+  原文 50,784 B / **gzip 17,704 B**（预算内，由 `make widget-size` 守护）。
   **移动端 375px 已在阶段 4B 真实测过**（原表述是错的）：Firefox 147.0.2 的 BiDi 端点**支持**
   W3C 规范的 `browsingContext.setViewport`，375×667 与 414×896 都能设进去（断言 `innerWidth`/`clientWidth`
   实测相等）；此前记成"BiDi 不给视口设置命令 ⇒ BLOCKED"，实际是客户端只试过 `browsingContext.resize`

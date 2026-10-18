@@ -9,6 +9,7 @@
 - 阶段 3B 现状（图片数据流、配置、本地预览步骤、评测方法与未测项）：`docs/STAGE3B.md`
 - widget 接入契约（API、状态机、CSP 清单、无障碍边界）：`docs/WIDGET.md`
 - 阶段 4A 现状（浏览器交互验收、实测数字、BLOCKED/NOT_RUN 清单）：`docs/STAGE4A.md`
+- 阶段 4B 现状（真实窄屏、表单接入 fixture、OCR 基线数字、人工盲测入口）：`docs/STAGE4B.md`
 - 依赖与字体许可：`docs/NOTICE.md`
 - 前端 widget：中英双语、键盘可完成（`docs/WIDGET.md`）
 - 命令：`make help`
@@ -24,8 +25,9 @@
 | 3A | 生成器契约 + 有界预生成题池 + 原子领题 + 单次答案提交 + `arithmetic-baseline-v1` | 完成（tag `stage-3a-done`） |
 | 3B | 首个视觉题型 `text-image-v1` + 图片资产入库/内联下发 + 本地预览 + 离线评测脚手架 | 工程闭环完成（tag `stage-3b-done`）；**OCR 与人工可读性未测**，`production_ready:false` |
 | 3C | 题型权重与多生成器选择、风险打分（第三层）、分级淘汰、OCR/人工基线测量 | 未开始 |
-| 4A | 生产 widget（零依赖原生 JS）+ 示例业务后端 + 真实浏览器闭环验收 | 工程与浏览器闭环完成（tag `stage-4a-done`）；375px 视口检查 BLOCKED、人工项 NOT_RUN |
-| 4B | 非视觉等价通道、`fallback_base`、人工验收项（题型人工各过 5 次等） | 未开始 |
+| 4A | 生产 widget（零依赖原生 JS）+ 示例业务后端 + 真实浏览器闭环验收 | 工程与浏览器闭环完成（tag `stage-4a-done`）；人工项 NOT_RUN |
+| 4B | 接入收尾（表单 fixture + 原生 POST）、真实窄屏视口、离线 OCR 基线、人工盲测入口 | 工程与窄屏完成；**OCR 基线已测出真实数字**（低/中/高档 96%/31%/3%）；人工可读性需真人执行 ⇒ NOT_RUN |
+| 4C | 非视觉等价通道（音频等）、`fallback_base`、人工验收项（题型人工各过 5 次、辅助技术实测） | 未开始 |
 | 5 | 管理后台、分级淘汰、Docker 与部署文档（CF 边缘为之后评估项） | 未开始 |
 
 ## 阶段 1 复核（2026-10-17）
@@ -162,16 +164,17 @@ make eval-samples    # 离线评测样本：dev 调参集 + 固定 seed 的 hold
 **3B 之后仍未实现**：题型权重与多生成器选择、风险打分（第三层）、分级淘汰与统计面、OCR 与人工基线测量。
 `make stage3b-check` 全绿只代表工程闭环，不代表效果结论。
 
-## 阶段 4A 现状（widget + 业务接入示例）
+## 阶段 4A / 4B 现状（widget + 业务接入 + 真实窄屏 + OCR 基线）
 
 `web/widget/v1.js` 是零依赖原生 JS 组件（`EpoCHA.render/getResponse/reset/refresh/destroy`，中英双语，
 Shadow DOM 直挂**不用 iframe**）。PoW 在 **Dedicated Worker** 里算：默认用内嵌的同一份源码建 Blob Worker
 （需要 `worker-src blob:`），也支持接入方同源部署 `v1.worker.js` 并用 `workerUrl` 指定；
 CSP 挡住 Worker 时给明确错误，**不**回落到主线程假装算完，也**不**假装验证完成。
-服务端脚本 `GET /widget/v1.js` 由 `cmd/server` 内嵌提供（实测 gzip 16,687 B，预算 30KB）。
+服务端脚本 `GET /widget/v1.js` 由 `cmd/server` 内嵌提供（实测 gzip 17,704 B，预算 30KB）。
 
 ```bash
-make stage4a-check   # 13 项工程 PASS + 1 BLOCKED + 2 NOT_RUN（含真实浏览器交互与全部阶段回归）
+make stage4b-check   # 阶段 4B 工程项 + 一次 stage4a 全套（回归与浏览器套件各只跑一遍）
+make stage4a-check   # 4A 工程项 + 21 条真实浏览器交互（0 skip）+ 全部阶段回归
 make widget-checks   # JS 语法 + JS↔Go 共享 PoW 固定向量（零第三方依赖）
 ```
 
@@ -180,12 +183,29 @@ make widget-checks   # JS 语法 + JS↔Go 共享 PoW 固定向量（零第三�
 ```bash
 go run ./cmd/exampleapp --listen 127.0.0.1:8091 --api http://127.0.0.1:8080   --site-key pk_demo4a --site-secret '<建站时返回一次的 secret>' --csp blob
 # → 浏览器打开 http://127.0.0.1:8091/
+# → 文档 §1 的最小接入示例本身在 http://127.0.0.1:8091/fixture（容器在 form 内 + 原生表单 POST）
 ```
 
 它故意让「提交留言」按钮一直可点：不带 token 也能提交，服务端必然拒绝且零写入 ——
 **前端的 `onSuccess` 不是授权**。同一 token 再提交一次必然被拒（一次性消费）；
 验证服务宕机/超时/5xx 一律 fail closed；页面里没有任何字段能指定验证目标。
-接入契约、CSP 清单与无障碍边界写在 `docs/WIDGET.md`；浏览器侧到底测了什么、哪些是 BLOCKED/NOT_RUN 写在 `docs/STAGE4A.md`。
+接入契约、CSP 清单与无障碍边界写在 `docs/WIDGET.md`；浏览器侧到底测了什么写在 `docs/STAGE4A.md`，
+4B 补的窄屏、表单接入、OCR 基线与盲测入口写在 `docs/STAGE4B.md`。
 
-**4A 之后仍未实现**：非视觉等价通道（音频等）、`fallback_base`、多题型权重与风险打分、
-阶段 4 的人工验收项（题型人工各过 5 次、辅助技术实测）。因此**不打** `stage-4-done`。
+### 4B 新增的三件实事
+
+1. **窄屏不再是不成立的 BLOCKED**。`browsingContext.setViewport`（W3C 规范命令）在 Firefox 147.0.2
+   上真实生效，375×667 与 414×896 是**执行并断言**的用例：先断言 `innerWidth`/`clientWidth` 等于目标值，
+   再量溢出、图片比例、控件在 shadow DOM 内的可命中性，并在 375 下真点真提交。
+   这仍**不等于**真机移动端测试（DPR 是被设进去的）。
+2. **离线 OCR 基线第一次有数字**（隔离容器里的 tesseract 5.3.4 + eng 4.1.0，识别阶段断网、
+   只读挂载、答案文件从不进容器）。固定最强配置后 holdout 各 100 张的整串严格通过率：
+   **低档 96%、中档 31%、高档 3%**（分母含工具失败与畸形输出）。
+   结论方向要读对：**低档基本挡不住通用 OCR**，所以生产默认不能落在低档；
+   高档数字好看也**不**改变 `production_ready:false`。详见 `docs/STAGE4B.md` §4。
+3. **人工可读性有了稳定入口**：`make blindtest` 一条命令拉起临时服务与三档盲测页面，
+   答题前不显示答案、不记录输入、导出无凭据的 CSV/JSON，并把"答题/PoW/兑换"三段耗时分开
+   （兑换那段无法再拆成 RTT 与服务端时间，文档里如实标注）。真人做题这件事 agent 不代填。
+
+**4B 之后仍未实现**：非视觉等价通道（音频等）、`fallback_base`、多题型权重与风险打分、
+完整管理后台、人工验收项（题型人工各过 5 次、辅助技术实测）。因此**不打** `stage-4-done`。

@@ -63,7 +63,7 @@ go run ./cmd/exampleapp --listen 127.0.0.1:8091 --api http://127.0.0.1:8080 \
 |---|---|---|
 | 后端/组件工程测试 | **PASS** | `go test -race` 全绿；`internal/api` 新增 site_key 一致性 3 个测试；`web/widget` 6 个测试（含两份 worker 拷贝防漂移、危险构造扫描）；`cmd/exampleapp` 13 个测试（含 fail-closed、超时、写入失败不缓存成功）；`internal/pow` 共享向量测试 |
 | 跨实现一致性 | **PASS** | `node --test` 用 worker 的原始字节在 `vm` 里断言与 Go 生成的同一份向量一致（7 项） |
-| 浏览器交互测试 | **PASS** | 真实 Firefox + WebDriver BiDi（零第三方驱动）：闭环、答错终结、一次性重放、多实例与隐藏字段、晚到响应、reset/destroy、计算超时预算、高难度取消、CSP 禁 Worker、键盘-only、请求面、凭据面 |
+| 浏览器交互测试 | **PASS**（14 项：13 pass + 1 skip） | 真实 Firefox + WebDriver BiDi（零第三方驱动）：闭环、答错终结、一次性重放、多实例与隐藏字段、晚到响应、reset/destroy、计算超时预算、高难度取消、**过期清空 token 与隐藏字段**（用 `response_ttl_sec=2` 的演示站点，客户端倒计时跟着服务端 TTL）、CSP 禁 Worker、键盘-only、请求面、凭据面 |
 | 移动端 375px 无横向溢出 | **BLOCKED** | Firefox BiDi 没有可用的视口设置命令；node:test 以 `skip` 表达（不是通过）。需人工在真机或 DevTools 响应式模式下确认 |
 | OCR 效果测量 | **BLOCKED** | 沿用 3B：本机无离线 OCR、未获授权安装/下载 ⇒ M4 未知 |
 | 人工可读性 | **NOT_RUN** | 4A 没有新的人工参与数据；盲测入口仍在 `cmd/preview` |

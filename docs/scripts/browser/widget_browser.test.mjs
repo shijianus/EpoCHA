@@ -535,3 +535,50 @@ test("页面与组件的请求面：只打 /api/challenge 与 /api/redeem，不�
   assert.ok(!/ak_[0-9a-f]{16,}/.test(html), "页面 HTML 里出现了形似管理密钥的串");
   assert.ok(html.includes(SITE_KEY), "页面应包含公开的 site_key");
 });
+
+test("过期时清空 token 与隐藏字段（客户端倒计时跟着服务端的 response_ttl）",
+  { skip: process.env.EXAMPLE_TTL_URL ? false : "没给 EXAMPLE_TTL_URL" }, async () => {
+  const c = await openPage(process.env.EXAMPLE_TTL_URL);
+  await waitFirstState(c, "ready");
+  // 这个演示站点的 response_ttl_sec=2（服务端权威），所以客户端必须在 2 秒后自己作废。
+  const id = await bidi.evaluateJSON(c, `(()=>{
+    const f=document.createElement('form'); document.body.appendChild(f);
+    const d=document.createElement('div'); f.appendChild(d);
+    window.__expired = 0;
+    return EpoCHA.render(d, {apiBase: ${JSON.stringify(EPOCHA_API)}, siteKey: ${JSON.stringify(process.env.TTL_SITE_KEY)},
+      language:'zh-CN', fieldName:'ttl_response',
+      onExpired: function () { window.__expired++; }});
+  })()`);
+  await bidi.waitUntil(c, `EpoCHA.state(${JSON.stringify(id)})==='ready'`, { timeoutMs: 30000, label: "短 TTL 实例进入 ready" });
+  const imgs = await bidi.evaluateJSON(c, `(()=>{const hs=[...document.querySelectorAll('[data-epocha-widget]')];
+    const h=hs[hs.length-1]; const img=h.shadowRoot.querySelector('img');
+    return img?img.src.split('base64,')[1]:null;})()`);
+  const answer = answerByImageB64.get(imgs);
+  assert.ok(answer, "短 TTL 实例的题目不在受控注入集合里");
+  await bidi.evaluate(c, `(()=>{const hs=[...document.querySelectorAll('[data-epocha-widget]')];
+    hs[hs.length-1].shadowRoot.querySelector('input.ans').focus();})()`);
+  await bidi.send("input.performActions", { context: c, actions: [{
+    type: "key", id: "kttl", actions: [...answer].flatMap((ch) => [{ type: "keyDown", value: ch }, { type: "keyUp", value: ch }]) }] });
+  const lastHostSel = `[data-epocha-widget]:nth-of-type(2)`;
+  const pos = await bidi.evaluateJSON(c, `(()=>{const hs=[...document.querySelectorAll('[data-epocha-widget]')];
+    const b=hs[hs.length-1].shadowRoot.querySelector('button:nth-of-type(1)');
+    b.scrollIntoView({block:'center'}); const r=b.getBoundingClientRect();
+    return [Math.round(r.left+r.width/2), Math.round(r.top+r.height/2)];})()`);
+  void lastHostSel;
+  await bidi.pointerClick(c, pos[0], pos[1]);
+  await bidi.waitUntil(c, `EpoCHA.state(${JSON.stringify(id)})==='verified'`, { timeoutMs: 30000, label: "短 TTL 实例验证通过" });
+  const got = await bidi.evaluateJSON(c, `(()=>({token:EpoCHA.getResponse(${JSON.stringify(id)}),
+    field:(document.querySelector('input[name=ttl_response]')||{}).value}))()`);
+  assert.ok(got.token && got.token.length > 20, "刚验证通过时应有 token");
+  assert.equal(got.field, got.token, "隐藏字段应与 getResponse() 同步");
+
+  await bidi.waitUntil(c, `EpoCHA.state(${JSON.stringify(id)})==='expired'`,
+    { timeoutMs: 15000, label: "服务端 TTL 到期后组件进入 expired" });
+  const after = await bidi.evaluateJSON(c, `(()=>({token:EpoCHA.getResponse(${JSON.stringify(id)}),
+    field:(document.querySelector('input[name=ttl_response]')||{value:'MISSING'}).value,
+    expired:window.__expired, hosts:document.querySelectorAll('[data-epocha-widget]').length}))()`);
+  assert.equal(after.token, "", "过期后 getResponse() 必须返回空串");
+  assert.equal(after.field, "", "过期后隐藏字段必须清空（不能只改 UI）");
+  assert.equal(after.expired, 1, "onExpired 应恰好触发一次");
+  void id; void c;
+});

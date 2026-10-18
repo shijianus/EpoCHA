@@ -99,7 +99,8 @@ idle → loading → ready → solving → submitting → verified
   晚到的旧响应**不会**覆盖新题（实测断言：界面上显示的图 = 最后一次请求的图）。
 - 重复点提交不会二次兑换（`submitting/solving/verified` 直接 return）。
 - `verified` 之后 `onSuccess` 不再触发；`onExpired` 只在 token 真的作废时触发一次。
-- 过期**清空 token**，不只是改 UI（`getResponse()` 会返回 `""`）。
+- 过期**清空 token**，不只是改 UI（`getResponse()` 返回 `""`，隐藏字段一起清空，`onExpired` 恰好一次）。
+  这一条在浏览器里用 `response_ttl_sec=2` 的演示站点真跑过：等到服务端 TTL 到期后断言三者同时成立。
 - 标签页后台挂起后恢复：立刻用 `Date.now()` 复核 deadline，过期就走过期路径。
 - 客户端倒计时只服务体验；**服务端裁决才是最终依据**（`expires_in` 来自服务端；
   服务端没给就不设倒计时、不猜"固定两分钟"）。

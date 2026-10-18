@@ -29,6 +29,8 @@ APP1_PID=""
 APP2_PID=""
 APP3_PID=""
 APP4_PID=""
+APP5_PID=""
+APP6_PID=""
 FF_PID=""
 STEP=0
 N_PASS=0
@@ -53,18 +55,18 @@ fail() {
 cleanup() {
   local rc=$?
   set +e
-  for pid in "$SERVER_PID" "$APP1_PID" "$APP2_PID" "$APP3_PID" "$APP4_PID" "$FF_PID"; do
+  for pid in "$SERVER_PID" "$APP1_PID" "$APP2_PID" "$APP3_PID" "$APP4_PID" "$APP6_PID" "$FF_PID"; do
     [[ -n "$pid" ]] && kill -TERM "$pid" 2>/dev/null || true
   done
   for _ in 1 2 3 4 5 6 7 8; do
     any=0
-    for pid in "$SERVER_PID" "$APP1_PID" "$APP2_PID" "$APP3_PID" "$APP4_PID" "$FF_PID"; do
+    for pid in "$SERVER_PID" "$APP1_PID" "$APP2_PID" "$APP3_PID" "$APP4_PID" "$APP6_PID" "$FF_PID"; do
       [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && any=1
     done
     [[ $any -eq 0 ]] && break
     sleep 0.2
   done
-  for pid in "$SERVER_PID" "$APP1_PID" "$APP2_PID" "$APP3_PID" "$APP4_PID" "$FF_PID"; do
+  for pid in "$SERVER_PID" "$APP1_PID" "$APP2_PID" "$APP3_PID" "$APP4_PID" "$APP6_PID" "$FF_PID"; do
     [[ -n "$pid" ]] && kill -KILL "$pid" 2>/dev/null || true
   done
   rm -rf "$WORK"
@@ -85,7 +87,7 @@ export EPOCHA_MASTER_KEY="$MASTER_KEY" EPOCHA_PEPPER="$PEPPER"
 
 # 固定端口必须空闲：若上一轮的示例应用还活着，curl 与浏览器测到的都是**遗留进程**，
 # 整轮结论会静默失真。宁可开局就失败，也不要"看起来通过了"。
-for port in 8391 8392 8393 8394 8395 "$BIDI_PORT"; do
+for port in 8391 8392 8393 8394 8395 8396 "$BIDI_PORT"; do
   if ss -ltn 2>/dev/null | grep -q ":$port "; then
     fail "端口 $port 已被占用：先杀掉遗留的示例应用/浏览器进程再跑本脚本（否则测到的是别的进程）"
   fi
@@ -163,6 +165,12 @@ HARD_CREATE="$(curl -sS "${ADMIN[@]}" -H 'Content-Type: application/json' -X POS
   "verify_mode":"pow_question","generator_id":"text-image-v1","difficulty":1,
   "origins":["http://127.0.0.1:8394"],"allow_missing_origin":false}')"
 HARD_SECRET="$(printf '%s' "$HARD_CREATE" | json 'd.get("secret","")')"
+# 第三个演示站点：response TTL 只有 2 秒，专门用来测"过期时客户端清空 token"这条行为。
+TTL_CREATE="$(curl -sS "${ADMIN[@]}" -H 'Content-Type: application/json' -X POST "$ABASE/api/admin/sites" -d '{
+  "name":"stage4a 短TTL","site_key":"pk_stage4a_ttl","pow_bits":12,
+  "verify_mode":"pow_question","generator_id":"text-image-v1","difficulty":1,"response_ttl_sec":2,
+  "origins":["http://127.0.0.1:8396"],"allow_missing_origin":false}')"
+TTL_SECRET="$(printf '%s' "$TTL_CREATE" | json 'd.get("secret","")')"
 [[ -n "$HARD_SECRET" ]] || fail "建高难度演示站点失败：$HARD_CREATE"
 [[ -n "$HARD_SECRET" && "$HARD_SECRET" != "None" ]] || fail "高难度演示站点建不出来：$HARD_CREATE"
 [[ -n "$SITE_SECRET" && "$SITE_SECRET" != "None" ]] || fail "建站没拿到验证凭据：$CREATE"
@@ -205,7 +213,7 @@ c=sqlite3.connect(sys.argv[1]); print(c.execute("select count(*) from challenges
 pass "site_key 冲突被拒且零副作用（且不回显冲突值）；一致路径正常（Go 侧另有判定顺序与不消耗机会的测试）"
 
 log "第八步：启动四个示例应用（blob / worker-src none / 同源 worker 文件 / 高难度站点）"
-APP1_LOG="$WORK/app1.log"; APP2_LOG="$WORK/app2.log"; APP3_LOG="$WORK/app3.log"; APP4_LOG="$WORK/app4.log"
+APP1_LOG="$WORK/app1.log"; APP2_LOG="$WORK/app2.log"; APP3_LOG="$WORK/app3.log"; APP4_LOG="$WORK/app4.log"; APP6_LOG="$WORK/app6.log"
 EPOCHA_API_BASE="$BASE" "$WORK/exampleapp" --listen 127.0.0.1:8391 --api "$BASE" \
   --site-key "$SITE_KEY" --site-secret "$SITE_SECRET" --csp blob --widget-origin api >"$APP1_LOG" 2>&1 &
 APP1_PID=$!
@@ -218,9 +226,12 @@ APP3_PID=$!
 "$WORK/exampleapp" --listen 127.0.0.1:8394 --api "$BASE" \
   --site-key "$HARD_KEY" --site-secret "$HARD_SECRET" --csp blob --widget-origin api >"$APP4_LOG" 2>&1 &
 APP4_PID=$!
+"$WORK/exampleapp" --listen 127.0.0.1:8396 --api "$BASE" \
+  --site-key pk_stage4a_ttl --site-secret "$TTL_SECRET" --csp blob >"$APP6_LOG" 2>&1 &
+APP6_PID=$!
 for _ in $(seq 1 80); do
   ok=1
-  for port in 8391 8392 8393 8394; do curl -fsS "http://127.0.0.1:$port/healthz" >/dev/null 2>&1 || ok=0; done
+  for port in 8391 8392 8393 8394 8396; do curl -fsS "http://127.0.0.1:$port/healthz" >/dev/null 2>&1 || ok=0; done
   [[ $ok -eq 1 ]] && break
   sleep 0.1
 done
@@ -300,6 +311,7 @@ else
     SEED_JSON="$SEED_JSON" SEED_DIR="$WORK/seed" SITE_KEY="$SITE_KEY" \
     HARD_SITE_KEY="$HARD_KEY" \
     EXAMPLE_WORKERFILE_URL="http://127.0.0.1:8393/" EXAMPLE_HARD_URL="http://127.0.0.1:8394/" \
+    EXAMPLE_TTL_URL="http://127.0.0.1:8396/" TTL_SITE_KEY="pk_stage4a_ttl" \
       node --test docs/scripts/browser/widget_browser.test.mjs 2>&1 | tee "$WORK/browser.log"
     browser_rc=${PIPESTATUS[0]}
     set -e

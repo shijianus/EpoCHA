@@ -1167,6 +1167,7 @@ Dedicated Worker 内的可取消 PoW（Blob 与同源文件两条路径都实现
 `make stage4a-check` 的 13 项工程检查退出码 0，其中**真实浏览器交互**（Firefox BiDi，零第三方驱动）覆盖：
 显示图片→键盘输入→页面内 PoW→redeem→业务表单→后端写入、答错终结与换题、token 重放被拒、
 多实例与隐藏字段互不覆盖、晚到响应不覆盖新题、reset/destroy、计算超时预算、高难度站点取消、
+**过期清空 token 与隐藏字段**（专用 `response_ttl_sec=2` 站点，等真实 TTL 到期）、
 CSP 禁 Worker 明确失败、键盘-only 完成一题、请求面与凭据面扫描。
 
 **未达成项（如实记录，不算通过）**：

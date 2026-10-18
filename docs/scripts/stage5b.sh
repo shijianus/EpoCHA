@@ -44,12 +44,12 @@ pass() { STEP=$((STEP+1)); R_PASS=$((R_PASS+1)); printf '[stage5b] PASS %d: %s\n
 fail() { STEP=$((STEP+1)); R_FAIL=$((R_FAIL+1)); printf '[stage5b] FAIL %d: %s\n' "$STEP" "$*" >&2; }
 blocked() {
   STEP=$((STEP+1)); R_BLOCKED=$((R_BLOCKED+1))
-  printf '[stage5b] BLOCKED %d: %s\n' "$STEP" "$*"
+  printf '[stage5b] BLOCKED %d: %s\n' "$STEP" "${1:-}"
   printf '[stage5b]   恢复执行: %s\n' "${2:-见 docs/STAGE5B.md}"
 }
 req_notrun() {
   STEP=$((STEP+1)); R_NOTRUN=$((R_NOTRUN+1))
-  printf '[stage5b] NOT_RUN %d: %s（原因：%s）\n' "$STEP" "$*" "${2:-本轮未执行}"
+  printf '[stage5b] NOT_RUN %d: %s（原因：%s）\n' "$STEP" "${1:-}" "${2:-本轮未执行}"
 }
 
 # --- 可选项（O）：第一版正式支持范围之外的构建路径与平台 ---
@@ -61,21 +61,21 @@ opt_pass() {
     exit 2
   fi
   STEP=$((STEP+1)); O_PASS=$((O_PASS+1))
-  printf '[stage5b] OPTIONAL-PASS %d: %s｜证据: %s\n' "$STEP" "$*" "$2"
+  printf '[stage5b] OPTIONAL-PASS %d: %s｜证据: %s\n' "$STEP" "${1:-}" "$2"
 }
 opt_fail() {
   STEP=$((STEP+1)); O_FAIL=$((O_FAIL+1))
-  printf '[stage5b] OPTIONAL-FAIL %d: %s\n' "$STEP" "$*" >&2
+  printf '[stage5b] OPTIONAL-FAIL %d: %s\n' "$STEP" "${1:-}" >&2
   printf '[stage5b]   可选项失败不进必需项结论，但也不得被写成通过\n'
 }
 opt_blocked() {
   STEP=$((STEP+1)); O_BLOCKED=$((O_BLOCKED+1))
-  printf '[stage5b] OPTIONAL-BLOCKED %d: %s\n' "$STEP" "$*"
+  printf '[stage5b] OPTIONAL-BLOCKED %d: %s\n' "$STEP" "${1:-}"
   printf '[stage5b]   恢复执行: %s\n' "${2:-另建环境执行}"
 }
 opt_notrun() {
   STEP=$((STEP+1)); O_NOTRUN=$((O_NOTRUN+1))
-  printf '[stage5b] OPTIONAL-NOT_RUN %d: %s（原因：%s）\n' "$STEP" "$*" "${2:-本轮未执行}"
+  printf '[stage5b] OPTIONAL-NOT_RUN %d: %s（原因：%s）\n' "$STEP" "${1:-}" "${2:-本轮未执行}"
   printf '[stage5b]   该类项不阻塞已实测通过的 B 路径；也不表示它已通过\n'
 }
 
@@ -84,7 +84,7 @@ opt_notrun() {
 # 人工可读性与 OCR 基线有各自的门禁（make blindtest / make ocr-baseline-real），这里只声明边界。
 scope_note() {
   STEP=$((STEP+1)); S_NOTE=$((S_NOTE+1))
-  printf '[stage5b] OUT_OF_SCOPE %d: %s\n' "$STEP" "$*"
+  printf '[stage5b] OUT_OF_SCOPE %d: %s\n' "$STEP" "${1:-}"
   printf '[stage5b]   边界: %s\n' "${2:-不属本门禁的部署工程结论}"
 }
 
@@ -857,7 +857,7 @@ LDFLAGS_TEXT="$(make -n build 2>/dev/null | grep -o '\-ldflags .*' | head -n1 ||
   echo "构建路径: B（宿主静态编译 → deploy/docker/.prebuilt/out → named build context 装配）"
   echo "ldflags: ${LDFLAGS_TEXT:-（make -n build 未给出，需手工核对 Makefile 的 LDFLAGS）}"
   echo "Go: $(go version)"
-  echo "宿主架构: $(uname -m)  docker: $(docker --version | awk '{print $3}')"
+  echo "宿主架构: $(uname -m)  docker: $(docker --version | awk '{print $3}' | tr -d ',')"
 } >"$LOGS/manifest.txt"
 if [[ -f "$BIN/epocha-ops" ]]; then
   {

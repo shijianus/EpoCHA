@@ -341,7 +341,7 @@ compose 里的硬限额：`cpus 1.0`、`memory 128m`、`memswap_limit 128m`（�
 
 ```bash
 EP=deploy/docker                                  # 部署根（可以是仓库外的任何目录，见下面第 4 条注释）
-set -C                                            # noclobber：这里的 `>` 永不覆盖已存在的文件
+set -C                                            # noclobber：这几行的 `>` 永不覆盖已存在的文件
 mkdir -p "$EP/data" "$EP/keys" "$EP/backups"
 chmod 700 "$EP/data" "$EP/keys" "$EP/backups"
 
@@ -354,6 +354,7 @@ done
 # ② 管理凭据引导文件（可选）：只在"库里还没有任何管理凭据"的那一次启动生效。
 [[ -e "$EP/keys/admin" ]] || printf 'ak_%s' "$(head -c32 /dev/urandom | base64 | tr -d '/+=' | head -c48)" > "$EP/keys/admin"
 chmod 600 "$EP/keys/admin"
+set +C                                            # 保护只该管密钥那几行；留着会让后续 shell 里对已存在文件的 `>` 全部失败
 
 # ③ compose 变量：uid/gid 必须等于 data 与 keys 的**属主**，否则服务在取运行锁这一步
 #    直接返回 ErrLockAccess（§5.5），这是"身份不对"而不是"有人在用"。

@@ -19,7 +19,7 @@
 | 磁盘 | `/var/lib/docker`（或数据分区）≥2GB 空闲才可在容器内编译；仅装配运行时层 ≈50MB | 见 §3 的两条构建路径 |
 | swap | `[目标]` 512M + `vm.swappiness=10`（DESIGN §12） | 只用于吸收 OS 抖动；容器内**禁** swap（`memswap_limit == memory`），超额应当 OOM 而不是悄悄吃宿主 |
 | 文件系统 | SQLite 必须在**本地**持久文件系统 | WAL 依赖 `fsync` 与文件锁；网络共享存储（NFS 等）不提供可靠的 POSIX 锁 |
-| 副本数 | 1 | 权威状态是本地单文件库；副本 >1 直接破坏一次性消费语义（ADR-004） |
+| 副本数 | 1 | **本项目的边界，不是 SQLite 的限制**：一次性消费由原子条件更新保证（ADR-004），跨进程共享库文件时同样成立；只跑一个副本是因为数据目录上的运行锁与"单一权威"的运维形状。本轮不开放多实例 |
 
 ## 2. 一次性准备（数据目录、密钥目录、身份）
 
@@ -81,6 +81,13 @@ make docker-image
 （`CGO_ENABLED=0` 的静态二进制 + scratch），x86-64 支持是**意图**，未实测；
 本轮没有引入跨架构构建体系（无 buildx/QEMU 配置）。在 x86-64 上构建时请用该架构的构建机，
 并按 §10 重跑一次资源演练。
+
+**版本串会改变二进制**：`ldflags` 在构建时注入 `git describe` 与 `rev-parse` 的结果
+（`epocha --version` 与备份 manifest 的 `app_version`/`commit` 就来自这里）。因此
+**同一份源码在不同标签状态下构建，二进制与 SHA-256 就不同**，镜像 ID 也随之变化。
+这不是"代码变了"，所以不要为了"让版本串显示新标签"而重建候选，再把那份新产物当成"已经验收过"——
+候选的身份由"源码提交 + 实测记录"决定，标签名不参与。要带新标签版本串的镜像，
+就在标签存在后重新构建，并**把验收一起重跑**。
 
 **运行身份**：镜像 `USER` 是 `65534:65534`，但**实测过的组合是 `1000:1000`**（本机无 root，
 数据目录属主就是执行者）。换成 65534 的那次 `chown`/`install -o 65534` 没有验证过（BLOCKED），
@@ -293,6 +300,26 @@ sudo nginx -t && sudo nginx -s reload
 镜像里没有 shell/curl/wget，所以 `HEALTHCHECK` 用镜像内真实存在的命令：
 `epocha-ops check --path /readyz`（非 200 ⇒ 退出码 1，`stage5a.sh` 测过这个映射）。
 
+### 8.5 健康检查与重启策略是两件事（容易读错，也是最容易做错的地方）
+
+| 事实 | 谁负责 | 失败时的真实形状 |
+|---|---|---|
+| 进程退出/被 OOM kill | `restart: unless-stopped`（compose 里已有） | Docker 重启容器；`RestartCount` 增加，`docker inspect` 可查 |
+| 探针返回非 200（unhealthy） | **没有人**——plain Docker/Compose 里 unhealthy 本身**不会**重启容器 | 容器保持 running、状态标 unhealthy，事件写进 `docker events`；只有外部编排（Swarm/K8s）才会因此重建容器 |
+| 进程活着但写路径不可用 | `/readyz` 报 unavailable，公共端点 fail closed（503） | 业务侧看到 503；这恰恰是需要**告警**而不是自动 kill 的情形 |
+
+所以本轮的口径是最小可操作的三条：
+
+1. **unhealthy ⇒ 排查，不是重启**。先看 `docker inspect --format '{{json .State.Health}}'`、
+   `docker logs`、宿主磁盘余量与数据目录属主（`epocha.lock` 是否可写、`ErrLockAccess` 那类），
+   再决定动作。盲目 kill 会把"写路径暂时不可用"（常见原因是磁盘满或权限变了）变成"重启后仍然不可用"，
+   还顺手丢掉最后一次可诊断的现场。
+2. **不要用健康检查无条件 kill 服务**，也不引入 autoheal 之类的旁路重启组件：它把"探针失败"与
+   "进程故障"混成同一个动作，而这两者的处置完全不同。要自动处置就用编排系统自己的探针语义，
+   并在 §12 清单里写明由谁负责。
+3. **就绪与存活分开看**：`/readyz` 回答"能不能接流量"（写路径可用），`/healthz` 只回答"进程在不在"。
+   题池水位低不是未就绪（那是容量信号，见上），否则编排会在补池期间反复重启服务。
+
 ## 9. 备份与恢复
 
 见 `docs/BACKUP-RESTORE.md`（主方案 VACUUM INTO、保守恢复流程、旧快照安全语义、演练步骤）。
@@ -399,3 +426,6 @@ $COMPOSE exec epocha /usr/local/bin/epocha-ops admin GET /api/admin/whoami   # �
 - [ ] 恢复演练后的站点逐个确认再启用；管理凭据用恢复时新装入的那把。
 - [ ] 反代日志的磁盘占用与轮转确认（`logrotate` 或服务自己的 json-file 上限）。
 - [ ] `make stage5a-check` 在本机退出码 0；若非 0，逐条读 RESULT 行而不是把文件写完当成验收通过。
+- [ ] 在**目标机**上跑一次 `bash deploy/preflight.sh --text`（只读），把它报的 warn 逐条处置完再部署：
+      密钥权限位、数据目录属主与 uid、端口占用、可用内存/swap、docker 组可达性。
+      开发机的预检结果不算数，报告里的 warn 也不等于失败——它是给人判断的输入。

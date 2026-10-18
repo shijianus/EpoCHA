@@ -14,6 +14,7 @@
 - SQLite 备份与保守恢复（旧快照的安全语义在这里，必读）：`docs/BACKUP-RESTORE.md`
 - 阶段 5A 现状（演练结果、资源实测、BLOCKED 清单）：`docs/STAGE5A.md`
 - 阶段 5B 现状（运行互斥、恢复边界、候选清单与持续演练）：`docs/STAGE5B.md`
+- 试部署前的只读预检与待确认清单：`deploy/preflight.sh`、`docs/TRIAL-DEPLOYMENT.md`
 - 依赖与字体许可：`docs/NOTICE.md`
 - 前端 widget：中英双语、键盘可完成（`docs/WIDGET.md`）
 - 命令：`make help`

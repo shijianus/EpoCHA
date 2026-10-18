@@ -272,6 +272,22 @@ uid/gid 与数据目录属主一致）。旧的"`cd deploy/docker` + 后面又 `
 > 镜像 `30871ca7…`）对应的工作树是 **dirty**（含未提交的 5B 改动）。它属于"5A 提交 + 未提交改动"，
 > 不是任何干净提交的产物，保留在这里只作为历史测量值。
 
+### 3.1 版本串、哈希与"什么时候才需要新候选"
+
+`ldflags` 注入的 `app_version` 来自构建时的 `git describe`。`stage-5b-done` 是在那次构建**之后**
+才创建的，所以候选清单显示 `stage-5a-done-5-g993a792` 是正常的，**不为此重建候选**：
+重建会改变二进制与镜像 ID，那份记录就不再对应跑过验收的产物。
+需要新候选的只有运行时代码变化，而且必须连同验收一起重跑——版本标识只是结果，不是目的。
+
+打完 `stage-5b-done` 之后，`admin-recover` 的提交/清理边界被核实出一个真实缺陷并做了运行时修复
+（`internal/store/deploy.go` 的 `RecoverReport` + `AdminKeyAdopted`、`cmd/ops` 的保留判定顺序）。
+因此：
+
+- **`993a792` 那个候选不包含这个修复**，标签也不覆盖它；
+- 修复后的新候选另起一份清单，旧的来源记录**不被覆盖**
+  （`candidate-manifest-<旧提交短sha>.txt` 与新的 `candidate-manifest.txt` 并存）；
+- 新候选的版本标识会带上 `stage-5b-done-<n>-g<sha>`，那是同一次构建的自然结果，不是又一轮阶段。
+
 ## 4. 持续演练（约 5 分钟，硬上限）
 
 形状：1 CPU / 128MiB / 只读根 / 非 root / `GOMEMLIMIT=56MiB`，并发 1、`--pace 660ms`、450 次闭环封顶。

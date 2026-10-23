@@ -352,6 +352,87 @@ func itoa(n int64) string {
 
 // --- 需求 4：secret 只展示一次 ---
 
+// TestSiteNameUpdateViaAPI 钉住"名称可改"这条最小扩展的边界：
+// 名称是显示用的，改它不提升站点版本、不使任何已签发东西失效；
+// 而 site_key **不可**通过更新接口改动（它是签发绑定与来源判定的锚点）。
+func TestSiteNameUpdateViaAPI(t *testing.T) {
+	x := newHarness(t, nil)
+	created, secret := x.createSite("alpha", "pk_alpha")
+	id := siteID(created)
+	v0 := created.got["site"].(map[string]any)["version"].(float64)
+	x.createSite("beta", "pk_beta")
+
+	up := x.do(http.MethodPut, pathSite(id), map[string]any{"name": "alpha-改名"})
+	if up.status != http.StatusOK {
+		t.Fatalf("改名应 200，got %d %s", up.status, up.body)
+	}
+	site := up.got["site"].(map[string]any)
+	if site["name"] != "alpha-改名" {
+		t.Fatalf("响应未反映新名字：%s", up.body)
+	}
+	if site["version"].(float64) != v0 {
+		t.Errorf("改名不应提升站点版本：v0=%v got=%v", v0, site["version"])
+	}
+	// 保存后重新读取：确认落库的是同一个值（不是回显请求）
+	read := x.do(http.MethodGet, pathSite(id), nil)
+	if got := read.got["site"].(map[string]any)["name"]; got != "alpha-改名" {
+		t.Fatalf("复读名字不符：%v", got)
+	}
+	if strings.Contains(up.body, secret) || strings.Contains(read.body, secret) {
+		t.Error("站点更新响应不得回显 secret")
+	}
+
+	// 省略 name = 不改名（部分更新语义）
+	other := x.do(http.MethodPut, pathSite(id), map[string]any{"pow_bits": 15})
+	if other.status != http.StatusOK {
+		t.Fatalf("改策略应 200，got %d %s", other.status, other.body)
+	}
+	if got := other.got["site"].(map[string]any)["name"]; got != "alpha-改名" {
+		t.Errorf("未提供 name 时不应改名，got %v", got)
+	}
+	if got := other.got["site"].(map[string]any)["pow_bits"]; got != float64(15) {
+		t.Errorf("pow_bits 未生效，got %v", got)
+	}
+
+	for _, bad := range []any{"  x  ", "", strings.Repeat("n", 65), "带\n换行"} {
+		r := x.do(http.MethodPut, pathSite(id), map[string]any{"name": bad})
+		if r.status != http.StatusBadRequest {
+			t.Errorf("非法名字 %q 应 400，got %d %s", bad, r.status, r.body)
+		}
+	}
+
+	// 撞名走 UNIQUE 冲突：409，且两边名字都不变
+	dup := x.do(http.MethodPut, pathSite(id), map[string]any{"name": "beta"})
+	if dup.status != http.StatusConflict {
+		t.Fatalf("重复站点名应 409，got %d %s", dup.status, dup.body)
+	}
+	again := x.do(http.MethodGet, pathSite(id), nil)
+	if got := again.got["site"].(map[string]any)["name"]; got != "alpha-改名" {
+		t.Errorf("失败改名后自身名字被改了：%v", got)
+	}
+
+	// site_key 不在可改字段里：请求带它就是不合法请求（严格解析，不静默忽略）
+	if r := x.do(http.MethodPut, pathSite(id), map[string]any{"site_key": "pk_other"}); r.status != http.StatusBadRequest {
+		t.Errorf("更新 site_key 应 400，got %d %s", r.status, r.body)
+	}
+
+	// 审计：改名是一次 site.update，actor 是公开的 key_id
+	audit := x.do(http.MethodGet, "/api/admin/audit?limit=50", nil)
+	found := false
+	for _, e := range audit.got["audit"].([]any) {
+		row := e.(map[string]any)
+		if row["action"] == "site.update" && row["target"] == "site:"+itoa(id) && row["success"] == true {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("审计里没有 site.update：%s", audit.body)
+	}
+	if strings.Contains(audit.body, secret) || strings.Contains(x.logs.String(), secret) {
+		t.Error("审计或日志泄露了 secret")
+	}
+}
+
 func TestSecretShownOnceOnly(t *testing.T) {
 	x := newHarness(t, nil)
 	created, secret := x.createSite("alpha", "pk_alpha")

@@ -444,3 +444,100 @@ func TestSiteFileDoesNotOverwriteDatabaseOnRestart(t *testing.T) {
 	cancel2()
 	<-done2
 }
+
+// TestAdminUISitsOnlyOnAdminListener 是管理控制台的**网络边界**验收：
+// 页面壳只在 admin 监听器上有路由，公共监听器上连路由都没有（404 而不是 401——
+// 401 意味着"挂上了、只差鉴权"，那是另一种暴露）。
+// 这一条是"不因浏览器方便就把管理面挪到公共端口"的结构化防线。
+func TestAdminUISitsOnlyOnAdminListener(t *testing.T) {
+	env := testEnv(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	aln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(nil, getenvOf(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Listen, cfg.AdminListen = ln.Addr().String(), aln.Addr().String()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, cfg, ln, aln, io.Discard) }()
+	if err := waitForHealthz("http://" + cfg.Listen); err != nil {
+		t.Fatalf("公共面未就绪：%v", err)
+	}
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("优雅关闭：%v", err)
+		}
+	}()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	publicPaths := []string{
+		"/admin", "/admin/", "/admin/app.js", "/admin/app.css", "/admin/app.js.map",
+		"/api/admin/whoami", "/api/admin/sites",
+	}
+	for _, path := range publicPaths {
+		req, _ := http.NewRequest(http.MethodGet, "http://"+cfg.Listen+path, nil)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("公共面 GET %s: %v", path, err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			t.Fatalf("公共监听器暴露了 %s：%s", path, strings.TrimRight(string(raw), "\n"))
+		}
+		if strings.Contains(string(raw), "<!doctype html") || strings.Contains(string(raw), "管理控制台") {
+			t.Fatalf("公共监听器回了管理页面内容：%s", path)
+		}
+	}
+
+	adminUI := []struct{ path, mime string }{
+		{"/admin", "text/html; charset=utf-8"},
+		{"/admin/app.js", "text/javascript; charset=utf-8"},
+		{"/admin/app.css", "text/css; charset=utf-8"},
+	}
+	for _, c := range adminUI {
+		resp, err := client.Get("http://" + cfg.AdminListen + c.path)
+		if err != nil {
+			t.Fatalf("管理面 GET %s: %v", c.path, err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("管理监听器 GET %s = %d", c.path, resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); ct != c.mime {
+			t.Errorf("%s Content-Type=%q want %q", c.path, ct, c.mime)
+		}
+		if cc := resp.Header.Get("Cache-Control"); cc != "no-store" {
+			t.Errorf("%s Cache-Control=%q", c.path, cc)
+		}
+		body := string(raw)
+		// 页面壳是静态的：它**不该**含有本次运行的任何真实凭据，即便引导密钥与站点 secret 都已装载。
+		if strings.Contains(body, sentinelAdminKey) {
+			t.Errorf("%s 泄露了引导管理凭据", c.path)
+		}
+		if strings.Contains(body, sentinelSiteSecret) {
+			t.Errorf("%s 泄露了站点 secret", c.path)
+		}
+	}
+
+	// 页面挂载不改变 API 的鉴权要求：管理端口上无凭据仍是 401，公共端口上仍是 404。
+	resp, err := client.Get("http://" + cfg.AdminListen + "/api/admin/whoami")
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("管理端口未鉴权 /whoami 应 401，got %d", resp.StatusCode)
+	}
+}

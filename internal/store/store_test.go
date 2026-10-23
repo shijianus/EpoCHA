@@ -196,6 +196,81 @@ func TestCreateSiteValidates(t *testing.T) {
 	}
 }
 
+func TestUpdateSiteName(t *testing.T) {
+	d := newDB(t)
+	site, _, err := d.CreateSite(t.Context(), "alpha", "pk_alpha", SitePolicy{PowBits: 14})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := d.CreateSite(t.Context(), "beta", "pk_beta", SitePolicy{PowBits: 14}); err != nil {
+		t.Fatal(err)
+	}
+	before := site.Version
+
+	// nil = 不改：省略 Name 的策略更新不能把名字清空或改掉。
+	seven := 7
+	got, err := d.UpdateSite(t.Context(), site.ID, SiteUpdate{PowBits: uint8p(16), RateSiteRPM: &seven})
+	if err != nil {
+		t.Fatalf("只改策略字段: %v", err)
+	}
+	if got.Name != "alpha" {
+		t.Errorf("未提供 name 时不应改动显示名，got %q", got.Name)
+	}
+
+	got, err = d.UpdateSite(t.Context(), site.ID, SiteUpdate{Name: strp("alpha-renamed")})
+	if err != nil {
+		t.Fatalf("改名字: %v", err)
+	}
+	if got.Name != "alpha-renamed" {
+		t.Fatalf("名字未生效，got %q", got.Name)
+	}
+	if got.PowBits != 16 || got.Policy.RateSiteRPM != 7 {
+		t.Errorf("改名字不能顺带重置其他字段：%+v", got.Policy)
+	}
+	// 显示名不参与任何判定，改它不是"立即生效的安全动作"，因此不提升站点版本。
+	if got.Version != before {
+		t.Errorf("改名字不应提升站点版本：before=%d after=%d", before, got.Version)
+	}
+
+	// 重启后仍在（写的是库，不是内存）。
+	path := d.path
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	d2, err := Open(t.Context(), path, testPepper())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d2.Close() })
+	if s2, err := d2.SiteByKey(t.Context(), "pk_alpha"); err != nil || s2.Name != "alpha-renamed" {
+		t.Fatalf("重启后名字丢失：%v %+v", err, s2)
+	}
+
+	// 与创建路径同一套边界：空白、空串、超长都拒。
+	for _, bad := range []string{"  x  ", "", strings.Repeat("n", MaxNameLen+1), "带\n换行"} {
+		if _, err := d2.UpdateSite(t.Context(), site.ID, SiteUpdate{Name: strp(bad)}); !errors.Is(err, ErrBadConfig) {
+			t.Errorf("非法名字 %q 应 ErrBadConfig，got %v", bad, err)
+		}
+	}
+	// 撞名是 UNIQUE 冲突：报 ErrConflict，且原站点保持不动（这条 UPDATE 要么整体生效要么不生效）。
+	beta, err := d2.SiteByKey(t.Context(), "pk_beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d2.UpdateSite(t.Context(), beta.ID, SiteUpdate{Name: strp("alpha-renamed")}); !errors.Is(err, ErrConflict) {
+		t.Errorf("重复站点名应 ErrConflict，got %v", err)
+	}
+	if again, err := d2.SiteByID(t.Context(), site.ID); err != nil || again.Name != "alpha-renamed" {
+		t.Fatalf("失败的改名不应影响对方：%v %+v", err, again)
+	}
+	if again, err := d2.SiteByID(t.Context(), beta.ID); err != nil || again.Name != "beta" {
+		t.Fatalf("撞名后自身应保持原值：%v %+v", err, again)
+	}
+}
+
+func strp(s string) *string { return &s }
+func uint8p(v uint8) *uint8 { return &v }
+
 func TestSecretLookup(t *testing.T) {
 	d := newDB(t)
 	s := mustSiteSecret(t, d, "demo", "top-secret-value")

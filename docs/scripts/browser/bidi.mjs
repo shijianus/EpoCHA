@@ -31,7 +31,7 @@ export class BiDi {
       if (m.id && this.pending.has(m.id)) {
         const p = this.pending.get(m.id);
         this.pending.delete(m.id);
-        if (m.error) p.reject(new Error(`${p.label} → ${JSON.stringify(m.error)}`));
+        if (m.error) p.reject(new Error(`${p.label} → ${JSON.stringify(m.error)}\n发起点：\n${p.at}`));
         else p.resolve(m.result);
       } else if (m.method) {
         this.events.push(m);
@@ -42,13 +42,17 @@ export class BiDi {
 
   send(method, params = {}, timeoutMs = 20000) {
     const id = ++this.nextId;
+    // 协议错误是在 WebSocket 回调里 reject 的，天然丢掉调用方栈：
+    // "input.performActions → invalid argument" 只说明命令错了，不说明**哪一个包装函数**发的。
+    // 在发起处截一段栈带进错误信息，失败时才能一眼看到是 press/type/click 哪一条。
+    const at = new Error().stack.split("\n").slice(2, 6).join("\n");
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, label: method });
+      this.pending.set(id, { resolve, reject, label: method, at });
       // **文本帧**：Firefox 的 BiDi 端点只认 text frame，发二进制帧它会完全不回复
       // （表现是"命令超时"，而不是协议错误 —— 很容易误判成浏览器坏了）。
       this.ws.send(JSON.stringify({ id, method, params }));
       setTimeout(() => {
-        if (this.pending.delete(id)) reject(new Error(`${method} 超时 ${timeoutMs}ms`));
+        if (this.pending.delete(id)) reject(new Error(`${method} 超时 ${timeoutMs}ms\n发起点：\n${at}`));
       }, timeoutMs);
     });
   }
@@ -81,8 +85,15 @@ export class BiDi {
   // Firefox 的 BiDi 对**对象**结果给的是 `{type:"object", handle:…}`（不含 value），
   // 于是直接返回对象的表达式在 Node 侧会变成空对象——数字/字符串/数组才有内联值。
   // 需要对象就在页面序列化，别依赖跨 realm 的句柄。
+  //
+  // awaitPromise=true 时表达式本身是个 Promise，**必须先 await 再序列化**：
+  // `JSON.stringify(promise)` 得到的是 `"{}"`（Promise 没有可枚举的自有属性），
+  // 于是"存储里四项全空"这类判据会因为什么都没读到而看起来像通过。
   async evaluateJSON(context, expression, awaitPromise = false) {
-    const s = await this.evaluate(context, `JSON.stringify((${expression}))`, awaitPromise);
+    const wrapped = awaitPromise
+      ? `(async()=>JSON.stringify(await (${expression})))()`
+      : `JSON.stringify((${expression}))`;
+    const s = await this.evaluate(context, wrapped, awaitPromise);
     if (typeof s !== "string") return s ?? null;
     try { return JSON.parse(s); } catch { return s; }
   }
@@ -229,6 +240,10 @@ export class BiDi {
 function unwrap(v) {
   if (!v || typeof v !== "object") return v;
   if (v.type === "none") return null;
+  // 实测（Firefox 147.0.2）：DOM 侧的 null 会以 `{type:"null"}` 回来。漏掉这一档会把
+  // "页面里确实没有这个值"变成**真值对象**，于是 `assert.ok(x)` 静默通过、
+  // 模板串里的 `#${id}` 变成 `#[object Object]`。判据"什么都没取到"必须是假值。
+  if (v.type === "null") return null;
   if (v.type === "string" || v.type === "number" || v.type === "boolean") return v.value;
   if (v.type === "bigint") return v.value;
   if (v.type === "array") return (v.value || []).map(unwrap);

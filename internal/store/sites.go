@@ -136,11 +136,19 @@ func DefaultPolicy() SitePolicy {
 }
 
 func validateNameSiteKey(name, siteKey string) error {
+	if err := validateName(name); err != nil {
+		return err
+	}
 	switch {
-	case !printableOK(name) || len(name) > MaxNameLen:
-		return fmt.Errorf("%w: 站点名须为 1..%d 个可见字符", ErrBadConfig, MaxNameLen)
 	case !printableOK(siteKey) || len(siteKey) > MaxSiteKeyLen:
 		return fmt.Errorf("%w: site_key 须为 1..%d 个可见字符", ErrBadConfig, MaxSiteKeyLen)
+	}
+	return nil
+}
+
+func validateName(name string) error {
+	if !printableOK(name) || len(name) > MaxNameLen {
+		return fmt.Errorf("%w: 站点名须为 1..%d 个可见字符", ErrBadConfig, MaxNameLen)
 	}
 	return nil
 }
@@ -260,6 +268,8 @@ func (d *DB) ImportSite(ctx context.Context, name, siteKey, secret string, p Sit
 // 用指针而不是"零值当哨兵"，因为布尔量没有安全的零值——把 AllowMissingOrigin 的 false
 // 解释成"不改"会让"改成拒绝"永远无法表达，而解释成"要改"又会让只想调难度的请求静默收紧来源策略。
 type SiteUpdate struct {
+	Name *string
+	// PowBits 等策略字段：nil = 不改（见类型注释）。
 	PowBits            *uint8
 	ChallengeTTL       *time.Duration
 	ResponseTTL        *time.Duration
@@ -273,6 +283,9 @@ type SiteUpdate struct {
 
 // UpdateSite 改策略字段。**不**提升站点版本：已签发的 token 继续按签发快照生效（DESIGN §5.3）。
 // 立即生效的安全动作只有两类：停用站点与撤销凭据，它们各自走自己的路径。
+//
+// Name 走同一条 UPDATE：显示名不参与任何判定（账本按 site_id 外键、下发按 site_key），
+// 改它不会让任何已签发东西失效，也不需要提升站点版本。
 func (d *DB) UpdateSite(ctx context.Context, id int64, u SiteUpdate) (*Site, error) {
 	cur, err := d.SiteByID(ctx, id)
 	if err != nil {
@@ -282,14 +295,26 @@ func (d *DB) UpdateSite(ctx context.Context, id int64, u SiteUpdate) (*Site, err
 	if err := next.Validate(); err != nil {
 		return nil, err
 	}
+	name := cur.Name
+	if u.Name != nil {
+		if err := validateName(*u.Name); err != nil {
+			return nil, err
+		}
+		name = *u.Name
+	}
 	res, err := d.h.ExecContext(ctx, `
-UPDATE sites SET pow_bits=?, challenge_ttl_sec=?, response_ttl_sec=?, rate_ip_rpm=?, rate_site_rpm=?,
+UPDATE sites SET name=?, pow_bits=?, challenge_ttl_sec=?, response_ttl_sec=?, rate_ip_rpm=?, rate_site_rpm=?,
                  allow_missing_origin=?, verify_mode=?, generator_id=?, difficulty=?
 WHERE id=?`,
-		int(next.PowBits), int64(next.ChallengeTTL/time.Second), int64(next.ResponseTTL/time.Second),
+		name, int(next.PowBits), int64(next.ChallengeTTL/time.Second), int64(next.ResponseTTL/time.Second),
 		next.RateIPRPM, next.RateSiteRPM, b2i(next.AllowMissingOrigin),
 		next.VerifyMode, next.GeneratorID, next.Difficulty, id)
 	if err != nil {
+		// name 与 site_key 都是 UNIQUE：撞名是"另一个站点已经用了这个名字"，
+		// 不是内部错误，也不回滚任何东西（这条 UPDATE 要么整体生效要么整体不生效）。
+		if isUniqueErr(err) {
+			return nil, fmt.Errorf("%w: 站点名或 site_key 已存在", ErrConflict)
+		}
 		return nil, fmt.Errorf("store: 更新站点: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n != 1 {

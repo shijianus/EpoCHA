@@ -1340,6 +1340,28 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
 
 ## 19. 变更日志
 
+- 2026-10-19 **v2.12（阶段 5C-M1：管理控制台第一批——登录、站点列表、创建、策略与 Origin 编辑、启停）**：
+  `web/adminui/` 内嵌原生 HTML/CSS/JS（零框架、零构建、无第三方 CDN/远程字体，默认中文），
+  挂在**管理监听器**的 `/admin`、`/admin/app.js`、`/admin/app.css` 上；公共监听器没有这些路由，
+  判据写成"公共端口 404 而非 401"（401 表示路由挂上了只差鉴权，仍是暴露）。
+  **没有**为了浏览器方便发布管理端口、改 `EPOCHA_ADMIN_LISTEN`、加 CORS 或未鉴权代理，
+  Docker 网络边界原样不动（ADR-019）。
+  凭据只活在 JS 闭包：不进 localStorage/sessionStorage/IndexedDB/Cookie/URL/日志，
+  提交即清空输入框，401 清状态；页面明说"不保证物理擦除内存"。四个视图都用真实端点，
+  列表/详情**没有**任何 QPS、成功率、趋势图（统计能力还不存在）；
+  题型下拉旁的 `experimental` / `production_ready` 两个徽标直接取自 `/api/admin/generators`，
+  `arithmetic-baseline-v1` 与 `text-image-v1` 都仍是"未达生产可用"（§8.4、红线 14 不变）。
+  详情页保存只发改动过的字段，保存后 `GET` 复读逐字段对账；脏标记按表单分部（否则保存策略会抹掉
+  "来源未保存"这件事），确认横幅**叠加**在表单之上而不重建内容（重建会让"留下继续编辑"拿回空表单）。
+  后端唯一最小扩展：`PUT /api/admin/sites/{id}` 可改**名称**（不参与判定 ⇒ 不提升站点版本、
+  不使已签发东西失效；撞 `UNIQUE` ⇒ 409）；`site_key` 仍不可改（它是签发绑定与来源判定的锚点）。
+  新增 `docs/ADMIN-UI.md`（含 NOT_RUN 清单：403/5xx 文案、剪贴板、真机移动端、辅助技术实测）、
+  `docs/scripts/admin-demo.sh`（loopback 双监听 + 空临时库 + 运行时随机 0600 凭据文件，凭据不打印）、
+  `docs/scripts/admin-ui-check.sh` + `make admin-demo / admin-ui-check`（退出码三态），
+  以及 `web/adminui/adminui_test.go`、`internal/admin/ui_test.go`、
+  `cmd/server:TestAdminUISitsOnlyOnAdminListener`、`docs/scripts/browser/adminui_browser.test.mjs`。
+  本轮**不**打 `stage-5c-done`：题池/审计/凭据轮换页面不存在，阶段 5 的统计与分级淘汰也不存在。
+
 - 2026-10-19 **v2.11（阶段 5B 收尾：正式支持范围收窄为 B 路径，门禁结论按三类归属计算）**：
   ADR-017 记录这个取舍本身——第一版只把 **B 路径**（宿主 `CGO_ENABLED=0` 静态编译 + named build context
   装配运行镜像）列为受支持且需要验收的构建路径，A 路径（容器内编译）保持**可选、NOT_RUN**；

@@ -857,3 +857,61 @@ written = true          // ← 保留判定在这里，已经在 cerr 分支之�
   把保留判定挪回 `cerr` 之后 ⇒ "提交后收尾失败"用例红；失败路径不做核查 ⇒ store 用例红；
   `VerifyErr != nil` 也算可清理 ⇒ ops 用例红。
 - 新产物：`deploy/preflight.sh`（目标机只读预检）、`docs/TRIAL-DEPLOYMENT.md`（待确认的试部署计划）。
+
+## ADR-019 阶段 5C-M1：管理页面挂在管理监听器上；站点名称可改、site_key 不可改
+
+### 触发
+
+管理控制台 M1 开工时有两个必须先定的问题：
+
+1. 页面挂在哪。挂公共端口最"方便"（浏览器只用记一个地址），但那等于把管理面搬到公网可达的
+   监听器上，只靠一层前端登录页守着——而登录页不是鉴权。
+2. 详情页要能改名称，而 `PUT /api/admin/sites/{id}` 原本没有 `name` 字段
+   （`updateSiteRequest` 只有 8 个策略字段）。要么扩展，要么把"改名字"这个纯运维需求
+   在页面上做成只读。
+
+### 决策
+
+1. **挂载点本身就是边界。** 静态资源注册在 `admin.Server.Handler()` 上，公共监听器**没有**这些路由。
+   判据是"公共端口返回 404 而不是 401"：401 意味着"路由挂上了、只差鉴权"，那是另一种暴露。
+   页面壳可在未登录时取到（它不含任何数据），真实门禁仍是每个 `/api/admin/*` 的 Bearer 校验；
+   本轮不加账户、Cookie 会话、RBAC，也不改管理密钥协议。
+   管理面继续**不加任何 CORS 头**，不发布管理端口，不把 `EPOCHA_ADMIN_LISTEN` 改成 `0.0.0.0`，
+   不动已验收的 Docker 网络边界。
+2. **凭据只活在 JS 闭包里，且明说不保证什么。** 不写 localStorage / sessionStorage / IndexedDB / Cookie，
+   不进 URL 与 hash，不进日志；登录提交时先清空输入框；401 清状态。
+   这条防的是"凭据落进可被他人读取的持久介质"，**不是**"进程内存里没有历史副本"——
+   JavaScript 做不到后者，文档与页面文案都不假装做到。
+3. **名称可改，`site_key` 不可改。** 名称不参与任何判定（账本按 `site_id` 外键、下发按 `site_key`），
+   改它不是"立即生效的安全动作"，所以走 `UpdateSite` 的同一条 UPDATE 且**不提升站点版本**。
+   校验复用创建路径的同一个 `validateName`（`printableOK` + `MaxNameLen`），撞 `UNIQUE` 映射 `ErrConflict`。
+   `site_key` 是签发绑定与来源判定的锚点：改它等于换站点，会让业务后端里写死的值静默失效，
+   因此更新请求里出现 `site_key` 仍是 400（严格解析 `DisallowUnknownFields` 保持不变）。
+4. **前端边界只是体验层，服务端才是权威。** 页面里的 `BOUNDS` 与
+   `internal/store`／`internal/pow` 的常量一一对应，越界值照样发出去、由 400 兜底；
+   浏览器验收里"直接给 API 发 pow_bits=99 必须被拒、且复读后原值未变"这条就是钉这个的。
+5. **保存后重新读取，复读结果不一致就报不一致。** PUT 的 200 只证明"这次请求成功"，
+   不证明"库里现在是这样"（并发写入、部分更新语义都能让两者分开）。
+
+### 不做什么
+
+- **不为页面新增账户体系、会话或第三种凭据**；不让后端读真实密钥文件再注入页面。
+- **不做只读观测页面的"顺手补全"**：题池、审计、凭据轮换的视图本轮不存在，
+  导航里也就不放指向空页的标签（半个实现比没有实现更容易被误读成已完成）。
+- **不在页面上暴露"删除站点"**：`DELETE` 是软吊销，但它会停用站点并提升版本，
+  这类动作不该被一键触发；启停另有二次确认并要求点名 `site_key` 与版本。
+- **不画任何统计图**：QPS、成功率、趋势图所需的统计能力本身还不存在。
+
+### 影响
+
+- `web/adminui/`（`adminui.go` + `index.html` + `app.css` + `app.js`）与 `internal/admin/admin.go` 的挂载段。
+- `internal/store/sites.go`：`SiteUpdate.Name`、`UpdateSite` 的 UPDATE 与 `validateName` 拆出。
+- `internal/admin/handlers.go`：`updateSiteRequest.Name` 与 `updateFrom` 透传。
+- 测试：`web/adminui/adminui_test.go`（白名单/安全头/子路径 404/方法与凭据形状）、
+  `internal/admin/ui_test.go`（挂载 + 未鉴权 API 仍 401 + 字节 == 内嵌）、
+  `internal/admin:TestSiteNameUpdateViaAPI`、`internal/store:TestUpdateSiteName`、
+  `cmd/server:TestAdminUISitsOnlyOnAdminListener`、
+  `docs/scripts/browser/adminui_browser.test.mjs`（十项真实交互）。
+- 新产物：`docs/ADMIN-UI.md`、`docs/scripts/admin-demo.sh`、`docs/scripts/admin-ui-check.sh`、
+  `make admin-demo / admin-ui-check / adminui-syntax`。
+- 未纳入本 ADR 的既有事实：管理密钥协议、`siteverify` 契约、题池与 PoW 语义都不变。

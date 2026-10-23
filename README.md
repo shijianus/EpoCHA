@@ -14,6 +14,7 @@
 - SQLite 备份与保守恢复（旧快照的安全语义在这里，必读）：`docs/BACKUP-RESTORE.md`
 - 阶段 5A 现状（演练结果、资源实测、BLOCKED 清单）：`docs/STAGE5A.md`
 - 阶段 5B 现状（运行互斥、恢复边界、候选清单与持续演练）：`docs/STAGE5B.md`
+- 管理控制台 M1（登录/站点/创建/策略与 Origin 编辑/启停、挂载与凭据边界、NOT_RUN 清单）：`docs/ADMIN-UI.md`；本地演示 `make admin-demo`，验收 `make admin-ui-check`
 - 试部署前的只读预检与待确认清单：`deploy/preflight.sh`、`docs/TRIAL-DEPLOYMENT.md`
 - 依赖与字体许可：`docs/NOTICE.md`
 - 前端 widget：中英双语、键盘可完成（`docs/WIDGET.md`）
@@ -35,7 +36,7 @@
 | 4C | 非视觉等价通道（音频等）、`fallback_base`、人工验收项（题型人工各过 5 次、辅助技术实测） | 未开始 |
 | 5A | 单节点容器部署包、密钥文件持久化、SQLite 备份/保守恢复、边界与资源受限演练 | 部署包与演练完成（`make stage5a-check`）；**容器/恢复验收通过不等于抗 AI 验证通过** |
 | 5B | 运行互斥（数据目录 `flock`）、恢复边界收敛、启动配方实测、部署候选清单、约 5 分钟持续演练 | 必需项（**B 路径**）全部实测通过；A 路径容器内编译与 amd64/UID 65534/公网 TLS 属**可选项**，如实保留 NOT_RUN/BLOCKED（ADR-017） |
-| 5C | 管理后台页面、统计与分级淘汰、风险打分（第三层）、非视觉通道 | 未开始 |
+| 5C | 管理后台页面、统计与分级淘汰、风险打分（第三层）、非视觉通道 | **M1 已交付**：管理控制台的站点主流程（登录、列表、创建、策略与 Origin 编辑、启停），挂在管理监听器上（`docs/ADMIN-UI.md`，标签 `admin-ui-m1-done`）；题池/审计/轮换视图与统计淘汰**不存在** ⇒ 5C 整体未完成，不打 `stage-5c-done` |
 
 ## 阶段 1 复核（2026-10-17）
 

@@ -142,6 +142,10 @@ type createSiteRequest struct {
 }
 
 type updateSiteRequest struct {
+	// Name 是显示名：与创建时同一套校验（1..64 个可见字符、站内唯一），nil 表示不改。
+	Name *string `json:"name"`
+	// SiteKey 故意不可改：它是公开标识，同时是签发时绑定与来源判定的锚点，
+	// 改它等于换站点，而"换站点"会让业务后端里写死的 site_key 静默失效。
 	VerifyMode         *string `json:"verify_mode"`
 	GeneratorID        *string `json:"generator_id"`
 	Difficulty         *int    `json:"difficulty"`
@@ -168,6 +172,7 @@ type addAdminKeyRequest struct {
 // updateFrom 把请求里的可选项转成 store 的部分更新（nil 字段原样传下去 = 不改）。
 func updateFrom(req *updateSiteRequest) store.SiteUpdate {
 	u := store.SiteUpdate{
+		Name:        req.Name,
 		VerifyMode:  req.VerifyMode,
 		GeneratorID: req.GeneratorID,
 		Difficulty:  req.Difficulty,

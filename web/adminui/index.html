@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<title>EpoCHA 管理控制台</title>
+<link rel="stylesheet" href="/admin/app.css">
+</head>
+<body>
+<a class="skip" href="#view">跳到主要内容</a>
+
+<header class="brand">
+  <div class="brand-line">
+    <span class="mark">EpoCHA</span>
+    <span class="sub">管理控制台</span>
+  </div>
+  <div class="brand-line">
+    <span id="session-state" class="session">未登录</span>
+    <button id="logout" type="button" class="ghost" hidden>退出</button>
+  </div>
+</header>
+
+<main id="main">
+  <!-- 登录面板：静态存在，登录成功后由脚本隐藏。凭据不进 URL、不进任何浏览器存储。 -->
+  <section id="login" aria-labelledby="login-title">
+    <h1 id="login-title" tabindex="-1">输入管理凭据</h1>
+    <p class="hint">
+      管理凭据形如 <code>ak_…</code>，由 <code>epocha ops admin</code> 或服务启动时的引导配置登记。
+      它只保存在本页内存中：不写入 localStorage、不进 URL、不写日志。
+    </p>
+    <form id="login-form">
+      <div class="field">
+        <label for="admin-key">管理凭据</label>
+        <input id="admin-key" name="admin-key" type="password" autocomplete="off"
+               spellcheck="false" maxlength="512" required
+               aria-describedby="login-status">
+      </div>
+      <button id="login-submit" type="submit">验证身份</button>
+    </form>
+    <p id="login-status" class="status" role="status" aria-live="polite"></p>
+  </section>
+
+  <nav id="nav" aria-label="主导航" hidden>
+    <button type="button" class="tab" data-view="sites" aria-current="page">站点</button>
+  </nav>
+
+  <!-- 未保存修改的确认横幅：叠加在视图之上，不重建表单内容（重建等于把未保存的东西抹掉）。 -->
+  <div id="guard" hidden></div>
+
+  <section id="view" aria-labelledby="view-title">
+    <h1 id="view-title" tabindex="-1"></h1>
+    <div id="view-body"></div>
+  </section>
+</main>
+
+<div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+
+<script src="/admin/app.js" defer></script>
+</body>
+</html>

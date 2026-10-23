@@ -26,6 +26,8 @@ help:
 	@echo "make widget-size  断言 web/widget/v1.js gzip <= $(MAX_WIDGET_KB)KB（阶段 4）"
 	@echo "make widget-checks 语法检查 + JS↔Go 共享 PoW 向量（零第三方依赖，用 node 内置）"
 	@echo "make browser-check 只跑浏览器交互验收（需先起服务与 exampleapp，见 docs/STAGE4A.md）"
+	@echo "make admin-demo     起一套只有 loopback 的管理控制台演示（临时库+运行时凭据文件）"
+	@echo "make admin-ui-check 管理控制台验收：挂载边界/安全头 + 浏览器交互（退出码三态）"
 	@echo "make secret-scan  按值扫描日志密钥泄露（阶段 2 起生效）"
 	@echo "make stage1-check 全流程验收（阶段 1 起生效）"
 	@echo "make stage2-check 管理面 + 来源策略 + 轮换 + 重启语义端到端验收（阶段 2）"
@@ -220,6 +222,27 @@ widget-checks:
 # 缺环境变量时 node 侧会直接报错退出，不会静默跳过。
 browser-check:
 	@node --test docs/scripts/browser/widget_browser.test.mjs
+
+.PHONY: admin-ui-check
+# 管理控制台 M1 的门禁：Go 层挂载边界/安全头 + curl 端到端判据 + 十项真实浏览器交互。
+# 退出码三态（0 全 PASS / 1 有 FAIL / 3 有 BLOCKED 或 NOT_RUN）。make 只能报 2，
+# 所以要机器可读的结论就直接 bash docs/scripts/admin-ui-check.sh 并读最后的 RESULT 行。
+admin-ui-check:
+	@rc=0; bash docs/scripts/admin-ui-check.sh || rc=$$?; \
+	if [ $$rc -ne 0 ]; then \
+		echo "[make] admin-ui-check.sh 真实退出码 = $$rc（make 自身只能报 2；结论看 RESULT 行）"; \
+	fi; \
+	exit $$rc
+
+.PHONY: admin-demo
+# 本地演示入口：临时库 + 运行时随机凭据（0600 文件）+ 两个 loopback 监听器。
+# 前台运行，Ctrl-C 只清理本轮临时目录，不碰仓库里的 bin/、.env、keys/。
+admin-demo:
+	@bash docs/scripts/admin-demo.sh
+
+.PHONY: adminui-syntax
+adminui-syntax:
+	@node --check web/adminui/app.js
 
 .PHONY: stage3a-check
 stage3a-check:

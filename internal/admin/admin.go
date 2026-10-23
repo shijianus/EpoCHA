@@ -6,7 +6,7 @@
 //  2. 管理凭据与站点 secret 同样只存带 pepper 的 HMAC 摘要，明文只在创建响应里出现一次；
 //  3. 所有写操作落审计（actor = 管理密钥的公开 key_id），审计写失败就不对外声称成功。
 //
-// 阶段 5 的后台页面、题池水位与统计仍不在这里。
+// 统计、题型权重、风险打分与自动淘汰不在这里（那些能力本身还不存在）。
 package admin
 
 import (
@@ -24,6 +24,7 @@ import (
 	"github.com/shijianus/EpoCHA/internal/pool"
 	"github.com/shijianus/EpoCHA/internal/risk"
 	"github.com/shijianus/EpoCHA/internal/store"
+	"github.com/shijianus/EpoCHA/web/adminui"
 )
 
 // 管理面自有的有限错误码集：与公开端点的 /api/* 码集和 /siteverify 的 reCAPTCHA 码集都不同族。
@@ -113,6 +114,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/admin/audit", s.auth(s.handleAudit))
 	mux.HandleFunc("GET /api/admin/pool", s.auth(s.handlePoolStatus))
 	mux.HandleFunc("GET /api/admin/generators", s.auth(s.handleGenerators))
+
+	// 管理控制台页面挂在**同一个 admin 监听器**上（阶段 5C）。
+	// 它是纯静态资源、不含鉴权：真正的门禁是每个 /api/admin/* 请求头里的 Bearer 校验。
+	// 公共监听器上既没有这些路径、也没有这些路由——挂载点本身就是边界。
+	ui := adminui.Handler()
+	mux.Handle("GET "+adminui.URLIndex, ui)
+	mux.Handle("GET "+adminui.URLIndex+"/", ui)
+	mux.Handle("GET "+adminui.URLJS, ui)
+	mux.Handle("GET "+adminui.URLCSS, ui)
 
 	return s.recoverMiddleware(s.headerMiddleware(s.accessLog(mux)))
 }

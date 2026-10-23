@@ -98,16 +98,40 @@ plain Docker/Compose 里 `unhealthy` **不会**自动重启容器，进程退出
 不受它阻止，不得把它写成防恶意本地进程的机制；(2) "备份可信"只包含 checksum 与 `integrity_check` 两件事，
 manifest **无签名** ⇒ 不得宣称抵御恶意替换（备份目录的可写者就是备份内容的作者），也不得宣称快照具有保密性。
 
+**5C-M1 新增**（管理控制台第一批，2026-10-19；不是"阶段 5C 完成"）：`web/adminui/`（内嵌原生 HTML/CSS/JS，
+零框架零构建、无第三方 CDN/字体，默认中文界面）+ 管理监听器上的 `GET /admin`、`/admin/`、`/admin/app.js`、
+`/admin/app.css`（**公共监听器上没有这些路由**，边界由挂载点保证）；四个视图 = 凭据入口（`whoami` 验真、
+显示公开 `key_id`、凭据只在 JS 内存、不进四类浏览器存储、401 清状态、错误分族不笼统）、
+站点列表（真实 API + 游标分页 + 加载/空/失败态，**没有**任何编造的 QPS/成功率/趋势）、
+创建站点（模式/题型/难度/PoW，201 里一次性展示 secret + 用户主动复制 + 明示取不回）、
+站点详情（名称/模式/题型/难度/PoW/两个 TTL/两个限流/`allow_missing_origin`/精确 Origin 列表/启停，
+只发改动字段、保存后 `GET` 复读对账、脏标记**按表单分部**、确认横幅叠加不重建表单、
+题型显示服务端 `experimental`/`production_ready` 与 `note` 原文）；
+`docs/scripts/admin-demo.sh`（loopback 双监听 + 空临时库 + 运行时随机 0600 凭据文件，
+凭据不打印、不由页面获取，Ctrl-C 只清本轮）与 `docs/scripts/admin-ui-check.sh` + `make admin-demo / admin-ui-check`；
+后端唯一最小扩展：`PUT /api/admin/sites/{id}` 可改**名称**（`store.SiteUpdate.Name`，
+不参与判定 ⇒ 不提升版本；撞 UNIQUE ⇒ 409；`site_key` 仍不可改），理由见 ADR-019；
+测试新增 `web/adminui/adminui_test.go`、`internal/admin/ui_test.go`、
+`cmd/server:TestAdminUISitsOnlyOnAdminListener`、`docs/scripts/browser/adminui_browser.test.mjs`（十项真实交互）。
+**5C-M1 的三条口径**：(1) 管理页面挂在管理监听器上**不等于**放宽网络边界——不发布管理端口、
+不把 `EPOCHA_ADMIN_LISTEN` 改成 `0.0.0.0`、不加 CORS、不加未鉴权的管理代理路由，Docker 边界原样；
+(2) 页面壳可未登录加载（静态、无数据），但每个 `/api/admin/*` 仍独立鉴权，
+"能取到页面"永远不得被写成"能读到数据"；(3) 403/5xx 两支错误文案、剪贴板写入、真机移动端、
+辅助技术实测都是 **NOT_RUN**（无对应端点或无权限，不是通过），题池/审计/凭据轮换的页面**不存在**。
+
 **尚未实现**：题型权重与多生成器选择、风险打分、自动淘汰、非视觉等价通道（音频等）、
 widget 的 `fallback_base` 与多站点配置面、阶段 4 的人工验收项（"题型人工各过 5 次"、辅助技术实测）、
 真机移动端验证（本轮窄屏是 headless 真实视口，不是真设备）、
-后台页面、统计与分级淘汰（阶段 5 其余部分）、CF 边缘（阶段 5 之后评估）。单节点容器部署包已在 5A 交付。
+管理控制台的题池观测/审计/凭据轮换视图（5C-M1 只交付站点主流程，导航里不放指向空页的标签）、
+统计与分级淘汰（阶段 5 其余部分）、CF 边缘（阶段 5 之后评估）。单节点容器部署包已在 5A 交付。
 **阶段 3A 只有"文本基线题型 + 题池工程骨架"两层（PoW + 一次性题目）**：第三层风险打分不存在，
 且 `arithmetic-baseline-v1` 的答案**可由公开 payload 程序化推出**——不得在响应或文档里把它说成抗 AI/抗 OCR 题型，
 也不得用"随机实例多"论证安全性（DESIGN §8.4、ADR-011、红线 14）。
-阶段边界与验收：`make stage1-check` / `stage2-check` / `stage3a-check` / `stage3b-check` / `stage4a-check` / `stage4b-check` / `stage5a-check`；
-标签只打 `stage-3a-done`、`stage-3b-done`、`stage-4a-done`、`stage-4b-done`、`stage-5a-done`、`stage-5b-done`，**不打 `stage-3-done`、`stage-4-done`、`stage-5-done`**
-（第三层风险打分不存在；阶段 4 的人工验收项与非视觉通道仍未做；阶段 5 的后台页面/统计/淘汰不存在）。
+阶段边界与验收：`make stage1-check` / `stage2-check` / `stage3a-check` / `stage3b-check` / `stage4a-check` / `stage4b-check` / `stage5a-check` / `stage5b-check` / `admin-ui-check`；
+标签只打 `stage-3a-done`、`stage-3b-done`、`stage-4a-done`、`stage-4b-done`、`stage-5a-done`、`stage-5b-done`，**不打 `stage-3-done`、`stage-4-done`、`stage-5-done`、`stage-5c-done`**
+（第三层风险打分不存在；阶段 4 的人工验收项与非视觉通道仍未做；阶段 5 的后台页面/统计/淘汰不存在；
+5C 只交付了管理控制台的站点主流程——题池/审计/凭据轮换视图不存在，所以 5C 不算完成。
+里程碑标签 `admin-ui-m1-done` 的正文必须写明覆盖范围与 NOT_RUN 清单）。
 `make stage5a-check` 的退出码是**三态**：0=全 PASS、1=有 FAIL、3=无失败但有 BLOCKED/NOT_RUN（部署与恢复演练没跑完就不是验收通过，"文件都写好了"不算）。
 `make stage5b-check` 也用同一套三态，但结论**只由必需项（受支持的 B 路径）决定**：
 可选项（A 路径容器内编译、amd64、root 场景的 UID 65534）保持 NOT_RUN/BLOCKED **不阻塞**打完成标签，
@@ -182,7 +206,8 @@ widget 的 `fallback_base` 与多站点配置面、阶段 4 的人工验收项�
 ## 目录约定
 `cmd/{server,devclient,devseed,preview,evalgen,evalocr,exampleapp,blindtest,ops,loadtest}`、
 `internal/{api,pow,token,store,pool,generator,risk,admin,config,version,eval}`、
-`internal/store/migrations`、`web/{widget,preview}`、`web/widget/`（生产 widget 与 worker + 内嵌 handler）、
+`internal/store/migrations`、`web/{widget,preview,adminui}`、`web/widget/`（生产 widget 与 worker + 内嵌 handler）、
+`web/adminui/`（管理控制台内嵌静态资源 + 白名单 handler：**只**挂在管理监听器上）、
 `deploy/docker`（Dockerfile + compose + `.env.example` + `nginx.conf.example`）、`deploy/cloudflare`、`docs/{,scripts,scripts/browser}`。
 `internal/eval` 与 `cmd/{preview,devseed,evalgen,evalocr,exampleapp,loadtest}` 是**开发期**代码：`cmd/server` 不得链接它们
 （`cmd/ops` **不是**开发期代码：它随生产镜像交付，但只提供 backup/verify/restore/check/admin/admin-recover 六个动作，不是管理平台）

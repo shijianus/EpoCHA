@@ -1,0 +1,15 @@
+# 这条分支的卷是 AES-256 密文，口令不在这里
+
+口令在 `shijianus/MySoulBot` 的 `backup/vps-replica-20261023` 分支根目录：`SECRET-PASSPHRASE.txt`
+（首行即口令，四条卷共用一把）。
+
+为什么口令不放一份在这里：
+  * EpoCHA 与 TrustIP 都可能被镜像或转公开（TrustIP 本来就是要开源的那一个），
+    把口令复制过来等于给密文配了把挂在门上的钥匙；git 历史里的口令删不掉，只能整条分支弃用。
+  * 真正的防变砖靠的是「口令与卷不在同一台机器上丢」，不是「到处复制」。
+
+解密：
+    git clone --single-branch -b backup/vps-replica-20261023 git@github.com:shijianus/MySoulBot.git k
+    cat volumes/*.bin | gpg --batch --pinentry-mode loopback \
+        --passphrase-file k/SECRET-PASSPHRASE.txt --decrypt | tar -xzp
+    # 明文 tar 的 sha256 要等于 MANIFEST/SHA256SUMS.txt 里的 plaintext-tar-sha256

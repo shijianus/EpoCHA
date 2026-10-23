@@ -219,3 +219,32 @@ go run ./cmd/exampleapp --listen 127.0.0.1:8091 --api http://127.0.0.1:8080   --
 
 **4B 之后仍未实现**：非视觉等价通道（音频等）、`fallback_base`、多题型权重与风险打分、
 完整管理后台、人工验收项（题型人工各过 5 次、辅助技术实测）。因此**不打** `stage-4-done`。
+
+---
+
+## 部署（新机复刻）
+
+权威配方在 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) §11，是**复制即可执行**的那一段（已在
+`make stage5b-check` 的容器演练里真跑过：启动 → 容器内管理命令 → 站点闭环 → 重放拒绝 →
+重建容器后状态仍在 → 停止后端口释放）。形状只有五步，全部**从仓库根**执行：
+
+```bash
+EP=deploy/docker && set -C
+mkdir -p "$EP/data" "$EP/keys" "$EP/backups" && chmod 700 "$EP/"{data,keys,backups}
+for k in master pepper; do [[ -e "$EP/keys/$k" ]] || head -c32 /dev/urandom | base64 > "$EP/keys/$k"; chmod 600 "$EP/keys/$k"; done
+test -f "$EP/.env" || cp deploy/docker/.env.example "$EP/.env"     # 再把 EPOCHA_UID/GID 改成 id -u/-g
+make docker-image-local                                            # B 路径：宿主 CGO_ENABLED=0 静态编译 + named build context
+docker compose -f $EP/compose.yml --project-directory $EP --env-file $EP/.env up -d --wait
+curl -sS http://127.0.0.1:8080/readyz                              # ready
+```
+
+三条会咬人的边界（详见 §4/§8/§11 与 ADR-015/017）：
+
+- **密钥只在不存在时生成**。`set -C` 就是为这个：重跑绝不能换掉 master/pepper——换 master 等于
+  撤销所有已签发 token，换 pepper 等于让站点摘要与管理凭据全部失效。
+- **`EPOCHA_PUBLIC_BIND=127.0.0.1` 不能省**成 `8080:8080`（那会绑 0.0.0.0）；管理端口 8081 在
+  compose 里**没有发布项**，只能在容器内 `epocha-ops admin …` 触达。
+- **单实例是实现与运维边界**：数据目录上一把 `flock` 排他锁，uid/挂载不对会直接 `ErrLockAccess`
+  （是"身份不对"，不是"有人在用"）。旧的 `epocha-offline-assets.tar.gz` 已随仓库跟踪，新机会在启动时
+  自行装载；`eval-out/` 与 `bin/` 是可再生产物（`make eval-samples` / `make build`），
+  2026-10-23 那一版评测素材另存于 `backup/vps-replica-20261023` 分支的加密包内。

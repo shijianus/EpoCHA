@@ -1,0 +1,11 @@
+# epocha-data-20261023 — encrypted replica bundle
+# generated 2026-10-23T15:36:56Z
+#
+# Reassemble order: cat volumes/*.bin (sorted by name)
+# SHA256 of each volume, of the encrypted archive and of the plaintext tar.
+
+volume-sha256 9ca8c084a0478c4db974ba2440ae648ff303f18a299eac9689e2887bb7f6aa73  epocha-data-20261023.tar.gz.gpg.part-00.bin
+encrypted-sha256 9ca8c084a0478c4db974ba2440ae648ff303f18a299eac9689e2887bb7f6aa73  epocha-data-20261023
+plaintext-tar-sha256 5ac72b1de7e3c47be5b2d9b708f8b2f33fbd8d0bb33c7088feea8d17877cfa14
+tar-entries 2920
+volumes 1

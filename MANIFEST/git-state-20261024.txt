@@ -1,0 +1,85 @@
+# epocha 的本地 git 状态快照 · 2026-10-24T02:32:27Z · 删库前采集
+## HEAD
+de65ec72696102c26bc1360a3203b50600e54d5e
+## 所有本地 ref
+refs/heads/backup/vps-replica-20261023 268a65a06d7c7087a3bdf058ba4ef84c1cb754ab Docs(backup): 给这条只有密文卷的分支补一个口令指路文件
+refs/heads/main de65ec72696102c26bc1360a3203b50600e54d5e Docs: README 补部署段，指向 DEPLOYMENT §11 的可执行配方
+refs/remotes/origin/backup/vps-replica-20261023 268a65a06d7c7087a3bdf058ba4ef84c1cb754ab Docs(backup): 给这条只有密文卷的分支补一个口令指路文件
+refs/remotes/origin/dev-emergency-backup f1cf3fb6045677bf99fdeb5053aa4598620bd197 wip: emergency save before machine shutdown
+refs/remotes/origin/main de65ec72696102c26bc1360a3203b50600e54d5e Docs: README 补部署段，指向 DEPLOYMENT §11 的可执行配方
+refs/tags/stage-0-done 819b78ace49fe0edfb1381428d981a96a665fac4 阶段 0：设计基线 + 目录骨架 + 测试入口 + 仓库接线
+refs/tags/stage-1-done 81b33c57c5c814661d8aa80421f27955509cd6a8 阶段 1：PoW + 签名 token + SQLite 持久化防重放 + /siteverify；端到端验收 10 项通过
+refs/tags/stage-2-done 7e4f3d08d479334ed9c761ecd2e7dd92f17e419e docs: 阶段 2 设计落地（§5.3/§10.2/§10.3）、ADR-010 与接入文档
+refs/tags/stage-3a-done 2d7b0c4c08624d6b3cddd8d1916f067e2b66e9a4 docs: DESIGN §19 v2.5 补记两条复核发现（重启终态测试缺失、3A 内的条件 t.Skip 与声明冲突）
+refs/tags/stage-3b-done 0c98ff8c0d68bb2bbe389ec4a2de9858cfd716d1 阶段 3B 工程交付完成（2026-10-18）
+refs/tags/stage-4a-done fd83f2232bfd1f4e34af5f3d9c3e24713ab64f6e 阶段 4A 工程与浏览器闭环验收完成（2026-10-18）
+refs/tags/stage-4b-done 8df64cf5e29fc2d1e455078bbec9ab1c2781058f 阶段 4B 完成标签（2026-10-18）
+refs/tags/stage-5a-done 8e5c136c79c32b98f5929d975bc0886021d6773c feat: 阶段 5A——单节点部署包、密钥文件持久化、SQLite 备份与保守恢复
+refs/tags/stage-5b-done 4807cfe0279fab5cb24ce5efe069f55f7feff4ac 阶段 5B 完成（候选＝B 路径，linux/arm64，实测 UID/GID 1000:1000）
+## remote
+origin	git@github.com:shijianus/EpoCHA.git (fetch)
+origin	git@github.com:shijianus/EpoCHA.git (push)
+## 本地 config（含 core/user 设置）
+core.repositoryformatversion=0
+core.filemode=true
+core.bare=false
+core.logallrefupdates=true
+remote.origin.url=git@github.com:shijianus/EpoCHA.git
+remote.origin.fetch=+refs/heads/*:refs/remotes/origin/*
+branch.main.remote=origin
+branch.main.merge=refs/heads/main
+## hooks（非 sample）
+## info/exclude
+# git ls-files --others --exclude-from=.git/info/exclude
+# Lines that start with '#' are comments.
+# For a project mostly in C, the following would be a good set of
+# exclude patterns (uncomment them if you want to use them):
+# *.[oa]
+# *~
+## reflog 摘要（最近 40 条）
+de65ec7 HEAD@{2026-10-24 00:22:37 +0800}: commit: Docs: README 补部署段，指向 DEPLOYMENT §11 的可执行配方
+f1cf3fb HEAD@{2026-10-23 23:03:23 +0800}: commit: wip: emergency save before machine shutdown
+c953009 HEAD@{2026-10-19 03:59:00 +0800}: commit: docs: 推送约定改为"里程碑及时推送"，取代 2026-10-17 的"不自动 push"
+95b0eb6 HEAD@{2026-10-19 03:50:14 +0800}: commit: docs: 候选清单是构建收据，不是可重复构建的配方
+a7cbc8a HEAD@{2026-10-19 03:46:00 +0800}: commit: docs: 记下第二个候选（be95275）的完成度与那一项 BLOCKED
+be95275 HEAD@{2026-10-19 03:39:58 +0800}: commit: feat: 目标 VPS 只读预检脚本与待确认的试部署计划
+0998d1d HEAD@{2026-10-19 03:39:58 +0800}: commit: docs: 四处必要事实校正——版本串与哈希的关系、三种材料丢失分列、健康检查≠重启、单实例是实现边界
+a857bab HEAD@{2026-10-19 03:39:58 +0800}: commit: fix: admin-recover 不能在"提交已确认之后收尾失败"时删掉唯一副本的凭据文件
+15cde9d HEAD@{2026-10-19 02:40:14 +0800}: commit: docs: §11 的 set -C 在密钥那几行之后收回
+2eb2eb8 HEAD@{2026-10-19 02:38:53 +0800}: commit: docs: 记录 stage-5b-done 那次真实运行（运行 C）的数字与标签落点
+993a792 HEAD@{2026-10-19 02:29:19 +0800}: commit: feat: 候选清单必须绑定干净提交（门禁硬判据），并收尾 5B 的结果记录
+05de0fe HEAD@{2026-10-19 02:17:31 +0800}: commit: fix: 门禁记录器把"原因"打印两遍（$* 含第二参数），清单里 docker 版本带尾逗号
+abf1c97 HEAD@{2026-10-19 02:08:18 +0800}: commit: feat: 阶段 5B 收尾——第一版正式支持范围收窄为 B 路径，门禁结论按三类归属计算
+f5f5c52 HEAD@{2026-10-18 21:52:04 +0800}: commit: feat: 阶段 5B——数据目录运行锁（flock）取代端口探活、恢复边界收敛、部署候选清单与持续演练
+7187237 HEAD@{2026-10-18 21:51:51 +0800}: commit: fix: 限流窗口按分钟对齐——rpm 配置此前实际是"每分钟的名字、每秒的窗口"
+8e5c136 HEAD@{2026-10-18 18:45:19 +0800}: commit: feat: 阶段 5A——单节点部署包、密钥文件持久化、SQLite 备份与保守恢复
+56d3911 HEAD@{2026-10-18 12:55:01 +0800}: commit: docs: ocr-baseline 的 BLOCKED 文案改准——宿主机路径没工具不等于没测过
+6b2e43f HEAD@{2026-10-18 12:49:20 +0800}: commit: feat: blindtest.sh 启动后核对页面引入的 widget 脚本真的可取回
+aa51ae1 HEAD@{2026-10-18 12:49:10 +0800}: commit: fix: 盲测页面没有引入 widget 脚本，组件永远不出现
+3bddaa6 HEAD@{2026-10-18 12:38:11 +0800}: commit: docs: 阶段 4B 结果落地——首次真实 OCR 基线、窄屏旧结论纠正、盲测入口用法
+06c6d46 HEAD@{2026-10-18 12:38:01 +0800}: commit: feat: 阶段 4B 工具链——人工盲测入口、4B 门禁、OCR 基线编排与 dev/holdout 隔离
+7c28e00 HEAD@{2026-10-18 12:10:15 +0800}: commit: feat+test: 阶段 4B 接入收尾——最小示例做成可运行 fixture、窄屏真实视口、评分器接生产归一化
+1812688 HEAD@{2026-10-18 11:24:38 +0800}: commit: test: 阶段 4A 门禁堵掉"编排缺变量即静默跳过"，必需浏览器交互按声明条数对账
+52bcf37 HEAD@{2026-10-18 09:23:45 +0800}: commit: docs: 把 bits=20 的第五次采样（8,991ms）记进实测，明确反对用单次采样支撑抬难度
+09a9e91 HEAD@{2026-10-18 09:12:35 +0800}: commit: feat+docs: 阶段 4A 补齐"过期清空 token"的浏览器验收项
+bd0f314 HEAD@{2026-10-18 05:55:16 +0800}: commit: docs: 阶段 4A 实测口径收紧（bits=20 四次采样 309–4,064ms 不当常量；bits=12 无进度上报属预期）
+f84c985 HEAD@{2026-10-18 05:45:42 +0800}: commit: feat: 阶段 4A — 生产 widget、示例业务后端与真实浏览器闭环验收
+6f11aa5 HEAD@{2026-10-18 03:29:48 +0800}: commit: docs: STAGE3B §6 补记两次同形状复跑的 RSS/WAL/耗时抖动，防止把采样读成常量
+fc36df3 HEAD@{2026-10-18 03:27:23 +0800}: commit: feat+docs: 阶段 3B 本地预览、离线评测工具链、验收脚本与文档
+0d76d8c HEAD@{2026-10-18 02:38:14 +0800}: commit: test: 阶段 3B 存储/池/API 三层回归
+c75b331 HEAD@{2026-10-18 02:29:26 +0800}: commit: feat: 阶段 3B 主体 — text-image-v1 视觉生成器与图片资产链路
+2d7b0c4 HEAD@{2026-10-17 23:49:30 +0800}: commit: docs: DESIGN §19 v2.5 补记两条复核发现（重启终态测试缺失、3A 内的条件 t.Skip 与声明冲突）
+eaf021b HEAD@{2026-10-17 23:47:46 +0800}: commit: test: 阶段 3A 去掉条件 t.Skip，把"答案跨题不通用"的前提做成有界重抽
+ab5db0b HEAD@{2026-10-17 23:44:41 +0800}: commit: feat: 阶段 3A — 生成器契约、有界预生成题池与单次答案提交
+7e4f3d0 HEAD@{2026-10-17 19:53:21 +0800}: commit: docs: 阶段 2 设计落地（§5.3/§10.2/§10.3）、ADR-010 与接入文档
+77d158e HEAD@{2026-10-17 19:53:09 +0800}: commit: feat: 阶段 2 — 多站点管理、密钥生命周期、来源策略与管理 API
+f100856 HEAD@{2026-10-17 18:53:29 +0800}: commit: fix: 阶段 1 安全复核 — 修掉 6 个真实缺陷并补齐缺失测试
+93306ef HEAD@{2026-10-17 18:10:48 +0800}: commit: feat: 阶段 1 — PoW + 签名 token + 持久化防重放 + reCAPTCHA 风格 siteverify
+b863fc8 HEAD@{2026-10-17 17:35:30 +0800}: commit: docs: 按 ADR-001..008 校正设计基线（DESIGN v2 + 新增 DECISIONS）
+539caa2 HEAD@{2026-10-17 16:30:07 +0800}: commit: chore: 模块路径对齐远端仓库，并明确密钥存放边界
+## 工作树状态
+  （改动条目数：0）
+## 跟踪文件聚合
+ce815814fb8307a991b749be98b62ca4a6043b01212e10c1264842803489c3e7  -
+## 磁盘上被忽略的文件数
+2866

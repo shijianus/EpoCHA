@@ -138,6 +138,7 @@ func TestMigrationIdempotentAndDataSurvives(t *testing.T) {
 	if err != nil {
 		t.Fatalf("二次 Open: %v", err)
 	}
+	t.Cleanup(func() { _ = d2.Close() })
 	if v, _ := d2.SchemaVersion(t.Context()); v != schemaVersion {
 		t.Fatalf("重开后版本 = %d", v)
 	}
@@ -832,6 +833,7 @@ func TestPurgeFreesPagesNotFileShrink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = d.Close() })
 	s := mustSite(t, d, "alpha")
 	for range 400 {
 		c := newChallenge(t, d, s.ID, -time.Minute)
@@ -861,6 +863,7 @@ func TestPurgeFreesPagesNotFileShrink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = fd.Close() })
 	if _, err := fd.h.ExecContext(t.Context(), `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
 		t.Fatal(err)
 	}

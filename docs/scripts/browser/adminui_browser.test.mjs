@@ -26,6 +26,13 @@ import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { BiDi } from "./bidi.mjs";
+import { BROWSER_CASE_TITLES } from "./cases.mjs";
+
+function caseTitle(id) {
+  const title = BROWSER_CASE_TITLES[id];
+  if (!title) throw new Error(`browser manifest missing ${id}`);
+  return title;
+}
 
 const need = (name) => {
   const v = process.env[name];
@@ -67,7 +74,7 @@ async function typeInto(selector, text, { clearFirst = true } = {}) {
 
 async function press(...keys) {
   for (const k of keys) {
-    await sendKeys([{ type: "keyDown", value: keyValue(k) }, { type: "keyUp", value: keyValue(k) }]);
+    await sendKeys({ type: "keyDown", value: keyValue(k) }, { type: "keyUp", value: keyValue(k) });
   }
 }
 
@@ -195,7 +202,7 @@ after(async () => {
 
 // ---------- 1. 错误凭据：真实 401，文案不是"网络问题"，输入框已清空 ----------
 
-test("错误 key 登录失败：显示凭据无效、留在登录面、输入框不留原文", async () => {
+test(caseTitle("adminui.bad-key-login"), async () => {
   const keyBefore = await login(BAD_ADMIN_KEY);
   await bidi.waitUntil(ctx, `document.getElementById("login-status").textContent.includes("凭据无效")`,
     { label: "401 文案" });
@@ -215,7 +222,7 @@ test("错误 key 登录失败：显示凭据无效、留在登录面、输入框
 
 // ---------- 2. 正确凭据：whoami 的 key_id 显示出来 ----------
 
-test("正确 key 登录：显示非敏感 key_id，凭据不进任何浏览器存储", async () => {
+test(caseTitle("adminui.good-key-login"), async () => {
   const who = await api("GET", "/api/admin/whoami");
   assert.equal(who.status, 200, JSON.stringify(who));
   await login(ADMIN_KEY);
@@ -244,7 +251,7 @@ test("正确 key 登录：显示非敏感 key_id，凭据不进任何浏览器�
 
 // ---------- 3+4. 创建站点：secret 只在这次结果里 ----------
 
-test("创建站点：真实 201、一次性 secret 出现在结果面板、验证模式与题型按选择生效", async () => {
+test(caseTitle("adminui.create-site"), async () => {
   // 空列表状态先落在眼睛能看见的地方
   await bidi.waitUntil(ctx, `document.querySelector("#view-body") && document.body.innerText.includes("新建站点")`,
     { label: "站点列表与创建表单" });
@@ -298,7 +305,7 @@ test("创建站点：真实 201、一次性 secret 出现在结果面板、验�
 
 // ---------- 5. 进详情取不回 secret ----------
 
-test("进入详情不再取回 secret：页面与只读 API 两侧都扫过", async () => {
+test(caseTitle("adminui.secret-not-readable"), async () => {
   requireSite("进详情取不回 secret");
   await clickText("进入站点详情");
   await bidi.waitUntil(ctx, `document.body.innerText.includes("允许来源")`, { label: "详情页" });
@@ -323,7 +330,7 @@ test("进入详情不再取回 secret：页面与只读 API 两侧都扫过", as
 
 // ---------- 6. 改 Origin、难度与限流：保存后与库中一致 ----------
 
-test("修改策略与 Origin：保存、重新读取一致，越界值被服务端拒", async () => {
+test(caseTitle("adminui.edit-policy-origin"), async () => {
   requireSite("改策略与 Origin");
   const originA = ADMIN_ORIGIN;               // 真实来源：管理监听器自己
   const originB = "http://admin.example.test:8080";
@@ -435,7 +442,7 @@ test("修改策略与 Origin：保存、重新读取一致，越界值被服务�
 
 // ---------- 7. 启停：二次确认 + 真实状态与版本语义 ----------
 
-test("停用与启用：确认框展示名称与 site_key，状态与版本是服务端事实", async () => {
+test(caseTitle("adminui.toggle-site"), async () => {
   requireSite("启停");
   const before = (await api("GET", `/api/admin/sites/${createdSiteID}`)).data.site;
   assert.ok(before, `站点 ${createdSiteID} 读不到（GET 应返回 site 对象）`);
@@ -448,6 +455,12 @@ test("停用与启用：确认框展示名称与 site_key，状态与版本是�
   assert.match(banner, new RegExp(createdSiteKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "确认框必须显示 site_key");
   assert.match(banner, /停用前签发但尚未消费的 token/, "必须说明对已签发 token 的语义");
 
+  await clickText("取消");
+  await bidi.waitUntil(ctx, `![...document.querySelectorAll("button")].some(e=>e.textContent==="确认停用")`, { label: "取消确认关闭" });
+  const afterCancel = (await api("GET", `/api/admin/sites/${createdSiteID}`)).data.site;
+  assert.equal(afterCancel.enabled, before.enabled);
+  assert.equal(afterCancel.version, before.version, "取消不能写入站点状态");
+  await clickText("停用此站点");
   await clickText("确认停用");
   await bidi.waitUntil(ctx, `document.body.innerText.includes("启用此站点")`, { label: "停用后按钮翻面" });
   const stopped = await api("GET", `/api/admin/sites/${createdSiteID}`);
@@ -466,7 +479,7 @@ test("停用与启用：确认框展示名称与 site_key，状态与版本是�
 
 // ---------- 8. 题型状态 + 凭据撤不回 + 无第三方资源 ----------
 
-test("题型面板显示实验性与生产就绪的真实结论，页面不请求任何外部源", async () => {
+test(caseTitle("adminui.generator-lifecycle"), async () => {
   requireSite("题型结论面板");   // 要点"查看"进详情，前提是列表里确实有一个站点
   const gens = await api("GET", "/api/admin/generators");
   assert.equal(gens.status, 200);
@@ -495,7 +508,7 @@ test("题型面板显示实验性与生产就绪的真实结论，页面不请�
 
 // ---------- 9. 退出后不能继续查数据 ----------
 
-test("退出：页面回到登录面且无法再读管理数据（凭据是页面丢的，不是服务端失效）", async () => {
+test(caseTitle("adminui.logout-clears-view"), async () => {
   requireSite("退出");
   await clickText("退出");
   await bidi.waitUntil(ctx, `document.getElementById("login").hidden===false`, { label: "回到登录面" });
@@ -523,7 +536,7 @@ test("退出：页面回到登录面且无法再读管理数据（凭据是页�
 
 // ---------- 10. 375px 真实视口下可操作 ----------
 
-test("375×667：视口真的设成 375，登录、创建与保存控件都能命中", async () => {
+test(caseTitle("adminui.narrow-viewport"), async () => {
   await bidi.setViewport(ctx, 375, 667);
   const m = await bidi.viewportMetrics(ctx);
   // 实测（Firefox 147.0.2 / linux-arm64，管理控制台页面）：
@@ -538,11 +551,15 @@ test("375×667：视口真的设成 375，登录、创建与保存控件都能�
 
   await openPage();
   await bidi.waitUntil(ctx, `!!document.getElementById("admin-key")`, { label: "登录面" });
+  const loginControl = await bidi.evaluate(ctx,
+    `(()=>{const el=document.getElementById("login-submit");el.scrollIntoView({block:'center'});const r=el.getBoundingClientRect();return [Math.round(r.left+r.width/2),Math.round(r.top+r.height/2),r.width,r.height];})()`);
+  assert.ok(loginControl[0] >= 0 && loginControl[0] <= m.clientWidth && loginControl[2] > 0 && loginControl[3] > 0,
+    `窄屏登录控件不可命中：${JSON.stringify(loginControl)}`);
   await login(ADMIN_KEY);
   await bidi.waitUntil(ctx, `document.body.innerText.includes("新建站点")`, { label: "窄屏列表" });
 
   // 窄屏下主要控件仍可命中：中心坐标在视口内
-  for (const needle of ["创建站点", "验证身份", "退出"]) {
+  for (const needle of ["创建站点", "退出"]) {
     const found = await bidi.evaluate(ctx,
       `(()=>{const els=[...document.querySelectorAll("button")];
         const el=els.find(e=>(e.textContent||"").trim()===${JSON.stringify(needle)});
@@ -585,7 +602,9 @@ test("375×667：视口真的设成 375，登录、创建与保存控件都能�
 
 // ---------- 11. 429 与"连不上"必须有不同的说法（放在最后：会打满鉴权失败窗口） ----------
 
-test("连续错误 key 触发 429 时不说成密码错误；服务真不可达时说明是连接问题", async () => {
+test(caseTitle("adminui.rate-limit-and-network-error"), async () => {
+  await clickText("退出");
+  await bidi.waitUntil(ctx, `document.getElementById("login").hidden===false`, { label: "限流测试从未登录状态开始" });
   // 服务端的失败计数是"每分钟 10 次"（maxAuthFailRPM），第 11 次失败开始返回 429。
   // 每次尝试都串行等待结果：按钮在请求在途时是禁用的，不等就会点空。
   let line = "";
@@ -593,7 +612,7 @@ test("连续错误 key 触发 429 时不说成密码错误；服务真不可达�
     await bidi.evaluate(ctx, `document.getElementById("login-status").textContent = ""`);
     await typeInto("#admin-key", BAD_ADMIN_KEY);
     await clickText("验证身份");
-    await bidi.waitUntil(ctx, `document.getElementById("login-status").textContent.length > 0`,
+    await bidi.waitUntil(ctx, `!document.getElementById("login-submit").disabled && document.getElementById("login-status").textContent.length > 0`,
       { label: "第 " + (i + 1) + " 次尝试的结果", timeoutMs: 20000 });
     line = await status("#login-status");
     if (line.includes("请求过于频繁")) break;
@@ -621,13 +640,9 @@ test("连续错误 key 触发 429 时不说成密码错误；服务真不可达�
     if (Date.now() - t0 > 15000) throw new Error("服务进程没有在 15s 内退出");
     await new Promise((r) => setTimeout(r, 100));
   }
-  await openPage().catch(() => {});           // 服务没了，页面加载会失败：改用已加载的页面
-  const onScreen = await bidi.evaluate(ctx, `!!document.getElementById("admin-key")`);
-  if (!onScreen) {
-    // 页面已经拿不到了：重新打开一个仍在本会话里的空白上下文没有意义，
-    // 直接在当前文档里发真实 fetch（同源仍指向已关闭的端口）并驱动登录表单的文案路径。
-    await bidi.evaluate(ctx, `document.getElementById("login").hidden=false`);
-  }
+  // 保留已经加载的登录页面，导航到已停服地址会换成浏览器错误页。
+  assert.equal(await bidi.evaluate(ctx, `!!document.getElementById("admin-key") && !document.getElementById("login").hidden`), true,
+    "停服测试必须保留可操作的登录表单");
   await typeInto("#admin-key", ADMIN_KEY);
   await clickText("验证身份");
   await bidi.waitUntil(ctx,

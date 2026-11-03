@@ -797,23 +797,40 @@ func TestTwoAdminRecoverProcessesRace(t *testing.T) {
 	seedDB(t, dbPath, "ak_"+strings.Repeat("p", 64))
 	sum := fileSum(t, dbPath)
 
-	// 同一个进程内先拿到锁的那一方会赢；这里用两个**子进程**保证是真的跨进程竞态。
+	// Pause A after adminRecover has acquired the real directory lock. B must
+	// finish while A is still paused, so sequential successful calls cannot be
+	// mistaken for a mutual-exclusion failure.
+	entered := filepath.Join(dir, "recover-entered")
+	release := filepath.Join(dir, "recover-release")
 	a := startChild(t, roleRecover, map[string]string{
 		roleDB: dbPath, "EPOCHA_PEPPER": testPepperB64, "EPOCHA_KEYFILE": filepath.Join(dir, "ra"),
+		roleRecoverEntered: entered, roleRecoverRelease: release,
 	})
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(entered); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("读取持锁屏障: %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("恢复 A 未到达持锁屏障")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	b := startChild(t, roleRecover, map[string]string{
 		roleDB: dbPath, "EPOCHA_PEPPER": testPepperB64, "EPOCHA_KEYFILE": filepath.Join(dir, "rb"),
 	})
-	rcA, okA := waitChild(a, 20*time.Second)
 	rcB, okB := waitChild(b, 20*time.Second)
+	if err := os.WriteFile(release, []byte("release"), 0o600); err != nil {
+		t.Fatalf("释放恢复屏障: %v", err)
+	}
+	rcA, okA := waitChild(a, 20*time.Second)
 	if !okA || !okB {
 		t.Fatalf("恢复子进程没收尾（A=%v B=%v）", okA, okB)
 	}
-	if rcA == 0 && rcB == 0 {
-		t.Fatal("两个 admin-recover 都成功了——管理凭据被写了两遍")
-	}
-	if rcA != 0 && rcB != 0 {
-		t.Fatalf("两个 admin-recover 都失败了（A=%d B=%d）", rcA, rcB)
+	if rcA != 0 || rcB != 1 {
+		t.Fatalf("持锁期间恢复结果 A=%d B=%d，期望 A=0/B=1", rcA, rcB)
 	}
 	if got := fileSum(t, dbPath); got == sum {
 		t.Error("赢家没有改库（说明两条路径都没真的执行）")
@@ -930,11 +947,13 @@ func TestAdminRecoverGuardsItsOwnInputs(t *testing.T) {
 // 锁的意义在进程边界上，只在同一个进程里测它证明不了运维场景。
 
 const (
-	roleEnv     = "EPOCHA_TEST_ROLE"
-	roleDB      = "EPOCHA_TEST_DB"
-	roleKeyFile = "EPOCHA_KEYFILE"
-	roleHolder  = "holder"  // 只持有数据目录锁
-	roleRecover = "recover" // 真跑一次 admin-recover
+	roleEnv            = "EPOCHA_TEST_ROLE"
+	roleDB             = "EPOCHA_TEST_DB"
+	roleKeyFile        = "EPOCHA_KEYFILE"
+	roleHolder         = "holder"  // 只持有数据目录锁
+	roleRecover        = "recover" // 真跑一次 admin-recover
+	roleRecoverEntered = "EPOCHA_TEST_RECOVER_ENTERED"
+	roleRecoverRelease = "EPOCHA_TEST_RECOVER_RELEASE"
 )
 
 func TestMain(m *testing.M) {
@@ -952,6 +971,26 @@ func TestMain(m *testing.M) {
 		_ = l.Close()
 		os.Exit(0)
 	case roleRecover:
+		if entered, release := os.Getenv(roleRecoverEntered), os.Getenv(roleRecoverRelease); entered != "" && release != "" {
+			opsRecoverAdminKey = func(d *store.DB, ctx context.Context, key string, now time.Time) (*store.RecoverReport, error) {
+				if err := os.WriteFile(entered, []byte("locked"), 0o600); err != nil {
+					return nil, err
+				}
+				deadline := time.Now().Add(30 * time.Second)
+				for {
+					if _, err := os.Stat(release); err == nil {
+						break
+					} else if !errors.Is(err, os.ErrNotExist) {
+						return nil, err
+					}
+					if time.Now().After(deadline) {
+						return nil, errors.New("恢复测试屏障超时")
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				return d.RecoverAdminKey(ctx, key, now)
+			}
+		}
 		env := func(k string) string {
 			if v, ok := os.LookupEnv(k); ok {
 				return v
@@ -1064,7 +1103,17 @@ func stopChild(t *testing.T, c *child) {
 func swapRecoverDeps(t *testing.T, rec func(*store.DB, context.Context, string, time.Time) (*store.RecoverReport, error), closeFn func(*store.DB) error) {
 	t.Helper()
 	oldRec, oldClose := opsRecoverAdminKey, opsCloseRecoverDB
-	opsRecoverAdminKey, opsCloseRecoverDB = rec, closeFn
+	opsRecoverAdminKey = rec
+	opsCloseRecoverDB = func(d *store.DB) error {
+		injectedErr := closeFn(d)
+		// The injected close function models the result observed by adminRecover;
+		// it must not leak the real SQLite handle into t.TempDir cleanup.
+		realErr := d.Close()
+		if injectedErr != nil {
+			return injectedErr
+		}
+		return realErr
+	}
 	t.Cleanup(func() { opsRecoverAdminKey, opsCloseRecoverDB = oldRec, oldClose })
 }
 

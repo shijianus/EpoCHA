@@ -272,24 +272,15 @@ func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, CodeBadRequest)
 		return
 	}
-	site, secret, err := s.db.CreateSite(r.Context(), req.Name, siteKey, policy)
+	a, err := actor(r)
+	if err != nil {
+		s.internal(w, "鉴权上下文", err)
+		return
+	}
+	site, secret, err := s.db.CreateSiteAudited(r.Context(), req.Name, siteKey, policy, req.Origins, a)
 	if err != nil {
 		s.auditFail(r.Context(), r, "site.create", "site:"+sanitizeTarget(siteKey))
 		failFromErr(w, err)
-		return
-	}
-	if len(req.Origins) > 0 {
-		// 来源列表若有一条不合法就整批拒绝：站点已经建好，但宁可让调用方重来一次，
-		// 也不能"部分生效"——半个白名单比没有白名单更危险。
-		if _, err := s.db.ReplaceOrigins(r.Context(), site.ID, req.Origins); err != nil {
-			s.auditFail(r.Context(), r, "site.create", "site:"+strconv.FormatInt(site.ID, 10))
-			failFromErr(w, err)
-			return
-		}
-	}
-	target := "site:" + strconv.FormatInt(site.ID, 10)
-	if err := s.auditOK(r.Context(), r, "site.create", target); err != nil {
-		s.internal(w, "审计", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -473,15 +464,16 @@ func (s *Server) handleAddSecret(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	a, err := actor(r)
+	if err != nil {
+		s.internal(w, "鉴权上下文", err)
+		return
+	}
 	target := "site:" + strconv.FormatInt(id, 10)
-	secret, plain, err := s.db.AddSecret(r.Context(), id)
+	secret, plain, err := s.db.AddSecretAudited(r.Context(), id, a)
 	if err != nil {
 		s.auditFail(r.Context(), r, "secret.add", target)
 		failFromErr(w, err)
-		return
-	}
-	if err := s.auditOK(r.Context(), r, "secret.add", target+"/"+secret.KeyID); err != nil {
-		s.internal(w, "审计", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -508,15 +500,16 @@ func (s *Server) handleRotateSecret(w http.ResponseWriter, r *http.Request) {
 		}
 		transition = time.Duration(*req.TransitionSec) * time.Second
 	}
+	a, err := actor(r)
+	if err != nil {
+		s.internal(w, "鉴权上下文", err)
+		return
+	}
 	target := "site:" + strconv.FormatInt(id, 10)
-	fresh, plain, retired, err := s.db.RotateSecret(r.Context(), id, transition, s.now())
+	fresh, plain, retired, err := s.db.RotateSecretAudited(r.Context(), id, transition, s.now(), a)
 	if err != nil {
 		s.auditFail(r.Context(), r, "secret.rotate", target)
 		failFromErr(w, err)
-		return
-	}
-	if err := s.auditOK(r.Context(), r, "secret.rotate", target+"/"+fresh.KeyID); err != nil {
-		s.internal(w, "审计", err)
 		return
 	}
 	now := s.now()
@@ -586,14 +579,15 @@ func (s *Server) handleAddAdminKey(w http.ResponseWriter, r *http.Request) {
 	if !decodeAdmin(w, r, &req) {
 		return
 	}
-	key, plain, err := s.db.NewAdminKeyWithID(r.Context(), req.Label)
+	a, err := actor(r)
+	if err != nil {
+		s.internal(w, "鉴权上下文", err)
+		return
+	}
+	key, plain, err := s.db.NewAdminKeyWithIDAudited(r.Context(), req.Label, a)
 	if err != nil {
 		s.auditFail(r.Context(), r, "admin_key.add", sanitizeTarget(req.Label))
 		failFromErr(w, err)
-		return
-	}
-	if err := s.auditOK(r.Context(), r, "admin_key.add", "admin_key:"+key.KeyID); err != nil {
-		s.internal(w, "审计", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -802,8 +796,10 @@ func noteForGenerator(id string) string {
 		return "工程基线题型：题面可被脚本直接求值，不抗自动解题，仅用于验证题池与提交生命周期"
 	case generator.TextImageID:
 		return "实验性视觉题型：图片中可见字符本来就要给答题者看，不具备密码学保密性；" +
-			"抗 OCR/抗多模态能力**未经**评测（本环境无离线 OCR，人工可读性未做），" +
+			"已有固定工具的历史 OCR 基线：低/中/高档整串通过率约 96%/31%/3%，" +
+			"这些历史数字不代表当前候选、跨工具、多模态或真人验证已完成；" +
 			"仅用于验证图片资产的生成-存储-下发-判分链路"
+
 	default:
 		return ""
 	}

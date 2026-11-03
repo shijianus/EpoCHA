@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -32,7 +33,10 @@ import (
 
 const (
 	shutdownTimeout   = 5 * time.Second
-	purgeEvery        = time.Minute
+	purgeEvery        = 10 * time.Second
+	purgeMaxBatches   = 8
+	purgeBudget       = 250 * time.Millisecond
+	purgeYield        = 5 * time.Millisecond
 	readHeaderTimeout = 5 * time.Second
 	readTimeout       = 10 * time.Second
 	writeTimeout      = 15 * time.Second
@@ -77,7 +81,9 @@ func run(args []string, getenv func(string) string, stdout io.Writer) error {
 
 // serve 在给定 listener 上提供服务，直到 ctx 被取消。listener 由调用方创建，
 // 这样测试可以用 :0 拿到确定端口，而不必猜。adminLn 为 nil 时只跑公共面。
-func serve(ctx context.Context, cfg *config.Config, ln, adminLn net.Listener, stdout io.Writer) error {
+func serve(ctx context.Context, cfg *config.Config, ln, adminLn net.Listener, stdout io.Writer) (result error) {
+	ctx, stopBackground := context.WithCancel(ctx)
+	defer stopBackground()
 	// 启动信息与请求日志共用一个 slog 写入器：并行 Fprintf + slog 会并发写同一个 writer，
 	// 既可能交错整行，也会被 -race 判为数据竞争（阶段 1 实测触发过）。
 	log := slog.New(slog.NewTextHandler(stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -183,7 +189,26 @@ func serve(ctx context.Context, cfg *config.Config, ln, adminLn net.Listener, st
 	if err != nil {
 		return fmt.Errorf("初始化 API: %w", err)
 	}
-	srv := newHTTPServer(ln, handler.Handler())
+	requestCtx, cancelRequests := context.WithCancel(context.Background())
+	defer cancelRequests()
+	var requests sync.WaitGroup
+	var requestMu sync.Mutex
+	accepting := true
+	track := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestMu.Lock()
+			if !accepting {
+				requestMu.Unlock()
+				return
+			}
+			requests.Add(1)
+			requestMu.Unlock()
+			defer requests.Done()
+			next.ServeHTTP(w, r)
+		})
+	}
+	srv := newHTTPServer(ln, track(handler.Handler()))
+	srv.BaseContext = func(net.Listener) context.Context { return requestCtx }
 
 	var adminSrv *http.Server
 	if adminLn != nil {
@@ -191,49 +216,69 @@ func serve(ctx context.Context, cfg *config.Config, ln, adminLn net.Listener, st
 		if err != nil {
 			return fmt.Errorf("初始化管理 API: %w", err)
 		}
-		adminSrv = newHTTPServer(adminLn, adminHandler.Handler())
+		adminSrv = newHTTPServer(adminLn, track(adminHandler.Handler()))
+		adminSrv.BaseContext = func(net.Listener) context.Context { return requestCtx }
 		log.Info("管理面已挂载", "addr", adminLn.Addr().String())
 	}
 
 	httpErr := make(chan error, 2)
-	go func() {
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			httpErr <- fmt.Errorf("公共 API: %w", err)
-		}
-	}()
-	if adminSrv != nil {
+	var serving sync.WaitGroup
+	startHTTP := func(server *http.Server, listener net.Listener, label string) {
+		serving.Add(1)
 		go func() {
-			if err := adminSrv.Serve(adminLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				httpErr <- fmt.Errorf("管理 API: %w", err)
+			defer serving.Done()
+			if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				httpErr <- fmt.Errorf("%s: %w", label, err)
 			}
 		}()
 	}
 	purgeDone := make(chan struct{})
 	go purgeLoop(ctx, db, log, purgeDone)
+	defer func() {
+		stopBackground()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		var closing sync.WaitGroup
+		closeErrors := make(chan error, 2)
+		for _, server := range []*http.Server{srv, adminSrv} {
+			if server == nil {
+				continue
+			}
+			closing.Add(1)
+			go func(server *http.Server) {
+				defer closing.Done()
+				if err := shutdownHTTP(shutdownCtx, server); err != nil {
+					closeErrors <- err
+				}
+			}(server)
+		}
+		closing.Wait()
+		requestMu.Lock()
+		accepting = false
+		requestMu.Unlock()
+		cancelRequests()
+		serving.Wait()
+		requests.Wait()
+		<-purgeDone
+		close(closeErrors)
+		for err := range closeErrors {
+			result = errors.Join(result, fmt.Errorf("关闭 HTTP: %w", err))
+		}
+		log.Info("已停止")
+	}()
+	startHTTP(srv, ln, "公共 API")
+	if adminSrv != nil {
+		startHTTP(adminSrv, adminLn, "管理 API")
+	}
 
 	log.Info("已监听", "addr", ln.Addr().String())
 	select {
 	case <-ctx.Done():
 		log.Info("收到退出信号，开始优雅关闭")
+		return nil
 	case err := <-httpErr:
-		// 不在这里 close(purgeDone)：清理 goroutine 会在 ctx 取消后自行关闭，
-		// 手动关一次再被 defer 关第二次就是 close of closed channel。
 		return err
 	}
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("关闭 HTTP: %w", err)
-	}
-	if adminSrv != nil {
-		if err := adminSrv.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("关闭管理 HTTP: %w", err)
-		}
-	}
-	<-purgeDone
-	log.Info("已停止")
-	return nil
 }
 
 // bootstrapAdmin 处理管理引导凭据（DESIGN §6）：库里没有任何管理密钥记录时登记 env 带来的那把，
@@ -317,10 +362,40 @@ func newHTTPServer(ln net.Listener, h http.Handler) *http.Server {
 	}
 }
 
+func shutdownHTTP(ctx context.Context, srv *http.Server) error {
+	if err := srv.Shutdown(ctx); err != nil {
+		return errors.Join(err, srv.Close())
+	}
+	return nil
+}
+
 // purgeLoop 只清理账本与审计体积，不参与任何安全判定：过期状态一律由时间戳即时判定，
 // 因此清理任务停摆也不会让已消费 token 重新可用（DESIGN §5.1）。
 func purgeLoop(ctx context.Context, db *store.DB, log *slog.Logger, done chan<- struct{}) {
 	defer close(done)
+	run := func(now time.Time) {
+		if db == nil || ctx.Err() != nil {
+			return
+		}
+		roundCtx, cancel := context.WithTimeout(ctx, purgeBudget)
+		c, err := purgeLedgerRoundDB(roundCtx, db, now)
+		cancel()
+		if err != nil {
+			log.Error("清理账本", "err", errKindOf(err))
+			return
+		}
+		a, err := db.PurgeAudit(ctx, now)
+		if err != nil {
+			log.Error("清理审计", "err", errKindOf(err))
+		}
+		if c.Responses > 0 || c.Challenges > 0 || c.Pool > 0 || a > 0 {
+			log.Info("清理", "responses", c.Responses, "pool", c.Pool,
+				"challenges", c.Challenges, "audit", a)
+		}
+	}
+	// Run once at startup so a restart does not leave an already-known backlog
+	// untouched for a full scheduler interval.
+	run(time.Now().UTC())
 	t := time.NewTicker(purgeEvery)
 	defer t.Stop()
 	for {
@@ -328,21 +403,44 @@ func purgeLoop(ctx context.Context, db *store.DB, log *slog.Logger, done chan<- 
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
-			c, err := db.Purge(ctx, now)
-			if err != nil {
-				log.Error("清理账本", "err", errKindOf(err))
-				continue
-			}
-			a, err := db.PurgeAudit(ctx, now)
-			if err != nil {
-				log.Error("清理审计", "err", errKindOf(err))
-			}
-			if c.Responses > 0 || c.Challenges > 0 || c.Pool > 0 || a > 0 {
-				log.Info("清理", "responses", c.Responses, "pool", c.Pool,
-					"challenges", c.Challenges, "audit", a)
+			run(now)
+		}
+	}
+}
+
+func purgeLedgerRoundDB(ctx context.Context, db *store.DB, now time.Time) (store.PurgeCounts, error) {
+	return purgeLedgerRound(ctx, now, db.Purge)
+}
+
+func purgeLedgerRound(ctx context.Context, now time.Time, purge func(context.Context, time.Time) (store.PurgeCounts, error)) (store.PurgeCounts, error) {
+	deadline, cancel := context.WithTimeout(ctx, purgeBudget)
+	defer cancel()
+	var total store.PurgeCounts
+	for batch := 0; batch < purgeMaxBatches; batch++ {
+		if err := deadline.Err(); err != nil {
+			return total, err
+		}
+		counts, err := purge(deadline, now)
+		if err != nil {
+			return total, err
+		}
+		total.Responses += counts.Responses
+		total.Pool += counts.Pool
+		total.Challenges += counts.Challenges
+		if counts.Responses == 0 && counts.Pool == 0 && counts.Challenges == 0 {
+			return total, nil
+		}
+		if batch+1 < purgeMaxBatches {
+			timer := time.NewTimer(purgeYield)
+			select {
+			case <-deadline.Done():
+				timer.Stop()
+				return total, deadline.Err()
+			case <-timer.C:
 			}
 		}
 	}
+	return total, nil
 }
 
 // errKindOf 只保留错误类别：驱动/SQL 文本会带表名与约束名，不该进日志。

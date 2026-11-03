@@ -168,11 +168,12 @@ func TestHandlerUnknownPaths(t *testing.T) {
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		res := rec.Result()
 		code := res.StatusCode
-		// ServeMux 对带 .. 的路径先给 301（规范化重定向），这不是泄露：跟随后必须落到 404。
-		if code == http.StatusMovedPermanently {
+		// Go 1.27.3's ServeMux uses 307 for path-cleaning redirects; older
+		// toolchains used 301. Both must lead to a non-resource 404.
+		if code == http.StatusMovedPermanently || code == http.StatusTemporaryRedirect {
 			loc := res.Header.Get("Location")
 			if strings.Contains(loc, "config") && !strings.HasPrefix(loc, "/internal") && !strings.HasPrefix(loc, "/widget") {
-				t.Errorf("%s 的 301 目标可疑：%q", path, loc)
+				t.Errorf("%s 的重定向目标可疑：%q", path, loc)
 			}
 			rec2 := httptest.NewRecorder()
 			h.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, loc, nil))

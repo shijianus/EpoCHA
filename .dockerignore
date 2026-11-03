@@ -10,6 +10,11 @@
 # --- Git 与本地状态 ---
 .git/
 .gitignore
+.github/
+.zcode/
+release-artifacts/
+release/
+*.patch
 *.test
 bin/
 deploy/docker/.prebuilt/
@@ -20,6 +25,7 @@ deploy/docker/*.env
 
 # --- 评测样本与 ground truth（绝不进任何层）---
 eval-out/
+epocha-offline-assets.tar.gz
 
 # --- 密钥与数据库文件（即使误放进仓库也不进上下文）---
 .env
@@ -40,6 +46,7 @@ cmd/evalocr/
 cmd/exampleapp/
 cmd/devclient/
 cmd/blindtest/
+cmd/loadtest/
 internal/eval/
 web/preview/
 docs/

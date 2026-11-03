@@ -18,10 +18,10 @@
 # `--build-context toolchain=<预编译目录>` 会取代下面这段定义，运行时层的内容完全相同。
 # 这样"构建机磁盘/网络不足以在容器内下载 Go 模块"时，交付的镜像仍然是同一份配方产物。
 
-ARG BUILDER=golang:1.24-alpine
+ARG BUILDER=golang:1.27.3-alpine
 FROM ${BUILDER} AS toolchain
 
-# 构建期不允许偷偷换工具链（ADR-007：v0.37.0 起 x/image 要求 go≥1.25，会触发隐式下载）。
+# 构建期不允许隐式切换工具链；显式升级记录在 ADR-020。
 ENV GOTOOLCHAIN=local \
     CGO_ENABLED=0 \
     GOFLAGS=-trimpath \
@@ -78,7 +78,7 @@ EXPOSE 8080
 # 因为 scratch 里没有 sh，`ENTRYPOINT ["sh","-c",...]` 会是"看起来能跑其实起不来"的那种错误。
 ENTRYPOINT ["/usr/local/bin/epocha"]
 
-# 就绪探针（不是"进程存在"）：/readyz 会检查连接、schema 版本与**写路径可用性**。
-# 于是"库目录只读/磁盘满/迁移没跑完"的实例会被编排判为不健康，而不是继续接流量。
+# 就绪探针检查连接、schema 与主文件/目录权限，不消费业务状态。
+# 文件创建成功不保证后续 WAL 提交成功；磁盘余量和业务错误仍须独立告警。
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
     CMD ["/usr/local/bin/epocha-ops", "check", "--path", "/readyz"]

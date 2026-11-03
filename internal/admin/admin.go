@@ -263,8 +263,8 @@ func fail(w http.ResponseWriter, status int, code string) {
 	writeJSON(w, status, map[string]any{"error": code})
 }
 
-// auditOK / auditFail 把"写审计"变成每个管理写操作的收尾。审计写失败时对外不声称成功：
-// 状态变动（撤销、停用）本身不回滚——安全方向是"更严"，回滚反而危险。
+// auditOK / auditFail 用于尚需独立审计的管理写操作与失败记录。
+// 新建一次性凭据的成功审计由 store 的 Audited 方法同事务完成；撤销、停用不回滚（ADR-021）。
 func (s *Server) auditOK(ctx context.Context, r *http.Request, action, target string) error {
 	a, err := actor(r)
 	if err != nil {
@@ -322,6 +322,10 @@ func failFromErr(w http.ResponseWriter, err error) {
 		fail(w, http.StatusNotFound, CodeNotFound)
 	case errors.Is(err, store.ErrBadConfig):
 		fail(w, http.StatusBadRequest, CodeBadRequest)
+	case errors.Is(err, store.ErrRevoked):
+		// Body-gated requests can outlive entry authentication. Keep the same
+		// finite unauthorized contract without exposing the revocation reason.
+		fail(w, http.StatusUnauthorized, CodeUnauthorized)
 	case errors.Is(err, store.ErrConflict):
 		fail(w, http.StatusConflict, CodeBadRequest)
 	default:

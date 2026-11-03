@@ -1,18 +1,24 @@
 SHELL := /bin/bash
-# 禁止构建过程下载或切换 Go 工具链（ADR-007）
+.SHELLFLAGS := -eu -o pipefail -c
+# 显式安装 Go 1.27.3；禁止构建过程下载或切换工具链（ADR-020）
 export GOTOOLCHAIN := local
+export GOPROXY    := off
+export GOSUMDB    := off
+export GOENV      := off
+export GOWORK     := off
+GO          ?= go
 MODULE      := github.com/shijianus/EpoCHA
 BIN         := bin/epocha
 OPS_BIN     := bin/epocha-ops
 VERSION     := $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.0.0-dev)
-COMMIT      := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+COMMIT      := $(shell git rev-parse HEAD 2>/dev/null || echo none)
 BUILDDATE   := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS     := -s -w -X $(MODULE)/internal/version.Version=$(VERSION) \
                -X $(MODULE)/internal/version.Commit=$(COMMIT) \
                -X $(MODULE)/internal/version.BuildDate=$(BUILDDATE)
 
-# 资源预算（DESIGN §13），超限即失败，不放宽
-MAX_BIN_MB  := 35
+# 资源预算（DESIGN §13），超限即失败；二进制按精确字节比较，35 MiB = 36700160 B。
+MAX_BIN_BYTES := 36700160
 MAX_WIDGET_KB := 30
 
 .PHONY: help
@@ -22,9 +28,12 @@ help:
 	@echo "make race         go test -race ./...   （每阶段收尾必跑）"
 	@echo "make vet fmt      静态检查 / 格式化"
 	@echo "make check        fmt-check + vet + race + size   （提交前）"
-	@echo "make size         断言二进制 <= $(MAX_BIN_MB)MB（DESIGN §13）"
-	@echo "make widget-size  断言 web/widget/v1.js gzip <= $(MAX_WIDGET_KB)KB（阶段 4）"
-	@echo "make widget-checks 语法检查 + JS↔Go 共享 PoW 向量（零第三方依赖，用 node 内置）"
+	@echo "make size         断言二进制 <= $(MAX_BIN_BYTES) 字节（35 MiB；不截断）"
+	@echo "make widget-size  断言 web/widget/v1.js gzip < $(MAX_WIDGET_KB)KiB（阶段 4）"
+	@echo "make widget-checks 语法检查 + JS↔Go 共享 PoW 向量 + widget 生命周期竞态（Node 24，零第三方依赖）"
+	@echo "make engineering-rules 发布入口/退出码/LF/部署配方的纯 Node 负向回归"
+	@echo "make release-check    全发布工程入口；直接 node docs/scripts/release-check.mjs 才保留 0/1/3 真码"
+	@echo "make engineering-check 仅工程子集，不作为完整发布验收；JSON 收据在 release-artifacts/"
 	@echo "make browser-check 只跑浏览器交互验收（需先起服务与 exampleapp，见 docs/STAGE4A.md）"
 	@echo "make admin-demo     起一套只有 loopback 的管理控制台演示（临时库+运行时凭据文件）"
 	@echo "make admin-ui-check 管理控制台验收：挂载边界/安全头 + 浏览器交互（退出码三态）"
@@ -42,7 +51,9 @@ help:
 	@echo "make run          以临时 DB 启动（仅本地调试；它绑 :8080 即全部网卡，别在有公网的机器上试部署）"
 	@echo "make build-ops    构建运维二进制到 bin/epocha-ops（备份/校验/恢复/探针/容器内管理）"
 	@echo "make docker-image 规范构建：在容器内编译（需 registry 访问 + ≥2GB 可用磁盘给 Go 模块与编译中间产物）"
-	@echo "make docker-image-local 同一份 Dockerfile 的运行时层，用宿主已编译的二进制填 toolchain 阶段"
+	@echo "make build-receipt-checks 离线构建收据与持续演练负向回归"
+	@echo "make build-receipt-integration 真实 Go 静态交叉构建、独立目录验证与篡改拒绝（不运行 Linux 产物）"
+	@echo "make docker-image-local 新唯一目录冻结构建输入/原始字节并核对实际镜像；输出 BUILD_RECEIPT_DIR"
 	@echo "make stage5b-check 运行互斥（flock）、就地恢复拒绝、候选清单与 5 分钟持续演练（docs/STAGE5B.md）"
 	@echo "                 退出码只由必需项（受支持 B 路径）决定；A 路径/amd64/65534/公网 TLS 属可选项，如实打印不决定结论"
 	@echo "                 make 把任何非 0 折叠成 2，配方会打印脚本真实码；只验分类逻辑：make stage5b-check GATE_ARGS=--selftest-classify"
@@ -52,12 +63,12 @@ help:
 .PHONY: build
 build:
 	@mkdir -p bin
-	go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/server
+	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/server
 
 .PHONY: build-ops
 build-ops:
 	@mkdir -p bin
-	go build -trimpath -ldflags "$(LDFLAGS)" -o $(OPS_BIN) ./cmd/ops
+	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(OPS_BIN) ./cmd/ops
 
 # DESIGN §13/§17 点名的实测入口。它**不**替你启动服务，所以不会因"忘了起服务"报出一个假的低数字。
 # 有界性在 cmd/loadtest 内部（并发 ≤16、请求 ≤5000），不靠这里的约定。
@@ -65,7 +76,7 @@ build-ops:
 .PHONY: loadtest
 loadtest:
 	@test -n "$(ARGS)" || { echo "用法：make loadtest ARGS=\"--base URL --site-key KEY --requests N [--concurrency C]\"（还需 EPOCHA_SITE_SECRET）"; exit 2; }
-	go build -trimpath -o bin/epocha-loadtest ./cmd/loadtest
+	$(GO) build -trimpath -o bin/epocha-loadtest ./cmd/loadtest
 	bin/epocha-loadtest $(ARGS)
 
 # 生产镜像的两条构建路径，产物是**同一个运行时层**（deploy/docker/Dockerfile 的 runtime 阶段）：
@@ -81,26 +92,28 @@ docker-image:
 	docker build -f $(DOCKERFILE) --target runtime -t $(DOCKER_IMAGE) \
 	  --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg BUILD_DATE=$(BUILDDATE) .
 
-.PHONY: docker-image-local
+# A receipt directory is single-use. Existing .prebuilt/out and previous run-* trees are never overwritten.
+# A caller such as stage5b supplies the same frozen tuple and directory to both build and verification.
+PREBUILT_DIR ?=
+BUILD_GOOS   ?= linux
+BUILD_GOARCH ?= $(shell GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off GOENV=off GOWORK=off "$(GO)" env GOARCH)
+.PHONY: docker-image-local build-receipt-checks build-receipt-integration
 docker-image-local:
-	@mkdir -p deploy/docker/.prebuilt/out
-	CGO_ENABLED=0 GOTOOLCHAIN=local go build -trimpath -ldflags "$(LDFLAGS)" -o deploy/docker/.prebuilt/out/epocha ./cmd/server
-	CGO_ENABLED=0 GOTOOLCHAIN=local go build -trimpath -ldflags "$(LDFLAGS)" -o deploy/docker/.prebuilt/out/epocha-ops ./cmd/ops
-	@# 交付层是 `FROM scratch`：没有 /lib/ld.so。带 PT_INTERP 的二进制会在容器启动时报
-	@# "exec ...: no such file or directory"（实测第一轮就是这么炸的——宿主 CGO_ENABLED=1 且有 gcc）。
-	@# 所以这条断言必须在构建期，而不是等 compose up 的.healthcheck 超时。
-	@if command -v readelf >/dev/null 2>&1; then \
-	  for b in deploy/docker/.prebuilt/out/epocha deploy/docker/.prebuilt/out/epocha-ops; do \
-	    if readelf -lW "$$b" 2>/dev/null | grep -qi 'program interpreter'; then \
-	      echo "构建出的 $$b 是动态链接，scratch 镜像起不来（CGO_ENABLED 必须为 0）"; exit 1; \
-	    fi; \
-	  done; \
-	  echo "已确认两把二进制无 PT_INTERP（静态链接）"; \
-	else \
-	  echo "警告：本机没有 readelf，跳过静态链接断言（交付风险由 stage5a.sh 的容器启动检查承担）"; \
-	fi
-	docker build -f $(DOCKERFILE) --target runtime -t $(DOCKER_IMAGE) \
-	  --build-context toolchain=deploy/docker/.prebuilt .
+	@pb="$(PREBUILT_DIR)"; \
+	if [[ -z "$$pb" ]]; then \
+	  mkdir -p deploy/docker/.prebuilt; \
+	  parent=$$(mktemp -d deploy/docker/.prebuilt/run-XXXXXX); pb="$$parent/build"; \
+	fi; \
+	node docs/scripts/build-receipt.mjs build --root "$(CURDIR)" --out "$$pb" --go "$(GO)" \
+	  --version "$(VERSION)" --commit "$(COMMIT)" --build-date "$(BUILDDATE)" --goos "$(BUILD_GOOS)" --goarch "$(BUILD_GOARCH)"; \
+	node docs/scripts/build-receipt.mjs image --root "$(CURDIR)" --out "$$pb" --go "$(GO)" --tag "$(DOCKER_IMAGE)"; \
+	printf 'BUILD_RECEIPT_DIR=%s\n' "$$pb"
+
+build-receipt-checks:
+	@node --test --test-reporter=tap docs/scripts/build-receipt.test.mjs docs/scripts/soak-evidence.test.mjs
+
+build-receipt-integration:
+	@RECEIPT_GO="$(GO)" node --test --test-reporter=tap docs/scripts/build-receipt.integration.test.mjs
 
 .PHONY: run
 run: build
@@ -111,15 +124,15 @@ run: build
 
 .PHONY: test
 test:
-	go test -count=1 ./...
+	$(GO) test -count=1 ./...
 
 .PHONY: race
 race:
-	go test -race -count=1 ./...
+	$(GO) test -race -count=1 ./...
 
 .PHONY: vet
 vet:
-	go vet ./...
+	$(GO) vet ./...
 
 .PHONY: fmt
 fmt:
@@ -127,28 +140,30 @@ fmt:
 
 .PHONY: fmt-check
 fmt-check:
-	@test -z "$$(gofmt -l . | grep -v '^vendor/')" || { echo "未格式化：$$(gofmt -l .)"; exit 1; }
+	@node docs/scripts/release-check.mjs --fmt-check
 
 .PHONY: check
 check: fmt-check vet race size
 
 .PHONY: size
 size: build
-	@size=$$(stat -c %s $(BIN)); mb=$$(( size / 1024 / 1024 )); \
-	echo "bin/epocha = $$mb MB"; \
-	if [ $$mb -gt $(MAX_BIN_MB) ]; then echo "超出二进制体积预算 $(MAX_BIN_MB)MB（DESIGN §13）"; exit 1; fi
+	@node docs/scripts/release-check.mjs --binary-size $(BIN)
 
 .PHONY: widget-size
 widget-size:
-	@v1=web/widget/v1.js; wk=web/widget/v1.worker.js; \
-	  test -f $$v1 || { echo "缺少 web/widget/v1.js"; exit 1; }; \
-	  test -f $$wk || { echo "缺少 web/widget/v1.worker.js"; exit 1; }; \
-	  gz=$$(gzip -9 -c $$v1 | wc -c); \
-	  gzboth=$$(cat $$v1 $$wk | gzip -9 -c | wc -c); \
-	  echo "widget：v1.js 原文 $$(stat -c %s $$v1) B / gzip $$gz B；v1.js+v1.worker.js 合计 gzip $$gzboth B"; \
-	  echo "预算：$(MAX_WIDGET_KB)KB [目标]（只算浏览器实际下载的主脚本 gzip；worker 副本单列）"; \
-	  if [ $$gz -gt $$(( $(MAX_WIDGET_KB) * 1024 )) ]; then echo "超出 widget gzip 预算：$$gz B"; exit 1; fi; \
-	  echo "OK：主脚本在预算内"
+	@node docs/scripts/release-check.mjs --widget-size
+
+.PHONY: engineering-rules engineering-check release-check
+engineering-rules: build-receipt-checks
+	@node --test --test-reporter=tap docs/scripts/release-check.test.mjs
+
+engineering-check:
+	@node docs/scripts/release-check.mjs --profile engineering
+
+# make 折叠非零为2；JSON收据及脚本末行保留真实0/1/3。没有人工PASS覆盖开关。
+release-check:
+	@node docs/scripts/release-check.mjs --profile full
+
 
 .PHONY: secret-scan
 # 按值扫描：测试内部注入哨兵值并断言其不出现在日志/响应/启动输出里（DESIGN §14-7）。
@@ -215,7 +230,7 @@ stage5a-check:
 widget-checks:
 	@node --check web/widget/v1.js
 	@node --check web/widget/v1.worker.js
-	@node --test docs/scripts/browser/pow_vectors.test.mjs
+	@node --test docs/scripts/browser/pow_vectors.test.mjs docs/scripts/browser/widget_lifecycle.test.mjs
 
 .PHONY: browser-check
 # 只跑浏览器交互（需要外部已按 docs/scripts/stage4a.sh 的方式起好服务与 exampleapp）。

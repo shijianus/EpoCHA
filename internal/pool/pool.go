@@ -350,7 +350,8 @@ func (w *Worker) Tick(ctx context.Context) (int, error) {
 	made := 0
 	var firstErr error
 
-	for _, spec := range buckets {
+	for _, bucket := range buckets {
+		spec := bucket.PoolSpec
 		if ctx.Err() != nil {
 			return made, ctx.Err()
 		}
@@ -377,21 +378,17 @@ func (w *Worker) Tick(ctx context.Context) (int, error) {
 		if isImage {
 			low, high, pause = w.cfg.ImageLowWatermark, w.cfg.ImageHighWatermark, w.cfg.ImageYieldPause
 		}
-		if isImage {
-			// 预检查只为**避免白烧一次渲染**（生成完才被预算拒绝）。真正的判定仍然在
-			// InsertQuestion 的那条 SQL 里原子完成——这里估的是"最坏一条题"的成本。
-			used, err := w.db.ImageAssetBytes(ctx)
-			if err != nil {
-				w.noteFailed(err)
+		if bucket.MaxChallengeTTL <= 0 || bucket.MaxChallengeTTL >= w.cfg.QuestionTTL {
+			// 无法覆盖完整 challenge 的新题会反复落库/老化；在删题与生成前拒绝，交由 loop 退避。
+			err := fmt.Errorf("%w: 题目寿命必须严格大于桶内最大 challenge TTL", store.ErrBadConfig)
+			w.noteFailed(err)
+			if firstErr == nil {
 				firstErr = err
-				continue
 			}
-			if used+store.MaxAssetBytes > w.cfg.ImageMaxTotalBytes {
-				w.noteRejected(store.ErrImageBudget)
-				continue
-			}
+			continue
 		}
-		ready, err := w.db.ReadyCount(ctx, spec, now)
+		needAfter := now.Add(bucket.MaxChallengeTTL)
+		ready, err := w.db.ReadyCount(ctx, spec, needAfter)
 		if err != nil {
 			w.noteFailed(err)
 			firstErr = err
@@ -408,6 +405,32 @@ func (w *Worker) Tick(ctx context.Context) (int, error) {
 			w.refilling[key] = true
 		}
 		w.mu.Unlock()
+		if behind {
+			removed, err := w.db.DiscardAgedReady(ctx, spec, needAfter)
+			if err != nil {
+				w.noteFailed(err)
+				return made, err
+			}
+			if removed > 0 {
+				// 其它 worker/领取者可能同时改池；重读只用于节省工作，硬上限仍在 INSERT 内判定。
+				total, err = w.db.PoolCount(ctx)
+				if err != nil {
+					return made, err
+				}
+			}
+		}
+		if isImage {
+			// 先释放老化题再预查；否则它们占满预算时，worker 连回收入口都走不到。
+			used, err := w.db.ImageAssetBytes(ctx)
+			if err != nil {
+				w.noteFailed(err)
+				return made, err
+			}
+			if used+store.MaxAssetBytes > w.cfg.ImageMaxTotalBytes {
+				w.noteRejected(store.ErrImageBudget)
+				continue
+			}
+		}
 		if !behind {
 			continue
 		}
@@ -421,9 +444,9 @@ func (w *Worker) Tick(ctx context.Context) (int, error) {
 		bucketMade := 0
 		for i := 0; i < need; i++ {
 			if total >= w.cfg.MaxRows {
-				// 全局上限：这一轮到此为止，不重试（下一轮再看）
+				// 后面的桶可能持有占满容量的老化 ready，仍须给它们有界回收机会。
 				w.noteRejected(store.ErrPoolFull)
-				return made, nil
+				break
 			}
 			if err := w.provision(ctx, g, spec, now); err != nil {
 				if errors.Is(err, store.ErrPoolFull) || errors.Is(err, store.ErrImageBudget) ||

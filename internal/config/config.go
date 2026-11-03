@@ -41,6 +41,7 @@ const (
 	envRateStates    = "EPOCHA_RATE_MAX_STATES"
 	envMaxActive     = "EPOCHA_MAX_ACTIVE_CHALLENGES"
 	envMaxActiveSite = "EPOCHA_MAX_ACTIVE_CHALLENGES_PER_SITE"
+	envMaxLedger     = "EPOCHA_MAX_LEDGER_ROWS"
 	envAdminListen   = "EPOCHA_ADMIN_LISTEN"
 	envAdminKey      = "EPOCHA_ADMIN_KEY"
 	// 阶段 5A：每一把密钥材料都可以改由**文件**提供，入口是同名变量加 _FILE 后缀。
@@ -148,6 +149,7 @@ type Config struct {
 	// 数值是未实测的 [目标]，取舍依据是 1 vCPU/50GB 机器上账本行的体积与扫描成本。
 	MaxActiveChallenges int
 	MaxActivePerSite    int
+	MaxLedgerRows       int
 
 	// 题池水位与节奏（DESIGN §8.3、§8.4）。数值沿用 §8.3 的公式取值，仍是 [目标]：
 	// 3A 没有在目标机上测过补题对 1 vCPU 的实际挤占，因此默认值保守（并发 1、每 10 题让出 CPU）。
@@ -206,6 +208,7 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 
 		MaxActiveChallenges: 10000,
 		MaxActivePerSite:    2000,
+		MaxLedgerRows:       store.DefaultMaxLedgerRows,
 
 		PoolEnabled:     true,
 		PoolLow:         50,
@@ -296,9 +299,17 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 	} else if ok {
 		c.MaxActivePerSite = n
 	}
+	if n, ok, err := parseInt(getenv(envMaxLedger)); err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrInvalid, envMaxLedger)
+	} else if ok {
+		c.MaxLedgerRows = n
+	}
 	if c.MaxActiveChallenges < minMaxRows || c.MaxActivePerSite < minMaxRows ||
 		c.MaxActiveChallenges > maxMaxRows || c.MaxActivePerSite > maxMaxRows {
 		return nil, fmt.Errorf("%w: 活动 challenge 上限须在 %d..%d", ErrInvalid, minMaxRows, maxMaxRows)
+	}
+	if c.MaxLedgerRows < minMaxRows || c.MaxLedgerRows > maxMaxRows {
+		return nil, fmt.Errorf("%w: %s 须在 %d..%d", ErrInvalid, envMaxLedger, minMaxRows, maxMaxRows)
 	}
 	if c.MaxActivePerSite > c.MaxActiveChallenges {
 		return nil, fmt.Errorf("%w: 单站上限不得高于全局上限", ErrInvalid)
@@ -537,9 +548,9 @@ func (c *Config) SafeSummary() string {
 		}
 		return s
 	}
-	return fmt.Sprintf("listen=%s admin_listen=%s db=%s site_imports=%d challenge_ttl=%s response_ttl=%s trust_proxy=%t ip_rpm=%d site_rpm=%d max_active=%d max_active_per_site=%d admin_key_present=%t master_key_source=%s pepper_source=%s prev_master_source=%s admin_key_source=%s pool=%t pool_low=%d pool_high=%d pool_max=%d pool_workers=%d pool_ttl=%s pool_poll=%s pool_image_low=%d pool_image_high=%d pool_image_bytes=%d pool_image_yield=%s generators=%s",
+	return fmt.Sprintf("listen=%s admin_listen=%s db=%s site_imports=%d challenge_ttl=%s response_ttl=%s trust_proxy=%t ip_rpm=%d site_rpm=%d max_active=%d max_active_per_site=%d max_ledger_rows=%d admin_key_present=%t master_key_source=%s pepper_source=%s prev_master_source=%s admin_key_source=%s pool=%t pool_low=%d pool_high=%d pool_max=%d pool_workers=%d pool_ttl=%s pool_poll=%s pool_image_low=%d pool_image_high=%d pool_image_bytes=%d pool_image_yield=%s generators=%s",
 		c.Listen, c.AdminListen, c.DBPath, len(c.Sites), c.ChallengeTTL, c.ResponseTTL, c.TrustProxy,
-		c.RateIPRPM, c.RateSiteRPM, c.MaxActiveChallenges, c.MaxActivePerSite, len(c.AdminKey) > 0,
+		c.RateIPRPM, c.RateSiteRPM, c.MaxActiveChallenges, c.MaxActivePerSite, c.MaxLedgerRows, len(c.AdminKey) > 0,
 		or(c.MasterKeySource), or(c.PepperSource), or(c.PrevMasterSource), or(c.AdminKeySource),
 		c.PoolEnabled, c.PoolLow, c.PoolHigh, c.PoolMaxRows, c.PoolWorkers, c.PoolQuestionTTL, c.PoolPoll,
 		c.PoolImageLow, c.PoolImageHigh, c.PoolImageMaxBytes, c.PoolImageYield, generators)

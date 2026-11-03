@@ -700,9 +700,9 @@ ADR-016 一并更正）按 `ip` 与**站点 id**（不是自报的 `site_key` �
 
 **速率与存量是两个正交的量**（ADR-009）：限流器控制"多快"，控制不了"库里同时有多少"。
 `/api/challenge` 的写入与"活动 challenge 是否超限"必须在**同一条 SQL** 内判定
-（`INSERT … SELECT … WHERE (SELECT count(*) …) < limit`），上限由 `EPOCHA_MAX_ACTIVE_CHALLENGES`（默认 10000 `[目标]`）
-与 `EPOCHA_MAX_ACTIVE_CHALLENGES_PER_SITE`（默认 2000 `[目标]`）给出；到顶对外表现为 429，不返回 5xx 也不假成功。
-清理任务（每轮 500 行）与它是两件事：清理**删除行**，但 SQLite 只是把页放进空闲链，
+（`INSERT … SELECT … WHERE (SELECT count(*) …) < limit`），活动上限由 `EPOCHA_MAX_ACTIVE_CHALLENGES`（默认 10000 `[目标]`）
+与 `EPOCHA_MAX_ACTIVE_CHALLENGES_PER_SITE`（默认 2000 `[目标]`）给出；**历史账本总量另由 `EPOCHA_MAX_LEDGER_ROWS`（默认 100000 `[目标]`）限制**，不随活动上限隐式变化。到顶对外表现为 429，不返回 5xx 也不假成功。
+清理任务仍按每个事务最多 500 行执行，但服务调度器每 10 秒以最多 8 个批次、250ms 时间预算和 5ms 可取消让步推进 backlog；预算用尽会留到下一轮，不无限占住单写连接。总量上限释放只依赖安全清理：仍被 response 或有效 challenge/pool 引用的行不得提前删除。
 **文件不会因此自动缩小**（有测试记录 155648 vs 空库 57344 字节）；收缩需要 `VACUUM`，本版不做。
 TTL 有 `[1s, 1h]` 上下界——有效期长度直接决定防重放账本必须保留多久，不设上界等于允许一条配置让库永久增长。
 
@@ -920,15 +920,15 @@ scheme 只允许 `http`/`https`，host 小写化、IPv6 保留方括号形式、
 
 ## 11. Widget（阶段 4）
 
-- 零依赖原生 JS + `<epocha-widget data-site-key data-action>`（自定义元素，Shadow DOM 隔离样式），或 `data-cap-*` 式属性 API 的等价 `<epocha-verify>`。
-- 产物预算：`make widget-size` 断言 gzip <30KB（含 WASM 则计入）。
-- 国际化：`zh-CN` / `en` 两套字符串表内联，按 `lang` 属性 → `Accept-Language` → 默认 `en`。
-- 无障碍（不是可选装饰）：全部题型可键盘操作；`aria-live="polite"` 播报状态；图片题必须提供 **非视觉等价通道**：
-  - 首选 `arith-v1`/`cjk` 文本朗读版（`aria` 文本替代，不用 audio CAPTCHA——不做音频依赖）；
-  - 同时提供**"我不适合看图"→ 纯 PoW 高难度通道**（`bits+4`，无图像题目）。这是为无法解题的用户保留的正当出口，不是绕过口：PoW 成本仍是有效门槛。
-- 移动端：触摸拖拽（`rotate`）、避免 hover 依赖、视口与 safe-area 适配、失败重绘不换页。
-- 降级：`/api/challenge` 超时（>3s）自动重试一次并切换备用 endpoint（配置项 `fallback_base`，默认源站）；JS 不可用时提供 `<noscript>` 提示 + 服务端纯 PoW 表单模式（阶段 5 文档化，默认关闭）。
-- 输出 `response` 给宿主页面 `data-epocha-response` + `epocha:ready` 事件；业务服务器再调 `/siteverify`。
+当前交付是 `web/widget/v1.js` + `web/widget/v1.worker.js` 的原生 JS API：
+`EpoCHA.render/getResponse/reset/refresh/destroy`。widget 通过版本化公共 URL 提供，Shadow DOM 只用于组件样式与内部 UI；表单隐藏字段必须落在 light DOM，见 `docs/WIDGET.md`。
+
+当前 v1 只支持 `text-image-v1` 图片题。管理面默认的 `pow_only` 站点不会下发题目，图片题仍保持 `experimental:true`、`production_ready:false`。非视觉等价通道、`fallback_base`/多端点、无 JS 服务端表单和完整辅助技术验证仍是未交付/未验收项目，不能把 PoW-only 降级写成等价无障碍路径。
+
+已实现并受 Node/部分真实浏览器用例约束的工程边界包括：请求/响应超时、世代隔离、reset/refresh/destroy 取消迟到回调、重复兑换保护、过期清空 token、CSP/Worker 两条资源路径、键盘焦点和 `aria-live`。这些工程行为不等于真人可读性、抗 OCR/AI 或真机辅助技术效果认证。
+
+规划目标（不代表当前 API）：非视觉等价题型、可信备用 endpoint、JS 不可用时的服务端表单路径、更多题型与移动端交互；实现前必须另行补测试、设计决策和真实验收，不得让旧草稿接口继续作为接入文档。
+
 
 ## 12. 部署拓扑
 
@@ -1110,7 +1110,7 @@ docs/                DESIGN.md、DECISIONS.md（含 ADR-015 运行互斥）、ST
 `font/opentype`、`font/gofont/goregular`、`font`、`draw`、`math/f64`、`math/fixed` 六个子包。
 传递依赖 `golang.org/x/text v0.34.0`（`font/sfnt` 的编码表需要，`go` 指令 1.24.0，兼容本机 go1.24.5）。
 完整许可记录在 `docs/NOTICE.md`。除这两个之外仍**没有任何**第三方依赖。
-`Makefile` 设 `GOTOOLCHAIN=local`：构建过程不得下载或切换 Go 工具链；不擅自升级 Go。
+`Makefile` 设 `GOTOOLCHAIN=local`：构建过程不得隐式下载或切换 Go 工具链。2026-11-02 用户授权升级后，本次固定 Go 1.27.3（ADR-020），现有依赖继续锁定；上表关于 Go 1.24.5 的限制是历史选型理由，不是新工具链能力声明。生产仍为 `CGO_ENABLED=0`，Linux race 验收的 C 编译器只属于测试工具，不进入运行镜像。
 
 ## 17. 开发阶段与验收标准
 
@@ -1339,6 +1339,12 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
 | R12 | 池容量不足时公共请求直接吃 503（不降级是正确的，但对调用方表现为"暂时不可用"） | 默认水位 50/100 与 20000 行上限都是 `[目标]`，**未经真实流量校准** | 3B/阶段 5 按 `[实测]` 到达率重设水位；运维侧先用 `/api/admin/pool` 观测 |
 
 ## 19. 变更日志
+
+- 2026-11-02 **本轮修复冻结证据索引**：`docs/reviews/REPAIR-FREEZE-2026-11-02.md` 记录审计项处置、真实 challenge/浏览器验证与未完成项；对应 `release-artifacts/repair-freeze-2026-11-02-ae546e9c/freeze-receipt.json` 保存最终源码指纹、原始产物及执行状态。源码快照不等于正式发布候选，Linux/race/容器与真人验收未自动通过。
+
+- 2026-11-02 **审计后收敛与 challenge 验收（ADR-021）**：用户要求修复、测试及冻结；新凭据生成/交付与成功审计同事务，紧急撤销保留收紧语义；恢复仅在临时副本完成失效与验证后交付，包含过渡期管理 key 撤销；题池按有效 challenge TTL 补给，并可回收绑定 challenge 已过期/终结的题而不回池。widget/管理台生命周期、接入失败关闭、发布必需证据与实际构建字节一并收敛。必须执行真实 challenge/PoW/redeem/siteverify 及重放/过期/来源/题池负测；当前平台的测试工装不代替正式 Linux/arm64、race 或容器验收。原功能台账与未完成人工项继续保留。
+
+- 2026-11-02 **可靠性修复与冻结边界（ADR-020）**：用户显式授权 Go 1.27.3；凭据撤销截止时间单调、轮换原子提交、过渡期凭据纳入有效上限；widget reset/兑换超时的世代隔离；修正部署候选与密钥配方，新增发布检查及 LF 约束。正式部署仍须在支持的 Linux 环境完整验收，源码冻结与交叉构建不等于上线批准。历史阶段、抗 OCR/人工可读性及支持平台不因本条自动升级为 PASS。
 
 - 2026-10-19 **v2.12（阶段 5C-M1：管理控制台第一批——登录、站点列表、创建、策略与 Origin 编辑、启停）**：
   `web/adminui/` 内嵌原生 HTML/CSS/JS（零框架、零构建、无第三方 CDN/远程字体，默认中文），

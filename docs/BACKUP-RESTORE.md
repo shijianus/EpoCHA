@@ -85,9 +85,8 @@ epocha-20261018T091500Z-56d3911.manifest.json  # 0600，自描述记录
 
 保证机制（`store.Backup`）：
 
-- 快照先写成 `.<name>.db.partial`，通过 `integrity_check` 与内容计数后才 `rename` 到位；
-  manifest 同样先 partial 再 rename。**任何一步失败都清掉自己刚创建的临时文件**。
-  于是"目录里有一个 `.db`"这件事本身就等于"它是一次成功的备份"。
+- 快照先写入本次调用独占的暂存目录，通过 `integrity_check`、计数和哈希核验，数据库及 manifest 使用无覆盖发布；manifest 最后落位。调用只清理自己创建的暂存目录，不删除已有 `.partial` 或其他调用的产物。
+- 如果数据库已发布但 manifest 发布失败，命令明确报告数据库已保留且不是完整备份；不能把单独存在的 `.db` 当作成功。两个文件均发布后的目录同步或暂存清理失败会给出警告，保留产物并要求核验，不静默覆盖重跑。
 - 只读打开做校验会在 WAL 头库旁留下 `-wal/-shm`；算哈希与改名**之前**必须收掉它们
   （`dropSidecars`），否则 manifest 里的 `sha256` 记录的是一份"半边状态"的库。
 - **非空的 `-wal` 一律不删并直接报错**：那说明这个 `.db` 不是我们交付的完整快照。
@@ -170,51 +169,145 @@ epocha-ops restore ... --rotate-pepper
 
 不做"自动检测并顺手轮换"：拿错密钥文件与有意轮换在两可之间，靠猜的失败面是签名与摘要。
 
-## 5. 恢复流程（复制即可执行）
+## 5. 恢复流程（Linux：完整隔离目录接管）
 
-恢复**永远**在隔离目录里做，产物是新文件；当前工作库逐字节不动（演练里用 sha256 前后对账证明）。
+**交付与接管的单位是整个新数据目录，不是一个要塞回旧目录的 `.db`。** 旧目录连同主库、
+`-wal`、`-shm`、`epocha.lock` 原样保留；旧密钥与配置另外隔离保管，不作为自动回退入口。
+禁止把新主库复制进旧 WAL 现场，也禁止为了“清理干净”删除旧 sidecar 或锁文件。
 
-> 下面的 `docker compose …` 是 `DEPLOYMENT` §4 里那个形状的简写（`-f $EP/compose.yml
-> --project-directory $EP --env-file $EP/.env`）。两种写法都行，但**一段命令里只能用一种**：
-> 工作目录决定了 compose 找哪个 `.env`、绑定挂载里的 `./data` 解析到哪里。
+以下是需逐步确认的运维配方，不是本轮已执行的记录。2026-11-02 的 Windows 环境没有可用 Linux
+容器引擎，**完整目录接管、锁竞争、权限与异常 WAL 场景均 NOT_RUN**；静态回归不替代该验收。
+接管产物必须符合 ADR-021：在临时副本完成失效、审计、完整性与单文件收尾后才无覆盖交付最终名称。
+非零退出、进程中断或只看见临时文件，都不能被当作可启动的恢复产物。
+
+### 5.1 先停服并固定路径、身份与材料
+
+- 操作者须有本次恢复授权，并控制旧服务的启动入口；维护期间停止业务流量及外部自动拉起任务。
+  不用端口空闲、PID 文件或 `/healthz` 代替运行锁。
+- 在 Linux 以实际服务 UID/GID 操作；正式范围仍是 `1000:1000`。`EP` 是原部署根的绝对路径，
+  `PROJECT` 是原 Compose 项目名，`OLD_ENV` 是原环境文件。**不要换项目名额外启动第二套权威实例**。
+- 预先确认 `OPS` 是已验收的本机 `epocha-ops` 绝对路径，`REPO` 是配套源码路径，`BACKUP` / `MANIFEST`
+  是选定快照。`OLD_KEYS` 是原密钥目录。`NEW_DATA` / `NEW_KEYS` 是两个不同、尚不存在的绝对路径，
+  位于本地持久文件系统、各自父目录已由运维准备；不能用会定期清理的 `/var/tmp` 作为接管后的数据卷。
+  `NEW_ENV` 是尚不存在的新配置文件。数据、密钥、备份仍分目录，不嵌套。
 
 ```bash
-# 0) 停服。恢复期间不接收业务流量——这是流程的一部分，不是建议。
-docker compose stop
+set -euo pipefail
+umask 077
+: "${EP:?}" "${PROJECT:?}" "${OLD_ENV:?}" "${OPS:?}" "${REPO:?}"
+: "${BACKUP:?}" "${MANIFEST:?}" "${OLD_KEYS:?}" "${NEW_DATA:?}" "${NEW_KEYS:?}" "${NEW_ENV:?}"
+test "$(id -u):$(id -g)" = 1000:1000
+OLD_COMPOSE=(docker compose --project-name "$PROJECT" -f "$EP/compose.yml" --project-directory "$EP" --env-file "$OLD_ENV")
+"${OLD_COMPOSE[@]}" stop epocha
+running="$("${OLD_COMPOSE[@]}" ps -q --status running epocha)"
+test -z "$running"
 
-# 1) 校验这份备份可信（不要跳过；非空文件不等于可用备份）
-epocha-ops verify --db <快照>.db --manifest <快照>.manifest.json    # 非 0 就停下来
+# 去掉可能覆盖文件入口或 Compose 配置的继承值；不能把旧 master 当 previous 带回。
+unset EPOCHA_MASTER_KEY EPOCHA_MASTER_KEY_FILE EPOCHA_MASTER_KEY_PREVIOUS EPOCHA_MASTER_KEY_PREVIOUS_FILE
+unset EPOCHA_PEPPER EPOCHA_PEPPER_FILE EPOCHA_ADMIN_KEY EPOCHA_ADMIN_KEY_FILE
+unset EPOCHA_DATA_DIR EPOCHA_KEY_DIR
 
-# 2) 隔离恢复到新目录（不是数据目录！）
-install -d -m 700 -o <uid> -g <gid> /var/tmp/epocha-restore
-EPOCHA_PEPPER_FILE=/etc/epocha/keys/pepper \
-EPOCHA_ADMIN_KEY="$(cat /path/to/new-admin-credential)" \
-  epocha-ops restore \
-    --backup /var/backups/epocha/epocha-<stamp>.db \
-    --manifest /var/backups/epocha/epocha-<stamp>.manifest.json \
-    --out-dir /var/tmp/epocha-restore
-# 输出的报告给出：schema_before→after、站点/凭据/response/池的 before→after 计数、pepper_rotated
-
-# 3) 换入：把数据目录指向恢复产物（或把产物移入数据目录），并放好**新的**主密钥文件。
-#    旧的 master/pepper 与旧的管理凭据文件不要留在原地当"回退通道"。
-mv /var/lib/epocha/epocha.db /var/lib/epocha/epocha.db.quarantine-<stamp>   # 保留现场，不删
-cp /var/tmp/epocha-restore/epocha.db /var/lib/epocha/epocha.db
-
-# 4) 启动 + 只读检查（此时所有站点禁用、所有业务请求被拒，是预期状态）
-docker compose up -d --wait
-epocha-ops check --path /readyz
-
-# 5) 用新管理凭据逐个确认站点后再启用。**没有**批量自动启用。
-printf '{}' | docker compose exec -T epocha /usr/local/bin/epocha-ops admin POST /api/admin/sites/<id>/enable
-
-# 6) 每把需要用的站点凭据都必须**重新签发**（快照里的凭据已被删除，旧 secret 不再有效）：
-printf '{}' | docker compose exec -T epocha /usr/local/bin/epocha-ops admin POST /api/admin/sites/<id>/secrets
-#    → 明文 secret 只在这一次响应里出现，业务后端配置要在这一步同步更新
+# mkdir 不带 -p：任一目标已存在就停，不复用失败目录、不覆盖其中的库/凭据。
+mkdir -m 700 -- "$NEW_DATA" "$NEW_KEYS"
+# 默认沿用与备份配对的 pepper；内容只进新文件，不进终端、环境或命令行。
+(set -C; cat -- "$OLD_KEYS/pepper" > "$NEW_KEYS/pepper")
+bash "$REPO/deploy/prepare-keys.sh" "$NEW_KEYS"
+# 新目录中的 master/admin 是本次新生成的；pepper 被校验并保留。不要对旧目录执行生成脚本。
 ```
 
-第 6 步是真实成本：**恢复 = 所有接入方的 `secret_key` 需要重新发放**。把它写成风险而不是省略它。
-如果这一点不可接受，正确的做法不是"温和恢复"（保留旧凭据），而是把备份窗口缩短 + 提升恢复频率——
-因为保留旧凭据等价于"被撤销的凭据复活"。
+如 pepper 已丢失或明确要轮换，**先独立确认该决定**：省略旧 pepper 的复制，由准备脚本生成新 pepper，
+恢复时显式加 `--rotate-pepper`。不得因“配对失败”自动重试成轮换；两条路径都要重签发所有站点 secret。
+
+### 5.2 校验并在新目录恢复
+
+```bash
+EPOCHA_PEPPER_FILE="$NEW_KEYS/pepper" "$OPS" verify --db "$BACKUP" --manifest "$MANIFEST"
+EPOCHA_PEPPER_FILE="$NEW_KEYS/pepper" EPOCHA_ADMIN_KEY_FILE="$NEW_KEYS/admin" \
+  "$OPS" restore --backup "$BACKUP" --manifest "$MANIFEST" --out-dir "$NEW_DATA" --dest-name epocha.db
+# 必须有成功报告，核对 schema、站点全部禁用、有效站点凭据/response/题池为零、新管理凭据为一把。
+test -s "$NEW_DATA/epocha.db"
+test ! -e "$NEW_DATA/epocha.db-wal"
+test ! -e "$NEW_DATA/epocha.db-shm"
+```
+
+`restore` 在唯一的隐藏临时副本上完成失效、审计、完整性核验和单文件收尾，最后以无覆盖方式交付 `epocha.db`。在最终文件交付后，目录同步或本轮临时文件清理仍可能失败；这时命令保留有效的最终库，并通过报告的 `Warning` 与终端警告说明“已交付，但持久化或清理状态尚未确认”。退出码 0 不会消除该警告。遇到它先检查存储并重新核验，不能当作事务回滚、删除最终库或覆盖重跑，也不能直接进入接管步骤。
+
+`restore` 对 **NEW_DATA** 取 `flock`；没有改旧目录，所以不靠修改旧库来取得接管资格。
+`ErrLockHeld` ⇒ 有服务/离线操作占用新目录，立即停止接管并查清来源；`ErrLockAccess` ⇒ 核对服务 UID/GID、
+目录与锁文件权限，不提权硬闯。恢复结束到启动之间若有别的进程抢锁，服务会再次非阻塞拒绝；
+不得改端口重试来绕开它。旧容器的停止状态是运维核对项，**不是锁的替代实现**。
+
+确认新数据目录、密钥目录为服务身份所有、0700；新库、锁文件和三把密钥为该身份所有、0600（密钥也可0400），
+`stat` 核对权限但不打印内容。`epocha.lock` 留在新目录里，服务接管同一目录的同一把锁，不移动或删除它。
+失败时保留新目录、凭据与报告供诊断，旧现场保持不动；重做须另选全新路径，删除任何旧材料另行授权。
+
+### 5.3 同步切换整个数据挂载与新密钥挂载
+
+先用无覆盖复制保留旧配置，**只编辑新的配置文件**。
+
+```bash
+(set -C; cat -- "$OLD_ENV" > "$NEW_ENV")
+```
+
+在 `NEW_ENV` 里核对以下值；`$NEW_DATA` / `$NEW_KEYS` 必须替换为第一步选定的**实际绝对路径**，
+不能把这些占位符原样保存。其余端口、网段、限额及镜像身份沿用经批准的配置。
+
+```ini
+EPOCHA_DATA_DIR=$NEW_DATA
+EPOCHA_KEY_DIR=$NEW_KEYS
+EPOCHA_ADMIN_KEY_FILE=/etc/epocha/keys/admin
+EPOCHA_UID=1000
+EPOCHA_GID=1000
+```
+
+新 `keys` 目录整体挂到容器 `/etc/epocha/keys:ro`，因此 master/pepper/admin 都对应恢复时选定的文件。
+尤其不能只把新 admin 作为一次性环境变量交给 restore，而让容器的 ops 继续读旧 admin 文件。
+同时核对 Compose 主文件、override 与运行入口：**`EPOCHA_MASTER_KEY_PREVIOUS` 和
+`EPOCHA_MASTER_KEY_PREVIOUS_FILE` 均未设置**，主密钥来自新目录；不挂载旧密钥目录作为后备。
+
+```bash
+NEW_COMPOSE=(docker compose --project-name "$PROJECT" -f "$EP/compose.yml" --project-directory "$EP" --env-file "$NEW_ENV")
+"${NEW_COMPOSE[@]}" up -d --wait --force-recreate --no-build --pull never epocha
+"${NEW_COMPOSE[@]}" exec -T epocha /usr/local/bin/epocha-ops check --path /readyz
+"${NEW_COMPOSE[@]}" exec -T epocha /usr/local/bin/epocha-ops admin GET /api/admin/whoami
+"${NEW_COMPOSE[@]}" exec -T epocha /usr/local/bin/epocha-ops admin GET /api/admin/admin-keys
+```
+
+`whoami` 必须实际返回 **`status=200` + 新 `key_id`**，并与列表中本次 `label=restore` 的有效记录对应。
+`readyz` 成功不代表管理凭据可用，更不代表站点已开放。若仍为 401，先核对**容器实际挂载**和 admin 文件入口，
+不要再跑 restore/admin-recover 猜测修复；已有库不会因为引导文件被替换而重新登记凭据。
+后续启动、备份、定时任务全部固定这个 `NEW_ENV`；旧配置隔离保管、解除旧启动入口的引用，不能再裸用
+`docker compose up` 或旧环境文件把旧数据目录拉起。失败后也**不自动回退旧目录**——它可能接受已撤销凭据或旧 token。
+
+### 5.4 先重签发与配置业务，再逐站点启用并验证闭环
+
+1. 新管理凭据只读列站点，逐个核对禁用状态、模式、题型、TTL 与精确 Origin。未核对的站点保持禁用。
+2. 为选定站点先签发新 secret，把唯一一次的明文交付到受控 0600 文件/凭据保管系统，再更新业务后端。
+   不把它粘到工单、日志或 shell 历史；交付断线时先查凭据列表，不能盲目重放轮换。
+
+```bash
+: "${SITE_ID:?已核对的站点 ID}" "${SECRET_RECEIPT:?新的受控交付文件路径}"
+(set -C; printf '{}' | "${NEW_COMPOSE[@]}" exec -T epocha /usr/local/bin/epocha-ops admin \
+  POST "/api/admin/sites/$SITE_ID/secrets" > "$SECRET_RECEIPT")
+grep -q '^status=201$' "$SECRET_RECEIPT"
+```
+
+停在这里，由接入方安全取出新 secret 并更新服务端配置。**人工确认后**才单独执行启用，不能整段自动跑完。
+
+```bash
+printf '{}' | "${NEW_COMPOSE[@]}" exec -T epocha /usr/local/bin/epocha-ops admin \
+  POST "/api/admin/sites/$SITE_ID/enable"
+"${NEW_COMPOSE[@]}" exec -T epocha /usr/local/bin/epocha-ops admin GET "/api/admin/sites/$SITE_ID"
+```
+
+3. 在仍受维护访问限制的真实接入上完成 **challenge → PoW/作答 → redeem → 新 secret 的 siteverify**，
+   只在 HTTP 200 且 `success:true` 时放行业务写入；同 token 重放必须失败。确认后才对该站点开放流量。
+4. 恢复验收另外证明旧 token 与旧 secret 被拒、旧管理 key 实际 HTTP 401，新 key 实际 HTTP 200。
+   旧 key 应在备份前曾验证为有效；负测只用一个凭据入口，不能把 env/FILE 冲突、超时或 CLI 失败当成认证拒绝。
+   为排除“站点仍禁用所以一切都拒绝”的假证据，旧 token/secret 负测在新闭环成功的同一站点上复验。
+
+**恢复 = 所有接入方的 `secret_key` 需要重新发放**。这是实际恢复成本；不能为了缩短停机保留快照中的旧凭据。
+若不能接受该成本，应缩短备份窗口并演练恢复，而不是把保守失效改成“旧凭据继续用”。
 
 ### `admin-recover`：新凭据文件与库变更之间失败，怎么办
 
@@ -233,7 +326,7 @@ printf '{}' | docker compose exec -T epocha /usr/local/bin/epocha-ops admin POST
 | 写凭据文件时（同名文件已存在、目录不可写） | 未改 | 未创建；已有文件**不被覆盖**（`O_EXCL`） | 换一个 `--key-file` 名字 |
 | `key_id` 生成之前失败（参数/句柄/开事务） | 未改（不可能有本次写入） | 未创建 | 直接重跑 |
 | 提交**之前**的写入失败（审计/登记语句报错） | 未改，且**已用只读连接确认库里没有这条 key_id** | 本次创建的那个被删掉 | 直接重跑（不需要换名字，文件已没） |
-| `tx.Commit()` 报错，只读回查**读到**这把未撤销的凭据 | **已改**（写入已落盘） | **保留**，绝不删 | 不要重跑（重跑会再撤销一次并换成另一把）。按第 4/5 步放到位、启动服务、`whoami` 核对 `key_id` |
+| `tx.Commit()` 报错，只读回查**读到**这把未撤销的凭据 | **已改**（写入已落盘） | **保留**，绝不删 | 不要重跑（重跑会再撤销一次并换成另一把）。把保留文件放到实际 `EPOCHA_ADMIN_KEY_FILE` 路径、启动服务、`whoami` 核对 `key_id` |
 | `tx.Commit()` 报错，且**回查本身失败**（方向未知） | 不确定 | **保留**（未知方向时删除是不可逆的） | 同上：先用它启动并 `whoami`；确认它不可用之后再删文件重跑 |
 | 提交已确认，但数据库句柄 `Close` 失败 | 已改（已提交并读回确认） | **保留** | **不需要**重跑。这是一条警告，不是回滚；输出里会写清"凭据已生效" |
 | 崩溃在"凭据文件已写、事务未提交"之间 | 未改 | 留下一个没人使用的文件 | 它不影响任何东西；确认这次恢复没成功后删掉它再重跑（重跑要换文件名，否则被 `O_EXCL` 拒） |
@@ -280,6 +373,11 @@ printf '{}' | docker compose exec -T epocha /usr/local/bin/epocha-ops admin POST
    - 所有站点默认禁用，领题被拒（400）；
    - 新装入的管理凭据可用，**旧管理凭据被拒**；
    - 人工启用后，新的完整闭环成功。
+
+上述历史隔离演练不代替 §5 的整体目录接管验收。当前候选还必须在隔离 Linux 环境覆盖：
+旧目录带非空 WAL/SHM 且接管不向其写入新主库、输出目录被另一进程持锁、错误 UID/GID、
+容器仍读旧 admin 文件时明确拒绝或诊断；成功时新挂载与新凭据实际生效、旧目录/锁文件保留，
+重新签发 secret 后完整闭环成功且旧 key/token 被拒。2026-11-02 本轮这些运行项 **NOT_RUN**（Linux 环境 BLOCKED）。
 
 ## 7. 这一版**不能**保证的事（因此阻止安全开放）
 

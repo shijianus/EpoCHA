@@ -1,6 +1,6 @@
 module github.com/shijianus/EpoCHA
 
-go 1.24.5
+go 1.27.3
 
 require (
 	golang.org/x/image v0.36.0

@@ -1,0 +1,144 @@
+name: engineering-and-release-checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      full_acceptance:
+        description: 'Run all legacy gates on a preconfigured, dedicated Linux arm64 runner (not yet provisioned by this repository)'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  engineering:
+    name: Linux ${{ matrix.arch }} engineering only
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+          - runner: ubuntu-24.04
+            arch: amd64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          check-latest: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Download locked modules
+        run: go mod download
+      - name: Verify real offline build receipt on the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p deploy/docker/.prebuilt
+          parent="$(mktemp -d deploy/docker/.prebuilt/ci-build-XXXXXX)"
+          out="$parent/build"
+          version="$(git describe --tags --always --dirty)"
+          commit="$(git rev-parse HEAD)"
+          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          node docs/scripts/build-receipt.mjs build --root . --out "$out" --go go \
+            --version "$version" --commit "$commit" --build-date "$build_date" \
+            --goos linux --goarch "$(go env GOARCH)"
+          node docs/scripts/build-receipt.mjs verify --out "$out" --go go
+      - name: Engineering checks (amd64 does not expand release support)
+        run: node docs/scripts/release-check.mjs --profile engineering --out release-artifacts/ci-engineering
+      - name: Preserve actual check evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engineering-${{ matrix.arch }}
+          path: |
+            release-artifacts/ci-engineering/
+            deploy/docker/.prebuilt/
+          include-hidden-files: true
+          if-no-files-found: error
+
+  windows-checkout:
+    name: Windows LF and Node regressions only
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Repository engineering rules and checkout attributes
+        shell: bash
+        run: node --test --test-reporter=tap docs/scripts/release-check.test.mjs
+      - name: Unmodified widget vector and lifecycle tests
+        shell: bash
+        run: node --test --test-reporter=tap docs/scripts/browser/pow_vectors.test.mjs docs/scripts/browser/widget_lifecycle.test.mjs docs/scripts/browser/adminui_lifecycle.test.mjs
+
+  # This label is a required, still-unprovisioned environment, not evidence that a runner exists.
+  # Manual dispatch only; never execute untrusted PR code on a persistent self-hosted machine.
+  # Runner: Linux arm64, UID:GID 1000:1000, all stage tools incl. Firefox/GCC/Compose,
+  # an exclusively assigned LOCAL Docker daemon with no pre-existing images/containers/volumes.
+  # release-check probes these facts; no input or label can override a failed probe into PASS.
+  full-acceptance:
+    name: Full Linux arm64 acceptance (environment required)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.full_acceptance }}
+    runs-on: [self-hosted, Linux, ARM64, epocha-release-isolated]
+    timeout-minutes: 120
+    concurrency:
+      group: epocha-isolated-release-runner
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          check-latest: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Download locked modules
+        run: go mod download
+      - name: Verify real offline build receipt on the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p deploy/docker/.prebuilt
+          parent="$(mktemp -d deploy/docker/.prebuilt/ci-build-XXXXXX)"
+          out="$parent/build"
+          version="$(git describe --tags --always --dirty)"
+          commit="$(git rev-parse HEAD)"
+          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          node docs/scripts/build-receipt.mjs build --root . --out "$out" --go go \
+            --version "$version" --commit "$commit" --build-date "$build_date" \
+            --goos linux --goarch arm64
+          node docs/scripts/build-receipt.mjs verify --out "$out" --go go
+      - name: Run stage4b, stage5a, stage5b and admin-ui without discarding exit 3
+        run: node docs/scripts/release-check.mjs --profile full --out release-artifacts/ci-full
+      - name: Preserve actual complete or blocked evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-linux-arm64-acceptance
+          path: |
+            release-artifacts/ci-full/
+            release-artifacts/stage5b-*/
+            deploy/docker/.prebuilt/
+          include-hidden-files: true
+          if-no-files-found: error

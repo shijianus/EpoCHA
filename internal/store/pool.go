@@ -200,40 +200,71 @@ func (d *DB) PoolCount(ctx context.Context) (int, error) {
 	return n, nil
 }
 
-// QuestionBuckets 返回需要备题的分桶：只看在用的站点、且只取 pow_question 的显式配置。
-// 分桶键是 (generator_id, difficulty)——version 由注册表解析，避免库里存两份版本号。
-func (d *DB) QuestionBuckets(ctx context.Context) ([]PoolSpec, error) {
+// QuestionBucket 是启用站点对同一题型/难度桶的供给需求。版本由注册表解析。
+// 最大 TTL 使水位中的每一道题都能服务桶内任一启用站点。
+type QuestionBucket struct {
+	PoolSpec
+	MaxChallengeTTL time.Duration
+}
+
+// QuestionBuckets 只聚合启用的 pow_question 站点，站点数由 MaxSites 封顶。
+func (d *DB) QuestionBuckets(ctx context.Context) ([]QuestionBucket, error) {
 	rows, err := d.h.QueryContext(ctx, `
-SELECT DISTINCT generator_id, difficulty FROM sites
+SELECT generator_id, difficulty, max(challenge_ttl_sec) FROM sites
 WHERE enabled=1 AND verify_mode=? AND generator_id <> ''
+GROUP BY generator_id, difficulty
 ORDER BY generator_id, difficulty`, ModePowQuestion)
 	if err != nil {
 		return nil, fmt.Errorf("store: 读备题分桶: %w", err)
 	}
 	defer rows.Close()
-	out := []PoolSpec{}
+	out := []QuestionBucket{}
 	for rows.Next() {
-		var (
-			id   string
-			diff int
-		)
-		if err := rows.Scan(&id, &diff); err != nil {
+		var b QuestionBucket
+		var ttlSeconds int64
+		if err := rows.Scan(&b.GeneratorID, &b.Difficulty, &ttlSeconds); err != nil {
 			return nil, fmt.Errorf("store: 扫描备题分桶: %w", err)
 		}
-		out = append(out, PoolSpec{GeneratorID: id, Difficulty: diff})
+		b.MaxChallengeTTL = time.Duration(ttlSeconds) * time.Second
+		out = append(out, b)
 	}
 	return out, rows.Err()
 }
 
-// ReadyCount 返回某个分桶里可用的题数。
-func (d *DB) ReadyCount(ctx context.Context, spec PoolSpec, now time.Time) (int, error) {
+// ReadyCount 只计 expires_at 严格晚于 needAfter 的 ready 行。worker 传
+// now+桶内最大 challenge TTL，以复用领取的严格 > 边界；仅传 now 只能统计未过期行。
+func (d *DB) ReadyCount(ctx context.Context, spec PoolSpec, needAfter time.Time) (int, error) {
 	var n int
 	err := d.h.QueryRowContext(ctx, `
 SELECT count(*) FROM pool
 WHERE status=? AND generator_id=? AND version=? AND difficulty=? AND expires_at>?`,
-		PoolReady, spec.GeneratorID, spec.Version, spec.Difficulty, formatTime(now.UTC())).Scan(&n)
+		PoolReady, spec.GeneratorID, spec.Version, spec.Difficulty, formatTime(needAfter.UTC())).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("store: 统计可用题目: %w", err)
+	}
+	return n, nil
+}
+
+// DiscardAgedReady 在一条 SQL 中回收同桶寿命不足的未绑定 ready，每次最多 500 行。
+// shared bucket 的保守取舍：这些题可能仍适合短 TTL 站点，但保留会挤满行数/图片预算，
+// 使最长 TTL 站点持续缺题。领取与删除由 SQLite 串行裁决；已 assigned 的题绝不在此回收。
+func (d *DB) DiscardAgedReady(ctx context.Context, spec PoolSpec, needAfter time.Time) (int64, error) {
+	if err := spec.validate(); err != nil {
+		return 0, err
+	}
+	res, err := d.h.ExecContext(ctx, `
+DELETE FROM pool WHERE id IN (
+  SELECT id FROM pool
+  WHERE generator_id=? AND version=? AND difficulty=? AND status=?
+    AND expires_at<=? AND challenge_id IS NULL
+  ORDER BY expires_at LIMIT ?)`,
+		spec.GeneratorID, spec.Version, spec.Difficulty, PoolReady, formatTime(needAfter.UTC()), purgeBatchRows)
+	if err != nil {
+		return 0, fmt.Errorf("store: 回收老化 ready 题: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: 读取老化题回收行数: %w", err)
 	}
 	return n, nil
 }

@@ -231,29 +231,26 @@ func TestMalformedInputs(t *testing.T) {
 func TestUnknownClaimFieldRejected(t *testing.T) {
 	s := newSigner(t, nil)
 	now := time.Now()
-	body, err := json.Marshal(map[string]any{
-		"typ": PurposeChallenge, "kid": s.CurrentKid(), "sid": 7, "cid": "cid-abc",
+	fields := map[string]any{
+		"typ": PurposeChallenge, "kid": s.CurrentKid(), "sid": 7, "svid": 3, "cid": "cid-abc",
 		"iat": now.Unix(), "exp": now.Add(time.Minute).Unix(), "bits": 18,
-		"seed": "aGVsbG8", "scope": "admin",
-	})
-	if err != nil {
-		t.Fatal(err)
+		"seed": "aGVsbG8", "mode": "pow_only",
 	}
-	payload := base64.RawURLEncoding.EncodeToString(body)
-	tag := computeTag(master, PurposeChallenge, payload)
-	tok := prefix + "." + s.CurrentKid() + "." + payload + "." + tag
-	if _, err := s.Verify(PurposeChallenge, tok, now); !errors.Is(err, ErrMalformed) {
+	signedToken := func() string {
+		body, err := json.Marshal(fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload := base64.RawURLEncoding.EncodeToString(body)
+		return prefix + "." + s.CurrentKid() + "." + payload + "." + computeTag(master, PurposeChallenge, payload)
+	}
+	if _, err := s.Verify(PurposeChallenge, signedToken(), now); err != nil {
+		t.Fatalf("合法基线 token 竟失败：%v", err)
+	}
+	// 只增加未知字段并重新签名，避免被缺字段或坏签名提前挡住。
+	fields["scope"] = "admin"
+	if _, err := s.Verify(PurposeChallenge, signedToken(), now); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("未知字段应拒绝，got %v", err)
-	}
-	// 反向确认：同一段 payload 去掉未知字段后能通过，说明失败原因确实是字段校验
-	good, err := json.Marshal(Claims{Typ: PurposeChallenge, Kid: s.CurrentKid(), Sid: 7, Svid: 3, Mode: "pow_only", CID: "cid-abc",
-		Iat: now.Unix(), Exp: now.Add(time.Minute).Unix(), Bits: 18, Seed: "aGVsbG8"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	p2 := base64.RawURLEncoding.EncodeToString(good)
-	if _, err := s.Verify(PurposeChallenge, prefix+"."+s.CurrentKid()+"."+p2+"."+computeTag(master, PurposeChallenge, p2), now); err != nil {
-		t.Fatalf("合法 token 竟失败：%v", err)
 	}
 }
 
@@ -324,8 +321,7 @@ func TestSplitTokenRejectsEmptySegments(t *testing.T) {
 	}
 }
 
-// 站点版本是签名覆盖的一部分：停用再启用站点后，旧 token 的 svid 对不上当前版本即被拒。
-// 这里证明"签名层面就已拒绝"，无需依赖库里还留着那条状态。
+// 站点版本必须进入签名且为正数；与数据库当前版本的一致性由调用方复核。
 func TestSiteVersionBinding(t *testing.T) {
 	s := newSigner(t, nil)
 	now := time.Now()
@@ -340,24 +336,52 @@ func TestSiteVersionBinding(t *testing.T) {
 	if c.Svid != 3 {
 		t.Fatalf("svid 未签名往返：%d", c.Svid)
 	}
-	// 缺少 svid（阶段 1 线格式）必须在验签后被拒，而不是当成 0 放行
-	master := bytes.Repeat([]byte{0x5a}, 32)
-	legacy, err := json.Marshal(map[string]any{
-		"typ": PurposeChallenge, "kid": s.CurrentKid(), "sid": 7, "svid": 3, "cid": "cid-abc",
-		"iat": now.Unix(), "exp": now.Add(time.Minute).Unix(), "bits": 18, "seed": "aGVsbG8",
-	})
+	parts := strings.SplitN(tok, ".", 4)
+	body, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := base64.RawURLEncoding.EncodeToString(legacy)
-	if _, err := s.Verify(PurposeChallenge, prefix+"."+s.CurrentKid()+"."+p+"."+computeTag(master, PurposeChallenge, p), now); !errors.Is(err, ErrMalformed) {
-		t.Fatalf("无 svid 的旧线格式应拒绝，got %v", err)
+	for _, tc := range []struct {
+		name string
+		svid json.RawMessage
+	}{
+		{"missing-svid", nil},
+		{"zero-svid", json.RawMessage("0")},
+		{"negative-svid", json.RawMessage("-1")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(body, &fields); err != nil {
+				t.Fatal(err)
+			}
+			signedToken := func() string {
+				encoded, err := json.Marshal(fields)
+				if err != nil {
+					t.Fatal(err)
+				}
+				payload := base64.RawURLEncoding.EncodeToString(encoded)
+				return prefix + "." + s.CurrentKid() + "." + payload + "." + computeTag(master, PurposeChallenge, payload)
+			}
+			if _, err := s.Verify(PurposeChallenge, signedToken(), now); err != nil {
+				t.Fatalf("合法基线 token 竟失败：%v", err)
+			}
+			// 保留全部其他字段并用同一把 master 重签，确保只检验 svid。
+			if tc.svid == nil {
+				delete(fields, "svid")
+			} else {
+				fields["svid"] = tc.svid
+			}
+			if _, err := s.Verify(PurposeChallenge, signedToken(), now); !errors.Is(err, ErrMalformed) {
+				t.Fatalf("无效 svid 应拒绝，got %v", err)
+			}
+		})
 	}
-	// svid<=0 也不得签发
-	c2 := chalClaims()
-	c2.Svid = 0
-	if _, err := s.Sign(PurposeChallenge, c2, now); !errors.Is(err, ErrUnusableKey) {
-		t.Fatalf("缺站点版本不应签发，got %v", err)
+	for _, svid := range []int64{0, -1} {
+		c2 := chalClaims()
+		c2.Svid = svid
+		if _, err := s.Sign(PurposeChallenge, c2, now); !errors.Is(err, ErrUnusableKey) {
+			t.Errorf("svid=%d 不应签发，got %v", svid, err)
+		}
 	}
 }
 

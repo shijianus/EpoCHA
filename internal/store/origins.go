@@ -12,6 +12,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net"
@@ -157,6 +158,28 @@ func (d *DB) ReplaceOrigins(ctx context.Context, siteID int64, origins []string)
 	if _, err := d.SiteByID(ctx, siteID); err != nil {
 		return nil, err
 	}
+	clean, err := normalizeOrigins(origins)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := d.h.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("store: 来源事务: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM site_origins WHERE site_id=?`, siteID); err != nil {
+		return nil, fmt.Errorf("store: 清空来源: %w", err)
+	}
+	if err := insertOrigins(ctx, tx, siteID, clean, formatTime(time.Now().UTC())); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: 提交来源: %w", err)
+	}
+	return d.Origins(ctx, siteID)
+}
+
+func normalizeOrigins(origins []string) ([]string, error) {
 	if len(origins) > MaxOriginsPerSite {
 		return nil, fmt.Errorf("%w: 允许来源上限为 %d", ErrBadConfig, MaxOriginsPerSite)
 	}
@@ -172,25 +195,17 @@ func (d *DB) ReplaceOrigins(ctx context.Context, siteID int64, origins []string)
 			clean = append(clean, n)
 		}
 	}
-	tx, err := d.h.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("store: 来源事务: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM site_origins WHERE site_id=?`, siteID); err != nil {
-		return nil, fmt.Errorf("store: 清空来源: %w", err)
-	}
-	now := formatTime(time.Now().UTC())
+	return clean, nil
+}
+
+func insertOrigins(ctx context.Context, tx *sql.Tx, siteID int64, clean []string, now string) error {
 	for _, o := range clean {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO site_origins(site_id, origin, created_at) VALUES(?,?,?)`, siteID, o, now); err != nil {
-			return nil, fmt.Errorf("store: 写入来源: %w", err)
+			return fmt.Errorf("store: 写入来源: %w", err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("store: 提交来源: %w", err)
-	}
-	return d.Origins(ctx, siteID)
+	return nil
 }
 
 // Origins 返回站点的允许来源列表。

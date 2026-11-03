@@ -13,8 +13,8 @@ package eval
 //     不是评分器策略。评测里自己写一份更宽容的归一化（典型例子：删掉 OCR 夹进来的空格）
 //     会测出一个服务端根本不会给的通过率，而这个数字唯一的用途就是估计服务端接受率。
 //     畸形输入（生产会 400 的那类）单独计入 Metrics.Malformed，不算 Exact。
-//  3. 对齐失败（预测里有 ground truth 里没有的文件、重复预测）是**错误**而不是忽略：
-//     一条静默丢样本的流水线会让样本量悄悄变小，而样本量正是这些数字唯一的意思。
+//  3. 未知预测单独计数，不进入已知样本分母；重复的已知预测或 ground truth 是错误，
+//     不能静默丢弃后继续报告准确率。
 
 import (
 	"fmt"
@@ -52,7 +52,7 @@ type Metrics struct {
 	Mismatched   int // 有输出、非失败、格式合法但不等于 ground truth
 	Malformed    int // 有输出但**服务端会当畸形输入拒掉**（400），连"答错"都算不上
 
-	// StrictAccuracy = Exact / Total；ScoredAccuracy = Exact / (Predicted − ToolFailures − Unknown)。
+	// StrictAccuracy = Exact / Total；ScoredAccuracy = Exact / (Predicted − ToolFailures)。
 	// 分母为 0 时是 0（不是 1，也不是 NaN）。
 	StrictAccuracy float64
 	ScoredAccuracy float64
@@ -141,7 +141,7 @@ func Score(ground []Sample, pred []Prediction, normalize Normalizer) (Metrics, e
 	if m.Total > 0 {
 		m.StrictAccuracy = float64(m.Exact) / float64(m.Total)
 	}
-	if scored := m.Predicted - m.ToolFailures - m.Unknown; scored > 0 {
+	if scored := m.Predicted - m.ToolFailures; scored > 0 {
 		m.ScoredAccuracy = float64(m.Exact) / float64(scored)
 	}
 	if charTotal > 0 {

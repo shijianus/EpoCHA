@@ -18,6 +18,10 @@ URL 是**版本化**的：改协议或有不兼容变更就发 `v2.js`，不要�
 
 ## 1. 最小接入
 
+当前 `v1.js` 只渲染 `text-image-v1` 图片题。管理 API 与控制台创建站点的默认模式仍为 `pow_only`；接入本 widget 前，需要显式设置 `verify_mode=pow_question`、`generator_id=text-image-v1`，选择中档或更高难度，并确认后台图片题池已有可领取题目。默认设置未完成这一步时，widget 会拒绝不支持的题面，不能把页面加载成功当成接入成功。
+
+将业务页面的完整 Origin（协议、主机、非默认端口）写入站点来源列表；验证服务自身的地址不能代替业务页面的 Origin。浏览器只持有公开的 `site_key`，站点 secret 仅留在业务服务器。图片题仍为 `experimental:true`、`production_ready:false`；非视觉等价通道尚未交付。
+
 **这一节有可运行版本**：`cmd/exampleapp` 的 `/fixture` 页面就是下面这段代码，
 由 `docs/scripts/browser/widget_browser.test.mjs` 在真实浏览器里加载并**原生提交**验证
 （`FormData` 里有 token、POST 打到业务后端、服务端写库）。文档示例最容易出两种错误，

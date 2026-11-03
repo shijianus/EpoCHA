@@ -97,15 +97,32 @@
 
   // ---------- 会话与请求 ----------
 
-  var session = { key: "", keyID: "" };
+  var session = { key: "", keyID: "", generation: 0 };
+  var viewGeneration = 0;
+  var pendingRequests = new Set();
+  var requestTimeoutMS = 10000;
+  var maxResponseBytes = 256 * 1024;
+  var writesInFlight = 0;
 
+  function scope() { return { session: session.generation, view: viewGeneration }; }
+  function current(ticket) {
+    return ticket && ticket.session === session.generation && ticket.view === viewGeneration;
+  }
+  function abortRequests() {
+    pendingRequests.forEach(function (controller) { controller.abort(); });
+    pendingRequests.clear();
+  }
   function dropSession() {
+    session.generation += 1;
     session.key = "";
     session.keyID = "";
+    state.generators = null;
+    state.pendingNav = null;
+    state.siteCursor = [];
+    abortRequests();
   }
 
-  // 请求路径**只能**是代码里写死的 /api/admin/... 常量拼接。
-  // 这道断言把"页面参数指定管理上游"变成结构上不可能（任何调用点传进相对路径/绝对 URL 都会在这里失败）。
+  // 请求路径只能由本页的管理 API 路径构成，凭据不会发给调用方指定的上游。
   function apiURL(path) {
     if (typeof path !== "string" || path.slice(0, API_PREFIX.length) !== API_PREFIX) {
       throw new Error("非管理 API 路径：" + String(path));
@@ -113,32 +130,72 @@
     return window.location.origin + path;
   }
 
-  // 返回 {status, data, netError}。网络失败与 HTTP 失败分列：
-  // 把"服务没起来"读成"凭据失效"是最常见的一类误导。
+  async function readResponse(resp) {
+    var declared = resp.headers && resp.headers.get("Content-Length");
+    if (declared && Number(declared) > maxResponseBytes) throw new Error("response-too-large");
+    if (resp.body && resp.body.getReader) {
+      var reader = resp.body.getReader();
+      var decoder = new TextDecoder();
+      var total = 0, text = "";
+      try {
+        for (;;) {
+          var chunk = await reader.read();
+          if (chunk.done) break;
+          total += chunk.value.byteLength;
+          if (total > maxResponseBytes) {
+            reader.cancel().catch(function () {});
+            throw new Error("response-too-large");
+          }
+          text += decoder.decode(chunk.value, { stream: true });
+        }
+        return text + decoder.decode();
+      } finally { reader.releaseLock(); }
+    }
+    var raw = await resp.text();
+    if (new TextEncoder().encode(raw).byteLength > maxResponseBytes) throw new Error("response-too-large");
+    return raw;
+  }
+
+  // 超时覆盖响应体；即使传输层忽略 abort，race 也会结束等待，迟到结果不能再更新页面。
   async function call(method, path, body) {
-    var url = apiURL(path);
-    var opts = { method: method, headers: {}, credentials: "same-origin", cache: "no-store" };
+    var ticket = scope();
+    var controller = new AbortController();
+    var timedOut = false;
+    var opts = { method: method, headers: {}, credentials: "same-origin", cache: "no-store", signal: controller.signal };
     if (session.key) opts.headers["Authorization"] = "Bearer " + session.key;
     if (body !== undefined) {
       opts.headers["Content-Type"] = "application/json";
       opts.body = JSON.stringify(body);
     }
-    var resp;
+    pendingRequests.add(controller);
+    var interrupted = new Promise(function (resolve) {
+      controller.signal.addEventListener("abort", function () {
+        resolve({ status: 0, data: null, netError: true, timeout: timedOut });
+      }, { once: true });
+    });
+    var timer = setTimeout(function () { timedOut = true; controller.abort(); }, requestTimeoutMS);
     try {
-      resp = await fetch(url, opts);
+      var res = await Promise.race([interrupted, (async function () {
+        var resp = await fetch(apiURL(path), opts);
+        var raw = await readResponse(resp);
+        var data = null;
+        if (raw) { try { data = JSON.parse(raw); } catch (e) { /* 由调用点校验响应形状 */ } }
+        return { status: resp.status, data: data, netError: false };
+      })()]);
+      res.scope = ticket;
+      return res;
     } catch (e) {
-      return { status: 0, data: null, netError: true };
+      controller.abort();
+      return { status: 0, data: null, netError: true, timeout: timedOut, scope: ticket };
+    } finally {
+      clearTimeout(timer);
+      pendingRequests.delete(controller);
     }
-    var raw = await resp.text();
-    var data = null;
-    if (raw) {
-      try { data = JSON.parse(raw); } catch (e) { data = null; }
-    }
-    return { status: resp.status, data: data, raw: raw, netError: false };
   }
 
   function failReason(res) {
-    if (res.netError) return "无法连接管理 API（服务未启动或网络不通）。这不是凭据问题。";
+    if (res.timeout) return "管理 API 请求超时，无法确认本次结果。请只读复核当前状态。";
+    if (res.netError) return "无法连接管理 API（服务未启动或网络不通）。这不是凭据问题；写入结果尚未确认，请只读复核。";
     switch (res.status) {
       case 400: return "请求被服务端拒绝：字段不符合边界（400）。" + errCode(res);
       case 401: return "管理凭据无效或已失效。";
@@ -146,26 +203,44 @@
       case 404: return "没找到目标对象。";
       case 409: return "与现有记录冲突（站点名或 site_key 已存在）。";
       case 429: return "请求过于频繁，请稍后再试。";
-      case 500: return "服务端内部错误（500）。本次改动**没有**生效，请重试或查看服务端日志。";
-      case 503: return "服务暂时不可用（题目池或依赖组件未就绪）。";
-      default: return "服务返回错误 " + res.status + "。" + errCode(res);
+      default:
+        if (res.status >= 500) return "服务端错误（" + res.status + "），本次改动的结果尚未确认。请只读复核，不要自动重复提交。";
+        return "服务响应无法确认（" + res.status + "）。" + errCode(res);
     }
   }
 
-  // 服务端只回有限错误码族（红线 8），码本身可展示；响应体的其他内容一律不落地成 HTML。
   function errCode(res) {
     var c = res && res.data && res.data.error;
     return c ? "错误码：" + String(c) + "。" : "";
   }
 
-  // 401 是唯一"凭据已不可用"的信号：清状态并回登录面。403 与网络错误**不**清凭据。
+  // 旧会话与旧视图的响应，包括 401，不能影响当前会话。
   function handleAuth(res) {
+    if (!current(res.scope)) return true;
     if (res.status !== 401) return false;
     dropSession();
     state.view = "login";
     state.reason = "管理凭据已失效，请重新输入。";
     render();
     return true;
+  }
+
+  function lockControls(host) {
+    var controls = Array.prototype.map.call(host.querySelectorAll("input, select, textarea, button"), function (node) {
+      var item = { node: node, disabled: node.disabled };
+      node.disabled = true;
+      return item;
+    });
+    return function () { controls.forEach(function (item) { item.node.disabled = item.disabled; }); };
+  }
+
+  function beginWrite(host, ticket) {
+    var unlock = lockControls(host);
+    writesInFlight += 1;
+    return function () {
+      unlock();
+      if (current(ticket)) writesInFlight -= 1;
+    };
   }
 
   // ---------- 视图状态 ----------
@@ -199,14 +274,20 @@
   function resetDirty() { dirtyParts = {}; markDirty(false); }
 
   // 有未保存修改时，切页要先把决定权交回给人（不是 window.confirm：它不可样式化、不可断言）。
-  function navigate(view, arg, resetCursor) {
-    if (state.dirty && (view !== state.view || arg !== state.arg)) {
-      state.pendingNav = { view: view, arg: arg, resetCursor: resetCursor };
+  function navigate(view, arg, resetCursor, cursor) {
+    if (writesInFlight) {
+      toast("写入正在确认，请等待结果后再切换页面。退出仍可清除会话，但不会撤销服务端已收到的操作。");
+      return;
+    }
+    if (state.dirty) {
+      state.pendingNav = { view: view, arg: arg, resetCursor: resetCursor, cursor: cursor };
       render();
       return;
     }
     state.pendingNav = null;
+    originsDraft = null;
     if (resetCursor) state.siteCursor = [];
+    if (cursor) state.siteCursor = cursor;
     state.view = view;
     state.arg = arg;
     state.dirty = false;
@@ -293,6 +374,9 @@
     var title = document.getElementById("view-title");
     var guard = document.getElementById("guard");
     if (!session.key) {
+      viewGeneration += 1;
+      writesInFlight = 0;
+      abortRequests();
       // 未登录 = 屏幕上不该还留着上一段会话的管理数据。退出与 401 都走这里，
       // 先把视图内容与草稿清干净再画登录面（敏感页面状态的清理由这一条保证）。
       clear(body);
@@ -324,13 +408,16 @@
       if (first) first.focus();
       return;
     }
+    viewGeneration += 1;
+    writesInFlight = 0;
+    abortRequests();
     guard.hidden = true;
     clear(guard);
     clear(body);
     resetDirty();
     var v = VIEWS[state.view] || VIEWS.sites;
     title.textContent = v.title;
-    v.render(body, state.arg);
+    v.render(body, state.arg, scope());
     title.focus();
   }
 
@@ -354,7 +441,7 @@
           type: "button", text: "放弃修改并离开", onclick: function () {
             state.pendingNav = null;
             resetDirty();
-            navigate(target.view, target.arg, target.resetCursor);
+            navigate(target.view, target.arg, target.resetCursor, target.cursor);
           }
         }),
         el("button", {
@@ -380,6 +467,7 @@
 
     form.addEventListener("submit", async function (ev) {
       ev.preventDefault();
+      if (btn.disabled) return;
       var key = input.value;
       if (!key) {
         line.className = "status bad";
@@ -388,13 +476,16 @@
         return;
       }
       btn.disabled = true;
+      input.disabled = true;
       line.className = "status wait";
       line.textContent = "正在验证身份…";
       // 凭据只在**这一次**请求头里；先清掉输入框，成功与否都不留原文。
       input.value = "";
-      var prev = session.key;
+      dropSession();
       session.key = key;
+      var ticket = scope();
       var res = await call("GET", API_PREFIX + "whoami");
+      if (!current(ticket)) return;
       if (res.status === 200 && res.data && res.data.key_id) {
         session.keyID = String(res.data.key_id);
         line.className = "status ok";
@@ -407,15 +498,16 @@
         render();
         toast("已登录");
       } else {
-        session.key = prev;
         dropSession();
         input.value = "";
         line.className = "status bad";
         line.textContent = failReason(res);
         btn.disabled = false;
+        input.disabled = false;
         input.focus();
       }
       btn.disabled = false;
+      input.disabled = false;
     });
   }
 
@@ -424,7 +516,7 @@
   async function loadGenerators() {
     if (state.generators) return state.generators;
     var res = await call("GET", API_PREFIX + "generators");
-    if (res.status !== 200) return null;
+    if (handleAuth(res) || res.status !== 200) return null;
     state.generators = res.data || null;
     return state.generators;
   }
@@ -517,17 +609,20 @@
     return el("span", { class: "pill " + (enabled ? "on" : "off"), text: enabled ? "启用" : "停用" });
   }
 
-  async function renderSites(body) {
+  async function renderSites(body, unused, ticket) {
     var after = state.siteCursor.length ? state.siteCursor[state.siteCursor.length - 1] : 0;
-    body.appendChild(await buildCreateSite());
+    var create = await buildCreateSite(ticket);
+    if (!current(ticket)) return;
+    body.appendChild(create);
 
     var box = div({ class: "panel" });
     body.appendChild(box);
     box.textContent = "加载中…";
 
     var res = await call("GET", API_PREFIX + "sites?limit=" + PAGE + "&after_id=" + after);
+    if (handleAuth(res)) return;
     clear(box);
-    if (res.status === 200) {
+    if (res.status === 200 && res.data && Array.isArray(res.data.sites)) {
       var sites = (res.data && res.data.sites) || [];
       var next = (res.data && typeof res.data.next_after_id === "number") ? res.data.next_after_id : 0;
       box.appendChild(h2("站点"));
@@ -547,12 +642,12 @@
       }
       box.appendChild(pager("第 " + (state.siteCursor.length + 1) + " 页",
         state.siteCursor.length > 0, sites.length === PAGE && next > 0,
-        function nextFn() { if (next > 0) { state.siteCursor.push(next); render(); } },
-        function prevFn() { state.siteCursor.pop(); render(); }));
+        function nextFn() { if (next > 0) navigate("sites", null, false, state.siteCursor.concat([next])); },
+        function prevFn() { navigate("sites", null, false, state.siteCursor.slice(0, -1)); }));
     } else {
       if (handleAuth(res)) return;
       box.appendChild(p(failReason(res), "status bad"));
-      box.appendChild(el("button", { type: "button", class: "ghost", text: "重试", onclick: render }));
+      box.appendChild(el("button", { type: "button", class: "ghost", text: "重试", onclick: function () { navigate("sites", null, false); } }));
     }
   }
 
@@ -566,8 +661,9 @@
 
   // ---------- 创建站点 ----------
 
-  async function buildCreateSite() {
+  async function buildCreateSite(ticket) {
     var gens = await loadGenerators();
+    if (!current(ticket)) return null;
     var box = div({ class: "panel" });
     var idName = nextID("new-name"), idKey = nextID("new-sitekey"),
       idPow = nextID("new-pow"), idMode = nextID("new-mode"),
@@ -636,7 +732,7 @@
         name.focus();
         return;
       }
-      btn.disabled = true;
+      var finish = beginWrite(form, ticket);
       line.className = "status wait";
       line.textContent = "正在创建…";
 
@@ -648,8 +744,11 @@
       };
       if (siteKey.value.trim()) payload.site_key = siteKey.value.trim();
       if (mode.value === "pow_question") payload.generator_id = gen.value;
-      var res = await call("POST", API_PREFIX + "sites", payload);
-      if (res.status === 201) {
+      var res;
+      try { res = await call("POST", API_PREFIX + "sites", payload); }
+      finally { finish(); }
+      if (handleAuth(res)) return;
+      if (res.status === 201 && res.data && res.data.site && res.data.secret) {
         setDirty("create", false);
         var s = res.data.site || {};
         clear(form);
@@ -665,6 +764,7 @@
         ]));
         // 创建响应是**唯一**一次带着明文 secret。库里只有带 pepper 的摘要，之后任何接口都取不回来。
         if (res.data.secret) form.appendChild(oncePanel(String(res.data.secret)));
+        form.appendChild(p("接入当前图片 widget 前，请在详情配置 pow_question、text-image-v1 与精确 Origin，并确认题池、CSP/worker、表单字段及服务端 siteverify。题型仍为实验性；pow_only 保留供 API 场景使用。", "hint"));
         form.appendChild(div({ class: "panel-actions" }, [
           el("button", { type: "button", text: "进入站点详情", onclick: function () { navigate("site", s.id, false); } }),
           el("button", { type: "button", class: "ghost", text: "返回列表", onclick: function () { render(); } })
@@ -681,6 +781,16 @@
         if (handleAuth(res)) return;
         line.className = "status bad";
         line.textContent = failReason(res);
+        line.appendChild(el("button", { type: "button", class: "ghost", text: "只读复核站点列表", onclick: async function () {
+          var check = await call("GET", API_PREFIX + "sites?limit=500");
+          if (handleAuth(check)) return;
+          if (check.status !== 200 || !check.data || !Array.isArray(check.data.sites)) {
+            toast("无法确认创建结果：" + failReason(check));
+            return;
+          }
+          var matches = check.data.sites.filter(function (site) { return site.name === payload.name || payload.site_key && site.site_key === payload.site_key; });
+          toast(matches.length ? "读到相同名称或 site_key 的站点。请进入详情核对；一次性 secret 无法重新读取。" : "当前列表未找到匹配站点，仍不能据此自动重放创建。请确认原请求结果后再操作。");
+        } }));
         btn.disabled = false;
       }
     });
@@ -752,7 +862,7 @@
 
   // ---------- 站点详情：概览 + 编辑 + Origin + 启停 ----------
 
-  async function renderSite(body, id) {
+  async function renderSite(body, id, ticket) {
     var box = div({ class: "panel" }, [p("加载中…", "status wait")]);
     body.appendChild(box);
     var results = await Promise.all([
@@ -760,8 +870,9 @@
       loadGenerators()
     ]);
     var res = results[0], gens = results[1];
+    if (handleAuth(res) || !current(ticket)) return;
     clear(box);
-    if (res.status !== 200) {
+    if (res.status !== 200 || !res.data || !res.data.site) {
       if (handleAuth(res)) return;
       box.appendChild(p(failReason(res), "status bad"));
       box.appendChild(el("button", {
@@ -775,21 +886,31 @@
     var secrets = res.data.secrets || [];
 
     box.appendChild(h2("概览"));
-    box.appendChild(kv([
-      ["站点 ID", String(s.id)],
-      ["site_key（公开）", s.site_key],
-      ["状态", s.enabled ? "启用" : "停用"],
-      ["站点版本", String(s.version)],
-      ["创建时间", s.created_at]
-    ]));
+    var overview = div();
+    box.appendChild(overview);
+    function updateOverview(next) {
+      clear(overview);
+      overview.appendChild(kv([
+        ["站点 ID", String(next.id)],
+        ["site_key（公开）", next.site_key],
+        ["状态", next.enabled ? "启用" : "停用"],
+        ["站点版本", String(next.version)],
+        ["创建时间", next.created_at]
+      ]));
+    }
+    updateOverview(s);
 
     box.appendChild(h2("状态操作"));
     var actions = div({ id: "site-actions" });
     box.appendChild(actions);
-    paintSiteActions(actions, s);
+    paintSiteActions(actions, s, ticket, updateOverview);
+    function policyConfirmed(next) {
+      Object.assign(s, next);
+      updateOverview(s);
+    }
 
-    box.appendChild(buildPolicyForm(s, gens));
-    box.appendChild(buildOriginsForm(s, origins));
+    box.appendChild(buildPolicyForm(s, gens, ticket, policyConfirmed));
+    box.appendChild(buildOriginsForm(s, origins, ticket));
 
     box.appendChild(h2("验证密钥（" + secrets.length + "）"));
     box.appendChild(p("这里只有公开的 key_id 与时间。secret 明文只在创建/轮换那一次响应里出现，" +
@@ -818,7 +939,7 @@
     }));
   }
 
-  function buildPolicyForm(s, gens) {
+  function buildPolicyForm(s, gens, ticket, policyConfirmed) {
     var idName = nextID("pol-name"), idMode = nextID("pol-mode"), idGen = nextID("pol-gen"),
       idDiff = nextID("pol-diff"), idPow = nextID("pol-pow"), idChal = nextID("pol-chal"),
       idResp = nextID("pol-resp"), idIP = nextID("pol-ip"), idSite = nextID("pol-site"),
@@ -913,7 +1034,23 @@
     mode.addEventListener("change", repaintGenNote);
     gen.addEventListener("change", repaintGenNote);
 
-    reload.addEventListener("click", function () { setDirty("policy", false); render(); });
+    reload.addEventListener("click", async function () {
+      if (reload.disabled) return;
+      var unlock = lockControls(form);
+      try {
+        var res = await call("GET", API_PREFIX + "sites/" + encodeURIComponent(String(s.id)));
+        if (handleAuth(res)) return;
+        if (res.status === 200 && res.data && res.data.site) {
+          var next = buildPolicyForm(res.data.site, gens, ticket, policyConfirmed);
+          policyConfirmed(res.data.site);
+          form.parentNode.replaceChild(next, form);
+          setDirty("policy", false);
+        } else {
+          status.className = "status bad";
+          status.textContent = "重新读取失败，编辑内容已保留：" + failReason(res);
+        }
+      } finally { unlock(); }
+    });
 
     form.addEventListener("submit", async function (ev) {
       ev.preventDefault();
@@ -944,34 +1081,39 @@
         else if (f.key === "allow_missing_origin") payload.allow_missing_origin = f.get() === "1";
       });
 
-      submit.disabled = true;
-      reload.disabled = true;
+      var finish = beginWrite(form, ticket);
       status.className = "status wait";
       status.textContent = "正在保存" + changed.map(function (f) { return f.key; }).join("、") + "…";
-
-      var res = await call("PUT", API_PREFIX + "sites/" + encodeURIComponent(String(s.id)), payload);
-      if (res.status === 200) {
-        // 保存后**重新读取**：以库里读回的值确认落库结果，不拿 PUT 的回显当结论。
-        var check = await confirmSaved(s.id, payload, res.data.site);
-        setDirty("policy", false);
-        if (check.mismatch.length) {
-          status.className = "status bad";
-          status.textContent = "已保存但复读结果不一致：" + check.mismatch.join("；");
-        } else if (check.failReason) {
-          status.className = "status bad";
-          status.textContent = check.failReason;
+      try {
+        var res = await call("PUT", API_PREFIX + "sites/" + encodeURIComponent(String(s.id)), payload);
+        if (handleAuth(res)) return;
+        if (res.status === 200 && res.data && res.data.site) {
+          var check = await confirmSaved(s.id, payload, res.data.site);
+          if (!current(ticket) || check.stale) return;
+          status.className = check.mismatch.length || check.failReason ? "status bad" : "status ok";
+          if (check.mismatch.length) {
+            status.textContent = "保存请求已返回，但复读结果不一致：" + check.mismatch.join("；") + "。编辑内容已保留，请核对后再操作。";
+          } else if (check.failReason) {
+            status.textContent = check.failReason;
+          } else {
+            binding.reset(changed);
+            policyConfirmed(check.site);
+            setDirty("policy", false);
+            status.textContent = "已保存，并已重新读取站点确认落库值。";
+          }
         } else {
-          status.className = "status ok";
-          status.textContent = "已保存，并已重新读取站点确认落库值。";
+          status.className = "status bad";
+          status.textContent = "保存结果：" + failReason(res);
         }
-        render();                       // 用服务端的值重建表单基线
-        return;
-      }
-      if (handleAuth(res)) return;
-      status.className = "status bad";
-      status.textContent = "保存失败：" + failReason(res);
-      submit.disabled = false;
-      reload.disabled = false;
+        if (status.className === "status bad") {
+          status.appendChild(el("button", { type: "button", class: "ghost", text: "只读复核策略", onclick: async function () {
+            var check = await confirmSaved(s.id, payload, null);
+            if (!current(ticket) || check.stale) return;
+            status.className = check.failReason || check.mismatch.length ? "status bad" : "status ok";
+            status.textContent = check.failReason || (check.mismatch.length ? "只读复核不一致：" + check.mismatch.join("；") : "只读复核：当前存储值与提交值一致。编辑内容已保留，未再次提交。") ;
+          } }));
+        }
+      } finally { finish(); }
     });
 
     return form;
@@ -981,18 +1123,20 @@
   async function confirmSaved(id, payload, echoed) {
     var out = { mismatch: [], failReason: "" };
     var res = await call("GET", API_PREFIX + "sites/" + encodeURIComponent(String(id)));
-    if (res.status !== 200) {
-      out.failReason = "保存请求返回 200，但重新读取失败（" + res.status + "）：无法确认落库结果。";
+    if (handleAuth(res)) { out.stale = true; return out; }
+    if (res.status !== 200 || !res.data || !res.data.site) {
+      out.failReason = "重新读取失败：无法确认落库结果。" + failReason(res);
       return out;
     }
-    var got = res.data.site || {};
+    var got = res.data.site;
+    out.site = got;
     Object.keys(payload).forEach(function (k) {
       var want = payload[k], have = got[k];
       if (typeof want === "boolean") { if (!!have !== want) out.mismatch.push(k + " 期望 " + want + "，读到 " + have); return; }
       if (String(want) !== String(have)) out.mismatch.push(k + " 期望 " + want + "，读到 " + have);
     });
-    if (echoed && JSON.stringify(echoed) !== JSON.stringify(got)) {
-      out.mismatch.push("PUT 的回显与 GET 的结果不一致（可能有并发写入）");
+    if (echoed && Object.keys(payload).some(function (key) { return JSON.stringify(echoed[key]) !== JSON.stringify(got[key]); })) {
+      out.mismatch.push("提交字段的 PUT 回显与 GET 结果不一致（可能有并发写入）");
     }
     return out;
   }
@@ -1020,7 +1164,7 @@
     return out;
   }
 
-  function buildOriginsForm(s, origins) {
+  function buildOriginsForm(s, origins, ticket) {
     var idArea = nextID("origins"), idStatus = nextID("origins-status");
     var base = origins.slice().sort();
     var draft = (originsDraft && originsDraft.site === s.id) ? originsDraft.text : null;
@@ -1060,48 +1204,73 @@
         status.textContent = "超过 " + BOUNDS.originCountMax + " 条上限。";
         return;
       }
-      submit.disabled = true;
+      var finish = beginWrite(form, ticket);
       status.className = "status wait";
       status.textContent = "正在替换允许来源…";
-      var res = await call("PUT", API_PREFIX + "sites/" + encodeURIComponent(String(s.id)) + "/origins",
-        { origins: list });
-      if (res.status === 200) {
-        originsDraft = null;
-        setDirty("origins", false);
-        var gotList = res.data.origins || [];
-        status.className = "status ok";
-        status.textContent = "服务端规范化后共 " + gotList.length + " 条，已重新读取。";
-        area.value = gotList.join("\n");
-        base = gotList.slice();
-        count.textContent = "当前 " + gotList.length + " 条。";
-        submit.disabled = false;
-        return;
-      }
-      if (handleAuth(res)) return;
-      status.className = "status bad";
-      status.textContent = "保存失败：" + failReason(res) + " 整批未生效（部分生效比全不生效更危险）。";
-      submit.disabled = false;
+      var path = API_PREFIX + "sites/" + encodeURIComponent(String(s.id)) + "/origins";
+      try {
+        var res = await call("PUT", path, { origins: list });
+        if (handleAuth(res)) return;
+        if (res.status === 200 && res.data && Array.isArray(res.data.origins)) {
+          var check = await call("GET", path);
+          if (handleAuth(check)) return;
+          if (check.status === 200 && check.data && Array.isArray(check.data.origins)) {
+            var gotList = check.data.origins.slice().sort();
+            if (JSON.stringify(gotList) === JSON.stringify(res.data.origins.slice().sort())) {
+              originsDraft = null;
+              base = gotList;
+              area.value = gotList.join("\n");
+              setDirty("origins", false);
+              count.textContent = "当前 " + gotList.length + " 条。";
+              status.className = "status ok";
+              status.textContent = "服务端规范化后共 " + gotList.length + " 条，已重新读取并确认。";
+              return;
+            }
+            status.textContent = "复读结果不一致，编辑内容已保留，请核对后再操作。";
+          } else {
+            status.textContent = "保存请求返回成功，但重新读取失败，无法确认当前允许来源。" + failReason(check);
+          }
+        } else {
+          status.textContent = "保存结果：" + failReason(res);
+        }
+        status.className = "status bad";
+        status.appendChild(el("button", { type: "button", class: "ghost", text: "只读复核允许来源", onclick: async function () {
+          var check = await call("GET", path);
+          if (handleAuth(check)) return;
+          status.textContent = check.status === 200 && check.data && Array.isArray(check.data.origins)
+            ? "只读复核：当前允许来源为 " + (check.data.origins.join("、") || "空列表") + "。编辑内容已保留，未再次提交。"
+            : "无法确认当前允许来源：" + failReason(check);
+        } }));
+      } finally { finish(); }
     });
 
     return form;
   }
 
-  function paintSiteActions(host, s) {
+  function paintSiteActions(host, s, ticket, updateOverview) {
     clear(host);
     var enabling = !s.enabled;
-    host.appendChild(el("button", {
+    var toggle = el("button", {
       type: "button",
       class: enabling ? "ghost" : "danger",
       text: enabling ? "启用此站点" : "停用此站点",
-      onclick: function () { host.appendChild(confirmToggle(s, enabling)); }
-    }));
+      onclick: function () {
+        if (!current(ticket) || toggle.disabled) return;
+        toggle.disabled = true;
+        var confirm = confirmToggle(host, s, enabling, ticket, updateOverview);
+        host.appendChild(confirm);
+        confirm.querySelector("button").focus();
+      }
+    });
+    host.appendChild(toggle);
   }
 
-  function confirmToggle(s, enable) {
+  function confirmToggle(host, s, enable, ticket, updateOverview) {
     var note = enable
       ? "启用后新领题会按站点当前配置签发。站点版本会提升：停用期间没有任何东西被复活。"
-      : "停用会让领题与兑换立即失败。站点版本会提升，因此**停用前签发但尚未消费的 token 在重新启用后也不会复活**（DESIGN §5.3）。";
+      : "停用会让领题与兑换立即失败。站点版本会提升，因此停用前签发但尚未消费的 token 在重新启用后也不会复活（DESIGN §5.3）。";
     var target = "站点「" + s.name + "」  id=" + s.id + "  site_key=" + s.site_key + "  当前版本 " + s.version;
+    var status = div({ class: "status", role: "status", "aria-live": "polite" });
     var box = div({ class: "banner warn" }, [
       el("strong", { text: (enable ? "确认启用：" : "确认停用：") }),
       p(target, "wrap-anywhere"),
@@ -1109,27 +1278,48 @@
       div({ class: "panel-actions" }, [
         el("button", {
           type: "button", text: enable ? "确认启用" : "确认停用", onclick: async function (ev) {
-            var btn = ev.target;
-            if (btn.disabled) return;
-            btn.disabled = true;
-            var verb = enable ? "enable" : "disable";
-            var res = await call("POST", API_PREFIX + "sites/" + s.id + "/" + verb, {});
-            if (res.status === 200) {
-              state.arg = s.id;
-              toast(enable ? "站点已启用" : "站点已停用");
-              render();
-            } else {
+            if (!current(ticket) || ev.target.disabled) return;
+            var finish = beginWrite(box, ticket);
+            status.className = "status wait";
+            status.textContent = "正在确认站点状态…";
+            try {
+              var res = await call("POST", API_PREFIX + "sites/" + s.id + "/" + (enable ? "enable" : "disable"), {});
               if (handleAuth(res)) return;
-              btn.disabled = false;
-              toast(failReason(res));
-            }
+              var check = await call("GET", API_PREFIX + "sites/" + s.id);
+              if (handleAuth(check)) return;
+              if (check.status === 200 && check.data && check.data.site) {
+                var next = check.data.site;
+                Object.keys(next).forEach(function (key) { s[key] = next[key]; });
+                updateOverview(s);
+                paintSiteActions(host, s, ticket, updateOverview);
+                var line = div({ class: res.status === 200 && next.enabled === enable ? "status ok" : "status bad", role: "status", "aria-live": "polite" });
+                host.appendChild(line);
+                line.textContent = res.status === 200 && next.enabled === enable
+                  ? "站点已" + (enable ? "启用" : "停用") + "，并已只读复核。未保存的表单修改仍保留。"
+                  : (res.status === 200 ? "启停请求返回成功，但复读状态不一致。" : failReason(res)) + " 当前读到站点为" + (next.enabled ? "启用" : "停用") + "，请核对。";
+              } else {
+                status.className = "status bad";
+                status.textContent = "无法确认启停结果。" + failReason(check);
+                status.appendChild(el("button", { type: "button", class: "ghost", text: "只读复核站点状态", onclick: async function () {
+                  var check = await call("GET", API_PREFIX + "sites/" + s.id);
+                  if (handleAuth(check)) return;
+                  if (check.status === 200 && check.data && check.data.site) {
+                    Object.keys(check.data.site).forEach(function (key) { s[key] = check.data.site[key]; });
+                    updateOverview(s);
+                    paintSiteActions(host, s, ticket, updateOverview);
+                  } else { toast("无法确认当前状态：" + failReason(check)); }
+                } }));
+              }
+            } finally { finish(); }
           }
         }),
-        el("button", { type: "button", class: "ghost", text: "取消", onclick: function () { clear(host); paintSiteActions(host, s); } })
-      ])
+        el("button", { type: "button", class: "ghost", text: "取消", onclick: function () {
+          paintSiteActions(host, s, ticket, updateOverview);
+          host.querySelector("button").focus();
+        } })
+      ]),
+      status
     ]);
-    var focus = box.querySelector("button");
-    if (focus) focus.focus();
     return box;
   }
 

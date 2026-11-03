@@ -1,4 +1,7 @@
 bin/
+# 本地 agent 状态与发布检查收据（带源码 OID 的清单是产物，不能自引用提交）
+.zcode/
+/release-artifacts/
 # 仓库根可能意外产生的二进制
 /devclient
 /server

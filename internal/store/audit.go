@@ -8,6 +8,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strconv"
 	"time"
@@ -26,10 +27,40 @@ type AuditEntry struct {
 	Success   bool
 }
 
-// AppendAudit 写入一条审计。公开端点的限流计数可以丢，审计不行：没有审计的管理面无法事后追责。
-// 因此调用方**必须**在管理写操作之后立刻落一条，写失败就对外返回内部错误——
-// 即便此前的撤销/停用已经生效（撤销不回滚：状态变动的安全方向是"更严"）。
+// AppendAudit 独立写入审计，供失败记录与已生效的撤销/停用收尾使用。
+// 新建一次性凭据的成功审计必须走对应 Audited 方法，与业务同事务提交（ADR-021）。
 func (d *DB) AppendAudit(ctx context.Context, actor, action, target string, success bool) error {
+	return appendAudit(ctx, d.h, actor, action, target, success)
+}
+
+// guardAuditedActor takes the SQLite write slot before reading actor validity.
+// The no-op meta update makes revoke and credential creation serialize at the
+// same write boundary: whichever transaction gets the slot first determines
+// whether the actor is still current. A handler-level authentication snapshot
+// cannot provide that ordering once a request body was in flight.
+func guardAuditedActor(ctx context.Context, tx *sql.Tx, actor string) error {
+	if !printableOK(actor) || len(actor) > MaxNameLen {
+		return fmt.Errorf("%w: 审计 actor 不合法", ErrBadConfig)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE meta SET v=v WHERE k='schema_version'`); err != nil {
+		return fmt.Errorf("store: 锁定 actor 校验写事务: %w", err)
+	}
+	var present int
+	if err := tx.QueryRowContext(ctx, `
+SELECT 1 FROM admin_keys
+WHERE key_id=? AND (revoked_at IS NULL OR revoked_at > ?)
+`, actor, formatTime(time.Now().UTC())).Scan(&present); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrRevoked
+		}
+		return fmt.Errorf("store: 校验管理 actor: %w", err)
+	}
+	return nil
+}
+
+func appendAudit(ctx context.Context, h interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, actor, action, target string, success bool) error {
 	if !printableOK(actor) || len(actor) > MaxNameLen {
 		return fmt.Errorf("%w: 审计 actor 不合法", ErrBadConfig)
 	}
@@ -39,7 +70,7 @@ func (d *DB) AppendAudit(ctx context.Context, actor, action, target string, succ
 	if !printableOK(target) || len(target) > 256 {
 		return fmt.Errorf("%w: 审计 target 不合法", ErrBadConfig)
 	}
-	if _, err := d.h.ExecContext(ctx,
+	if _, err := h.ExecContext(ctx,
 		`INSERT INTO audit(ts, actor, action, target, success) VALUES(?,?,?,?,?)`,
 		formatTime(time.Now().UTC()), actor, action, target, b2i(success)); err != nil {
 		return fmt.Errorf("store: 写审计: %w", err)

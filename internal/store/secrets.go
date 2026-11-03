@@ -17,6 +17,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
+	"strconv"
 	"time"
 )
 
@@ -112,16 +114,17 @@ func macWithKey(key []byte, msg string) []byte {
 // AddSecret 为站点新增一把验证凭据，返回明文（仅此一次）。
 // 同时有效的凭据数有上限：过渡期本该是短暂的，无限并存等于把撤销做成不可达的操作。
 func (d *DB) AddSecret(ctx context.Context, siteID int64) (*SiteSecret, string, error) {
+	return d.addSecret(ctx, siteID, nil)
+}
+
+// AddSecretAudited 新增凭据与成功审计同事务提交。
+func (d *DB) AddSecretAudited(ctx context.Context, siteID int64, actor string) (*SiteSecret, string, error) {
+	return d.addSecret(ctx, siteID, &actor)
+}
+
+func (d *DB) addSecret(ctx context.Context, siteID int64, auditActor *string) (*SiteSecret, string, error) {
 	if _, err := d.SiteByID(ctx, siteID); err != nil {
 		return nil, "", err
-	}
-	var active int
-	if err := d.h.QueryRowContext(ctx,
-		`SELECT count(*) FROM site_secrets WHERE site_id=? AND revoked_at IS NULL`, siteID).Scan(&active); err != nil {
-		return nil, "", fmt.Errorf("store: 统计凭据: %w", err)
-	}
-	if active >= MaxSecretsPerSite {
-		return nil, "", fmt.Errorf("%w: 同时有效的凭据数上限为 %d", ErrBadConfig, MaxSecretsPerSite)
 	}
 	secret, err := NewSecret()
 	if err != nil {
@@ -131,19 +134,57 @@ func (d *DB) AddSecret(ctx context.Context, siteID int64) (*SiteSecret, string, 
 	if err != nil {
 		return nil, "", err
 	}
-	if _, err := d.h.ExecContext(ctx,
-		`INSERT INTO site_secrets(key_id, site_id, secret_mac, created_at) VALUES(?,?,?,?)`,
-		keyID, siteID, hex.EncodeToString(d.SecretMac(secret)), formatTime(time.Now().UTC())); err != nil {
-		if isUniqueErr(err) {
-			return nil, "", fmt.Errorf("%w: key_id 或摘要冲突", ErrConflict)
-		}
-		return nil, "", fmt.Errorf("store: 登记凭据: %w", err)
-	}
-	got, err := d.SecretByKey(ctx, siteID, keyID)
+	now := time.Now().UTC()
+	tx, err := d.h.BeginTx(ctx, nil)
 	if err != nil {
+		return nil, "", fmt.Errorf("store: 新增凭据事务: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if auditActor != nil {
+		if err := guardAuditedActor(ctx, tx, *auditActor); err != nil {
+			return nil, "", err
+		}
+	}
+	if err := d.insertSecret(ctx, tx, siteID, keyID, secret, now); err != nil {
 		return nil, "", err
 	}
-	return got, secret, nil
+	if auditActor != nil {
+		target := "site:" + strconv.FormatInt(siteID, 10) + "/" + keyID
+		if err := appendAudit(ctx, tx, *auditActor, "secret.add", target, true); err != nil {
+			return nil, "", err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, "", fmt.Errorf("store: 提交新增凭据: %w", err)
+	}
+	return &SiteSecret{KeyID: keyID, SiteID: siteID, CreatedAt: now}, secret, nil
+}
+
+// 计数与插入必须共用一条写语句，才能在独立句柄竞争时也包括所有仍有效的 grace 凭据。
+func (d *DB) insertSecret(ctx context.Context, h interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, siteID int64, keyID, secret string, now time.Time) error {
+	res, err := h.ExecContext(ctx, `
+INSERT INTO site_secrets(key_id, site_id, secret_mac, created_at)
+SELECT ?, ?, ?, ?
+WHERE (SELECT count(*) FROM site_secrets
+       WHERE site_id=? AND (revoked_at IS NULL OR revoked_at > ?)) < ?`,
+		keyID, siteID, hex.EncodeToString(d.SecretMac(secret)), formatTime(now.UTC()),
+		siteID, formatTime(now.UTC()), MaxSecretsPerSite)
+	if err != nil {
+		if isUniqueErr(err) {
+			return fmt.Errorf("%w: key_id 或摘要冲突", ErrConflict)
+		}
+		return fmt.Errorf("store: 登记凭据: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: 读取凭据登记结果: %w", err)
+	}
+	if n != 1 {
+		return fmt.Errorf("%w: 同时有效的凭据数上限为 %d", ErrBadConfig, MaxSecretsPerSite)
+	}
+	return nil
 }
 
 // SecretByKey 读一把凭据的元数据（不含任何摘要或明文）。
@@ -180,6 +221,9 @@ func (d *DB) SecretByKey(ctx context.Context, siteID int64, keyID string) (*Site
 
 // ListSecrets 列出站点的全部凭据元数据。
 func (d *DB) ListSecrets(ctx context.Context, siteID int64) ([]*SiteSecret, error) {
+	if _, err := d.SiteByID(ctx, siteID); err != nil {
+		return nil, err
+	}
 	rows, err := d.h.QueryContext(ctx, `
 SELECT key_id, created_at, revoked_at FROM site_secrets WHERE site_id=? ORDER BY created_at, key_id`, siteID)
 	if err != nil {
@@ -211,54 +255,118 @@ SELECT key_id, created_at, revoked_at FROM site_secrets WHERE site_id=? ORDER BY
 }
 
 // RevokeSecret 撤销一把凭据：at<=now 即立即失效，at>now 即过渡期（到点自动失效）。
-// 已撤销的凭据重复撤销返回当前视图，不报错——轮换脚本可安全重跑。
+// 重复撤销只允许保持或提前截止时间，不能延长过渡期或复活已失效凭据。
 func (d *DB) RevokeSecret(ctx context.Context, siteID int64, keyID string, at time.Time) (*SiteSecret, error) {
-	if _, err := d.SecretByKey(ctx, siteID, keyID); err != nil {
-		return nil, err
-	}
-	res, err := d.h.ExecContext(ctx,
-		`UPDATE site_secrets SET revoked_at=? WHERE key_id=? AND site_id=?`,
-		formatTime(at.UTC()), keyID, siteID)
+	deadline := formatTime(at.UTC())
+	res, err := d.h.ExecContext(ctx, `
+UPDATE site_secrets
+SET revoked_at=CASE WHEN revoked_at IS NULL OR revoked_at > ? THEN ? ELSE revoked_at END
+WHERE key_id=? AND site_id=?`, deadline, deadline, keyID, siteID)
 	if err != nil {
 		return nil, fmt.Errorf("store: 撤销凭据: %w", err)
 	}
-	if n, _ := res.RowsAffected(); n != 1 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("store: 读取撤销凭据结果: %w", err)
+	}
+	if n != 1 {
 		return nil, ErrNotFound
 	}
 	return d.SecretByKey(ctx, siteID, keyID)
 }
 
 // RotateSecret 一次完成"新建 + 处理旧密钥"：transition=0 表示立即撤销旧密钥，
-// 否则旧密钥在过渡期内仍可用（上限 MaxTransitionSecond）。
-// 撤销只针对**当前有效**的凭据，不动已经失效的历史行。
+// 否则旧密钥在过渡期内仍可用（上限 MaxTransitionSecond），更早的截止时间保持不变。
+// 撤销覆盖全部当前有效的凭据（含 grace），与新凭据在同一事务提交。
 func (d *DB) RotateSecret(ctx context.Context, siteID int64, transition time.Duration, now time.Time) (*SiteSecret, string, []*SiteSecret, error) {
+	return d.rotateSecret(ctx, siteID, transition, now, nil)
+}
+
+// RotateSecretAudited 将新凭据、旧凭据截止时间与成功审计同事务提交。
+func (d *DB) RotateSecretAudited(ctx context.Context, siteID int64, transition time.Duration, now time.Time, actor string) (*SiteSecret, string, []*SiteSecret, error) {
+	return d.rotateSecret(ctx, siteID, transition, now, &actor)
+}
+
+func (d *DB) rotateSecret(ctx context.Context, siteID int64, transition time.Duration, now time.Time, auditActor *string) (*SiteSecret, string, []*SiteSecret, error) {
 	if transition < 0 || transition > MaxTransitionSecond*time.Second {
 		return nil, "", nil, fmt.Errorf("%w: 过渡期须在 0..%d 秒", ErrBadConfig, MaxTransitionSecond)
 	}
-	fresh, secret, err := d.AddSecret(ctx, siteID)
+	if _, err := d.SiteByID(ctx, siteID); err != nil {
+		return nil, "", nil, err
+	}
+	secret, err := NewSecret()
 	if err != nil {
 		return nil, "", nil, err
 	}
-	current, err := d.ListSecrets(ctx, siteID)
+	keyID, err := NewKeyID()
 	if err != nil {
 		return nil, "", nil, err
 	}
-	until := now.UTC()
-	if transition > 0 {
-		until = now.UTC().Add(transition)
+	now = now.UTC()
+	until := formatTime(now.Add(transition))
+	tx, err := d.h.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("store: 轮换凭据事务: %w", err)
 	}
-	revoked := []*SiteSecret{}
-	for _, s := range current {
-		if s.KeyID == fresh.KeyID || !s.RevokedAt.IsZero() {
-			continue
-		}
-		got, err := d.RevokeSecret(ctx, siteID, s.KeyID, until)
-		if err != nil {
+	defer func() { _ = tx.Rollback() }()
+
+	// 首条事务语句就是写入：独立句柄也先取得写锁，再判定有效集合，避免读快照升级竞争。
+	// 先撤旧再条件插入使满额的立即轮换可用；插入或提交失败时整笔回滚。
+	if auditActor != nil {
+		if err := guardAuditedActor(ctx, tx, *auditActor); err != nil {
 			return nil, "", nil, err
 		}
-		revoked = append(revoked, got)
 	}
-	return fresh, secret, revoked, nil
+	rows, err := tx.QueryContext(ctx, `
+UPDATE site_secrets
+SET revoked_at=CASE WHEN revoked_at IS NULL OR revoked_at > ? THEN ? ELSE revoked_at END
+WHERE site_id=? AND (revoked_at IS NULL OR revoked_at > ?)
+RETURNING key_id, created_at, revoked_at`, until, until, siteID, formatTime(now))
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("store: 轮换撤销旧凭据: %w", err)
+	}
+	defer rows.Close()
+	retired := []*SiteSecret{}
+	for rows.Next() {
+		key := &SiteSecret{SiteID: siteID}
+		var created, revoked string
+		if err := rows.Scan(&key.KeyID, &created, &revoked); err != nil {
+			return nil, "", nil, fmt.Errorf("store: 读取轮换凭据: %w", err)
+		}
+		if key.CreatedAt, err = parseTime(created); err != nil {
+			return nil, "", nil, err
+		}
+		if key.RevokedAt, err = parseTime(revoked); err != nil {
+			return nil, "", nil, err
+		}
+		retired = append(retired, key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", nil, fmt.Errorf("store: 遍历轮换凭据: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, "", nil, fmt.Errorf("store: 关闭轮换凭据结果: %w", err)
+	}
+	if err := d.insertSecret(ctx, tx, siteID, keyID, secret, now); err != nil {
+		return nil, "", nil, err
+	}
+	if auditActor != nil {
+		target := "site:" + strconv.FormatInt(siteID, 10) + "/" + keyID
+		if err := appendAudit(ctx, tx, *auditActor, "secret.rotate", target, true); err != nil {
+			return nil, "", nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, "", nil, fmt.Errorf("store: 提交轮换凭据: %w", err)
+	}
+	// RETURNING 不保证行序；管理 API 保持与 ListSecrets 相同的稳定顺序。
+	sort.Slice(retired, func(i, j int) bool {
+		if retired[i].CreatedAt.Equal(retired[j].CreatedAt) {
+			return retired[i].KeyID < retired[j].KeyID
+		}
+		return retired[i].CreatedAt.Before(retired[j].CreatedAt)
+	})
+	return &SiteSecret{KeyID: keyID, SiteID: siteID, CreatedAt: now}, secret, retired, nil
 }
 
 // FindSiteBySecret 由 secret 定位站点：先鉴凭据、后碰状态（DESIGN §10.1）。
@@ -327,6 +435,10 @@ func (d *DB) BootstrapAdminKey(ctx context.Context, key, label string) (*AdminKe
 
 // AddAdminKey 登记一把管理凭据（明文只由调用方在创建响应里展示一次）。
 func (d *DB) AddAdminKey(ctx context.Context, label, key string) (*AdminKey, error) {
+	return d.addAdminKey(ctx, label, key, nil)
+}
+
+func (d *DB) addAdminKey(ctx context.Context, label, key string, auditActor *string) (*AdminKey, error) {
 	if !printableOK(label) || len(label) > MaxNameLen {
 		return nil, fmt.Errorf("%w: 管理凭据标签须为 1..%d 个可见字符", ErrBadConfig, MaxNameLen)
 	}
@@ -337,7 +449,17 @@ func (d *DB) AddAdminKey(ctx context.Context, label, key string) (*AdminKey, err
 	if err != nil {
 		return nil, err
 	}
-	if _, err := d.h.ExecContext(ctx,
+	tx, err := d.h.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("store: 新增管理凭据事务: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if auditActor != nil {
+		if err := guardAuditedActor(ctx, tx, *auditActor); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO admin_keys(key_id, label, key_mac, created_at) VALUES(?,?,?,?)`,
 		keyID, label, hex.EncodeToString(d.AdminKeyMac(key)), formatTime(time.Now().UTC())); err != nil {
 		if isUniqueErr(err) {
@@ -345,16 +467,39 @@ func (d *DB) AddAdminKey(ctx context.Context, label, key string) (*AdminKey, err
 		}
 		return nil, fmt.Errorf("store: 登记管理凭据: %w", err)
 	}
-	return d.AdminKeyByKey(ctx, keyID)
+	if auditActor != nil {
+		if err := appendAudit(ctx, tx, *auditActor, "admin_key.add", "admin_key:"+keyID, true); err != nil {
+			return nil, err
+		}
+	}
+	// 与建站一致：回读失败必须仍能回滚，不能丢掉已登记凭据的唯一明文。
+	meta, err := scanAdminKey(tx.QueryRowContext(ctx,
+		`SELECT label, created_at, revoked_at FROM admin_keys WHERE key_id=?`, keyID), keyID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: 提交新增管理凭据: %w", err)
+	}
+	return meta, nil
 }
 
 // NewAdminKeyWithID 生成一把管理凭据并登记，返回明文（只在创建时可见）。
 func (d *DB) NewAdminKeyWithID(ctx context.Context, label string) (*AdminKey, string, error) {
+	return d.newAdminKeyWithID(ctx, label, nil)
+}
+
+// NewAdminKeyWithIDAudited 新增管理凭据与成功审计同事务提交。
+func (d *DB) NewAdminKeyWithIDAudited(ctx context.Context, label, actor string) (*AdminKey, string, error) {
+	return d.newAdminKeyWithID(ctx, label, &actor)
+}
+
+func (d *DB) newAdminKeyWithID(ctx context.Context, label string, auditActor *string) (*AdminKey, string, error) {
 	key, err := NewAdminKey()
 	if err != nil {
 		return nil, "", err
 	}
-	id, err := d.AddAdminKey(ctx, label, key)
+	id, err := d.addAdminKey(ctx, label, key, auditActor)
 	if err != nil {
 		return nil, "", err
 	}
@@ -362,6 +507,11 @@ func (d *DB) NewAdminKeyWithID(ctx context.Context, label string) (*AdminKey, st
 }
 
 func (d *DB) AdminKeyByKey(ctx context.Context, keyID string) (*AdminKey, error) {
+	return scanAdminKey(d.h.QueryRowContext(ctx,
+		`SELECT label, created_at, revoked_at FROM admin_keys WHERE key_id=?`, keyID), keyID)
+}
+
+func scanAdminKey(row *sql.Row, keyID string) (*AdminKey, error) {
 	var (
 		a       = &AdminKey{KeyID: keyID}
 		created string
@@ -369,9 +519,7 @@ func (d *DB) AdminKeyByKey(ctx context.Context, keyID string) (*AdminKey, error)
 		label   string
 		err     error
 	)
-	err = d.h.QueryRowContext(ctx,
-		`SELECT label, created_at, revoked_at FROM admin_keys WHERE key_id=?`, keyID).
-		Scan(&label, &created, &revoked)
+	err = row.Scan(&label, &created, &revoked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -422,17 +570,21 @@ func (d *DB) ListAdminKeys(ctx context.Context) ([]*AdminKey, error) {
 	return out, rows.Err()
 }
 
-// RevokeAdminKey 撤销（at<=now 立即失效，at>now 为过渡期）。
+// RevokeAdminKey 撤销（at<=now 立即失效，at>now 为过渡期）；截止时间只保持或提前。
 func (d *DB) RevokeAdminKey(ctx context.Context, keyID string, at time.Time) (*AdminKey, error) {
-	if _, err := d.AdminKeyByKey(ctx, keyID); err != nil {
-		return nil, err
-	}
-	res, err := d.h.ExecContext(ctx,
-		`UPDATE admin_keys SET revoked_at=? WHERE key_id=?`, formatTime(at.UTC()), keyID)
+	deadline := formatTime(at.UTC())
+	res, err := d.h.ExecContext(ctx, `
+UPDATE admin_keys
+SET revoked_at=CASE WHEN revoked_at IS NULL OR revoked_at > ? THEN ? ELSE revoked_at END
+WHERE key_id=?`, deadline, deadline, keyID)
 	if err != nil {
 		return nil, fmt.Errorf("store: 撤销管理凭据: %w", err)
 	}
-	if n, _ := res.RowsAffected(); n != 1 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("store: 读取撤销管理凭据结果: %w", err)
+	}
+	if n != 1 {
 		return nil, ErrNotFound
 	}
 	return d.AdminKeyByKey(ctx, keyID)

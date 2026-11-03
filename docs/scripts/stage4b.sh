@@ -21,6 +21,7 @@ N_PASS=0
 N_FAIL=0
 N_BLOCKED=0
 N_NOTRUN=0
+MANUAL_RC=0
 OCR_IMAGE="${EPOCHA_OCR_IMAGE:-epocha-ocr-eval:stage4b}"
 # 门禁里只验"流水线跑得通、口径算得对"，所以样本数刻意小于正式基线（正式是每档 100 张，
 # 由 make ocr-baseline-real 单独跑一次并留档在 eval-out/）。把 600 次容器调用塞进每次门禁
@@ -35,6 +36,16 @@ blocked() { STEP=$((STEP+1)); N_BLOCKED=$((N_BLOCKED+1)); printf '[stage4b] BLOC
 notrun()  { STEP=$((STEP+1)); N_NOTRUN=$((N_NOTRUN+1)); printf '[stage4b] NOT_RUN %d: %s\n' "$STEP" "$*"; }
 abort()   { printf '[stage4b] 中止: %s\n' "$*" >&2; exit 1; }
 
+manual_result() {
+  local check_id="$1" label="$2" rc=0
+  node "$ROOT/docs/scripts/manual-evidence.mjs" --root "$ROOT" --check "$check_id" || rc=$?
+  case "$rc" in
+    0) pass "$label（人工证据已核验：$check_id）" ;;
+    3) notrun "$label（缺少本源码快照的人工证据：$check_id）" ;;
+    *) fail "$label（人工证据无效，退出码 $rc：$check_id）" ;;
+  esac
+  return "$rc"
+}
 cleanup() {
   local rc=$?
   trap - EXIT
@@ -190,7 +201,7 @@ else
 fi
 
 log "第六步：盲测入口的自检（不依赖真人）"
-# 真人部分永远是 NOT_RUN（agent 不代填），但入口本身的可用性是可测的：
+# 真人部分只接受显式提交且核验通过的人工证据，agent 不代填；入口本身的可用性另测。
 # 端口守卫、逐档领题、记录白名单、导出无凭据。这里只验"脚本会拒绝被占用的端口"这一条，
 # 完整的起服务+领题由 docs/scripts/blindtest.sh 人工执行时自带（第 5 步已实测三档领题）。
 if ss -ltn 2>/dev/null | grep -q ":8491 "; then
@@ -207,17 +218,26 @@ bash docs/scripts/stage4a.sh >"$WORK/stage4a.log" 2>&1 || rc=$?
 if [[ $rc -eq 0 ]]; then
   grep -E "^\[stage4a\] (PASS|BLOCKED|NOT_RUN|FAIL|工程项)" "$WORK/stage4a.log" | sed 's/^/  /'
   pass "stage4a.sh 退出码 0：回归 + 真实浏览器套件（含 4B 的窄屏与表单用例）全部执行"
+elif [[ $rc -eq 3 ]]; then
+  notrun "stage4a.sh 人工证据未齐（退出码 3），不计为通过"
+  MANUAL_RC=3
 else
   tail -n 40 "$WORK/stage4a.log"
   fail "stage4a.sh 退出码 $rc"
 fi
 
+manual_result "stage4b.human-readability" "人工可读性与盲测记录（需真人完成）" || MANUAL_RC=$?
+
 log ""
 log "工程项 $N_PASS 项 PASS；FAIL $N_FAIL；BLOCKED $N_BLOCKED；NOT_RUN $N_NOTRUN"
 log "结论口径：接入闭环（fixture + 原生表单 + 真实窄视口）与 OCR 基线流水线 = 工程项；"
 log "  OCR 的效果数字单独记在 docs/STAGE4B.md，只描述「该固定工具/参数/样本/机器下的基线」，"
-log "  不等于抗 OCR / 抗多模态 / 生产安全认证；人工可读性由真人执行，本轮 NOT_RUN。"
+log "  不等于抗 OCR / 抗多模态 / 生产安全认证；人工可读性按证据条目单独判定。"
 if [[ $N_FAIL -gt 0 ]]; then
   printf '[stage4b] 结果: 有 %d 项 FAIL ⇒ 退出码 1\n' "$N_FAIL" >&2
   exit 1
+fi
+if [[ $MANUAL_RC -ne 0 ]]; then
+  log "人工验收证据未满足，保留 helper 退出码 $MANUAL_RC。"
+  exit "$MANUAL_RC"
 fi

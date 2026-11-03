@@ -35,6 +35,13 @@ import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { BiDi } from "./bidi.mjs";
+import { BROWSER_CASE_TITLES } from "./cases.mjs";
+
+const caseTitle = (id) => {
+  const title = BROWSER_CASE_TITLES[id];
+  if (!title) throw new Error(`browser manifest missing ${id}`);
+  return title;
+};
 
 const need = (name) => {
   const v = process.env[name];
@@ -127,8 +134,10 @@ const probeState = (c) => bidi.evaluateJSON(c, STATE_PROBE);
 async function waitFirstState(c, want, timeoutMs = 30000, container = "#widget") {
   try {
     await bidi.waitUntil(c,
-    `(()=>{const ids=window.EpoCHA?EpoCHA.ids():[];return ids.length>0 && EpoCHA.state(ids[0])===${JSON.stringify(want)};})()`,
-      { timeoutMs, label: `第一个实例进入 ${want}` });
+    `(()=>{const host=document.querySelector(${JSON.stringify(hostOf(container))});
+      const id=host&&host.getAttribute('data-epocha-widget');
+      return !!id && !!window.EpoCHA && EpoCHA.state(id)===${JSON.stringify(want)};})()`,
+      { timeoutMs, label: `${container} 实例进入 ${want}` });
   } catch (e) {
     const why = await bidi.evaluateJSON(c, `(()=>{const h=document.querySelector(${JSON.stringify(hostOf(container))});
       const ids=window.EpoCHA?EpoCHA.ids():'NO_EPOCHA';
@@ -421,6 +430,137 @@ test("reset 与 destroy：清空 token/输入、移除 DOM 与隐藏字段、注
   assert.equal(await bidi.evaluate(c, `document.querySelectorAll('#widget input[type=hidden]').length`), 0,
     "destroy 之后隐藏字段应移除");
   assert.equal(await bidi.evaluate(c, `EpoCHA.ids().length`), 0, "destroy 之后注册表应为空");
+});
+
+// Transport-only fault injection: real HTTP, image and PoW still run; release the completed
+// response explicitly so cancellation cannot rely on the browser rejecting fetch in time.
+async function prepareLifecycleCase(c, path, fetchTimeoutMs = 10000, siteKey = SITE_KEY, holdBody = false) {
+  await bidi.evaluate(c, `(()=>{
+    EpoCHA.ids().forEach(id=>EpoCHA.destroy(id));
+    const form=document.createElement('form'); document.body.appendChild(form);
+    const container=document.createElement('div'); container.id='lifecycle-widget'; form.appendChild(container);
+    const orig=window.fetch;
+    window.__life={calls:[],successes:[],errors:[],states:[],expired:0,held:false,released:false,status:null};
+    let hold=true;
+    window.fetch=function(url,opts){
+      const request={path:new URL(url,location.href).pathname,signal:opts&&opts.signal};
+      window.__life.calls.push(request);
+      const response=orig.call(this,url,opts);
+      if(!hold || request.path!==${JSON.stringify(path)}) return response;
+      hold=false;
+      if (${holdBody}) {
+        return response.then(async res=>{
+          const text=await res.text();
+          const payload=JSON.parse(text);
+          window.__life.status=res.status;
+          window.__life.ttlSeconds=Number(payload.expires_in);
+          window.__life.heldAt=performance.now();
+          const body=new ReadableStream({start(controller){
+            window.__life.release=()=>{
+              window.__life.released=true;
+              window.__life.releasedAt=performance.now();
+              controller.enqueue(new TextEncoder().encode(text));
+              controller.close();
+            };
+          }});
+          window.__life.held=true;
+          return new Response(body,{status:res.status,headers:res.headers});
+        });
+      }
+      return new Promise((resolve,reject)=>{
+        response.then(async res=>{
+          const text=await res.text();
+          window.__life.status=res.status;
+          window.__life.release=()=>{
+            window.__life.released=true;
+            resolve(new Response(text,{status:res.status,headers:res.headers}));
+          };
+          window.__life.held=true;
+        }).catch(reject);
+      });
+    };
+    window.__life.id=EpoCHA.render(container,{
+      apiBase:${JSON.stringify(EPOCHA_API)},siteKey:${JSON.stringify(siteKey)},language:'en',
+      fetchTimeoutMs:${fetchTimeoutMs},
+      onSuccess:token=>window.__life.successes.push(token),
+      onError:err=>window.__life.errors.push(err.code),
+      onState:state=>window.__life.states.push(state),
+      onExpired:()=>window.__life.expired++
+    });
+  })()`);
+}
+
+const lifecycleProbe = (c) => bidi.evaluateJSON(c, `(()=>{
+  const w=window.__life, id=w.id;
+  const host=document.querySelector('#lifecycle-widget [data-epocha-widget]');
+  const field=document.querySelector('#lifecycle-widget input[type=hidden]');
+  const buttons=host ? [...host.shadowRoot.querySelectorAll('button')] : [];
+  return {state:EpoCHA.state(id),token:EpoCHA.getResponse(id),field:field?field.value:null,
+    calls:w.calls.map(r=>({path:r.path,aborted:!!(r.signal&&r.signal.aborted)})),
+    successes:w.successes,errors:w.errors,refreshDisabled:buttons[1]?buttons[1].disabled:null};
+})()`);
+
+async function waitHeldResponse(c) {
+  await bidi.waitUntil(c, `window.__life.held`, { timeoutMs: 20000, label: "真实 HTTP 响应已被测试传输层暂存" });
+  assert.equal(await bidi.evaluate(c, `window.__life.status`), 200, "必须暂存真实成功响应");
+}
+
+for (const path of ["/api/challenge", "/api/redeem"]) {
+  test(`在途 reset：${path} 晚到的真实响应不恢复题目/token/成功通知`, async () => {
+    const c = await openPage(EXAMPLE_URL);
+    await waitFirstState(c, "ready");
+    await prepareLifecycleCase(c, path);
+    if (path === "/api/redeem") {
+      await waitFirstState(c, "ready", 30000, "#lifecycle-widget");
+      const { answer } = await answerOfCurrent(c, "#lifecycle-widget");
+      await typeAnswer(c, answer, "#lifecycle-widget");
+      await clickWidgetButton(c, "submit", "#lifecycle-widget");
+    }
+    await waitHeldResponse(c);
+    assert.equal((await lifecycleProbe(c)).state, path === "/api/redeem" ? "submitting" : "loading");
+    await bidi.evaluate(c, `EpoCHA.reset(window.__life.id); window.__life.release();`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const result = await lifecycleProbe(c);
+    assert.equal(result.state, "idle");
+    assert.equal(result.token, "");
+    assert.equal(result.field, "");
+    assert.deepEqual(result.successes, []);
+    assert.deepEqual(result.errors, []);
+    const calls = result.calls.filter((request) => request.path === path);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].aborted, true);
+  });
+}
+
+test("兑换 HTTP 挂起：超时可换题，迟到的真实成功不能复活 token，也不自动重兑", async () => {
+  const c = await openPage(EXAMPLE_URL);
+  await waitFirstState(c, "ready");
+  await prepareLifecycleCase(c, "/api/redeem", 5000);
+  await waitFirstState(c, "ready", 30000, "#lifecycle-widget");
+  const { answer } = await answerOfCurrent(c, "#lifecycle-widget");
+  await typeAnswer(c, answer, "#lifecycle-widget");
+  await clickWidgetButton(c, "submit", "#lifecycle-widget");
+  await waitHeldResponse(c);
+  await waitFirstState(c, "error", 12000, "#lifecycle-widget");
+  const timedOut = await lifecycleProbe(c);
+  assert.equal(timedOut.token, "");
+  assert.equal(timedOut.field, "");
+  assert.equal(timedOut.refreshDisabled, false);
+  assert.deepEqual(timedOut.errors, ["timeout"]);
+  assert.deepEqual(timedOut.successes, []);
+  assert.equal(timedOut.calls.find((request) => request.path === "/api/redeem").aborted, true);
+  await clickWidgetButton(c, "refresh", "#lifecycle-widget");
+  await waitFirstState(c, "ready", 30000, "#lifecycle-widget");
+  await bidi.evaluate(c, `window.__life.release()`);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const late = await lifecycleProbe(c);
+  assert.equal(late.state, "ready");
+  assert.equal(late.token, "");
+  assert.equal(late.field, "");
+  assert.deepEqual(late.successes, []);
+  assert.deepEqual(late.errors, ["timeout"]);
+  assert.equal(late.calls.filter((request) => request.path === "/api/redeem").length, 1);
+  assert.equal(late.calls.filter((request) => request.path === "/api/challenge").length, 2);
 });
 
 test("计算超时是真实约束：预算到点即明确失败，不去兑换", async () => {
@@ -820,7 +960,148 @@ test("页面与组件的请求面：只打 /api/challenge 与 /api/redeem，不�
   assert.ok(html.includes(SITE_KEY), "页面应包含公开的 site_key");
 });
 
-test("过期时清空 token 与隐藏字段（客户端倒计时跟着服务端的 response_ttl）", async () => {
+test(caseTitle("widget-browser.token-conservative-expiry"), async () => {
+  const c = await openPage(TTL_URL);
+  await waitFirstState(c, "ready");
+  await prepareLifecycleCase(c, "/api/redeem", 15000, TTL_SITE_KEY, true);
+  await waitFirstState(c, "ready", 30000, "#lifecycle-widget");
+  const { answer } = await answerOfCurrent(c, "#lifecycle-widget");
+  await typeAnswer(c, answer, "#lifecycle-widget");
+  await clickWidgetButton(c, "submit", "#lifecycle-widget");
+  await waitHeldResponse(c);
+  const held = await lifecycleProbe(c);
+  assert.equal(held.state, "submitting", "必须在兑换响应体被暂扣时观测提交中状态");
+  assert.deepEqual(held.successes, []);
+  const ttl = await bidi.evaluate(c, `window.__life.ttlSeconds`);
+  assert.equal(ttl, 2, "用例必须使用服务端配置的两秒 response TTL，不改写成功响应");
+  const delayMS = ttl * 1000 + 500;
+  await new Promise((resolve) => setTimeout(resolve, delayMS));
+  assert.equal((await lifecycleProbe(c)).state, "submitting", "释放前必须仍在等待响应体，而不是已经超时或成功");
+  await bidi.evaluate(c, `window.__life.release()`);
+  await waitFirstState(c, "expired", 5000, "#lifecycle-widget");
+  const result = await lifecycleProbe(c);
+  const timing = await bidi.evaluateJSON(c, `({ttl:window.__life.ttlSeconds,elapsed:window.__life.releasedAt-window.__life.heldAt,expired:window.__life.expired,states:window.__life.states})`);
+  assert.ok(timing.elapsed > timing.ttl * 1000, "必须确实延迟超过真实响应里的 TTL");
+  assert.equal(result.state, "expired");
+  assert.equal(result.token, "");
+  assert.equal(result.field, "");
+  assert.deepEqual(result.successes, [], "已过期的迟到响应不得触发 onSuccess");
+  assert.deepEqual(result.errors, []);
+  assert.equal(timing.expired, 1);
+  assert.equal(timing.states.includes("verified"), false, "不得短暂进入 verified 再靠计时器过期");
+  assert.equal(result.calls.filter((request) => request.path === "/api/redeem").length, 1);
+});
+
+test(caseTitle("widget-browser.image-error"), async () => {
+  const c = await openPage(EXAMPLE_URL);
+  await waitFirstState(c, "ready");
+  await prepareLifecycleCase(c, null);
+  await waitFirstState(c, "ready", 30000, "#lifecycle-widget");
+  await bidi.waitUntil(c, `(()=>{const image=document.querySelector('#lifecycle-widget [data-epocha-widget]').shadowRoot.querySelector('img');return image&&image.complete&&image.naturalWidth>0;})()`,
+    { timeoutMs: 5000, label: "图片故障注入前真实 PNG 已解码" });
+  await bidi.evaluate(c, `(()=>{
+    const image=document.querySelector('#lifecycle-widget [data-epocha-widget]').shadowRoot.querySelector('img');
+    window.__life.decodeError=null;
+    image.addEventListener('error',event=>{window.__life.decodeError={trusted:event.isTrusted,width:image.naturalWidth,complete:image.complete};},{once:true});
+    image.src='data:image/png;base64,AQIDBA==';
+  })()`);
+  await waitFirstState(c, "error", 5000, "#lifecycle-widget");
+  await bidi.waitUntil(c, `window.__life.decodeError!==null`, { timeoutMs: 5000, label: "浏览器实际解码损坏 PNG 并派发 error" });
+  const decoded = await bidi.evaluateJSON(c, `window.__life.decodeError`);
+  assert.deepEqual(decoded, { trusted: true, width: 0, complete: true });
+  const probe = await lifecycleProbe(c);
+  assert.equal(probe.token, "");
+  assert.equal(probe.field, "");
+  assert.deepEqual(probe.successes, []);
+  assert.deepEqual(probe.errors, ["image-unusable"]);
+  assert.equal(probe.calls.filter((request) => request.path === "/api/redeem").length, 0);
+  const controls = await bidi.evaluateJSON(c, `(()=>{const root=document.querySelector('#lifecycle-widget [data-epocha-widget]').shadowRoot;return {image:!!root.querySelector('img'),submit:root.querySelector('button').disabled,refresh:root.querySelectorAll('button')[1].disabled};})()`);
+  assert.deepEqual(controls, { image: false, submit: true, refresh: false });
+  await clickWidgetButton(c, "submit", "#lifecycle-widget");
+  assert.equal((await lifecycleProbe(c)).calls.filter((request) => request.path === "/api/redeem").length, 0,
+    "失败后的禁用按钮不能发起兑换");
+  assert.match(await statusText(c, "#lifecycle-widget"), /无法显示|could not be displayed/);
+});
+
+test(caseTitle("widget-browser.label-binding"), async () => {
+  const c = await openPage(EXAMPLE_URL);
+  await waitFirstState(c, "ready");
+  const binding = await bidi.evaluateJSON(c, `(()=>{
+    const root=document.querySelector(${JSON.stringify(WIDGET_HOST)}).shadowRoot;
+    const label=root.querySelector('label'),input=root.querySelector('input.ans');
+    input.blur();
+    label.scrollIntoView({block:'center',inline:'center'});
+    const rect=label.getBoundingClientRect();
+    return {for:label.htmlFor||label.getAttribute('for'),id:input.id,
+      labels:[...input.labels||[]].map(item=>item.textContent),
+      center:[Math.round(rect.left+rect.width/2),Math.round(rect.top+rect.height/2)],
+      size:[rect.width,rect.height],focused:root.activeElement===input};
+  })()`);
+  assert.ok(binding.id && binding.for, "label 与答案框必须有非空关联标识");
+  assert.equal(binding.for, binding.id);
+  assert.ok(binding.labels.some((text) => text.includes("characters") || text.includes("字符")));
+  assert.ok(binding.size[0] > 0 && binding.size[1] > 0, "label 必须可见且有真实点击区域");
+  assert.equal(binding.focused, false, "点击前先移出答案框焦点，防止永真断言");
+  await bidi.pointerClick(c, binding.center[0], binding.center[1]);
+  await bidi.waitUntil(c, `(()=>{const root=document.querySelector(${JSON.stringify(WIDGET_HOST)}).shadowRoot;return root.activeElement===root.querySelector('input.ans');})()`,
+    { timeoutMs: 5000, label: "真实鼠标点击 label 后答案框得到焦点" });
+});
+
+test(caseTitle("widget-browser.reset-clears-image"), async () => {
+  const c = await openPage(EXAMPLE_URL);
+  await waitFirstState(c, "ready");
+  await prepareLifecycleCase(c, null);
+  await waitFirstState(c, "ready", 30000, "#lifecycle-widget");
+  await bidi.evaluate(c, `EpoCHA.reset(window.__life.id)`);
+  const result = await bidi.evaluateJSON(c, `(()=>{const h=document.querySelector('#lifecycle-widget [data-epocha-widget]');const r=h.shadowRoot;return {state:EpoCHA.state(window.__life.id),image:!!r.querySelector('img'),submit:r.querySelector('button').disabled,refresh:r.querySelectorAll('button')[1].disabled,token:EpoCHA.getResponse(window.__life.id)};})()`);
+  assert.deepEqual(result, { state: "idle", image: false, submit: true, refresh: false, token: "" });
+  await clickWidgetButton(c, "submit", "#lifecycle-widget");
+  const idle = await lifecycleProbe(c);
+  assert.equal(idle.state, "idle");
+  assert.equal(idle.field, "");
+  assert.equal(idle.calls.filter((request) => request.path === "/api/redeem").length, 0);
+  assert.equal(idle.calls.filter((request) => request.path === "/api/challenge").length, 1, "reset 和无效提交不能自动领题");
+  await clickWidgetButton(c, "refresh", "#lifecycle-widget");
+  await waitFirstState(c, "ready", 30000, "#lifecycle-widget");
+  const ready = await lifecycleProbe(c);
+  assert.equal(ready.calls.filter((request) => request.path === "/api/challenge").length, 2);
+  assert.equal(ready.calls.filter((request) => request.path === "/api/redeem").length, 0);
+  assert.equal(ready.token, "");
+  assert.deepEqual(ready.successes, []);
+});
+
+test(caseTitle("widget-browser.max-auto-retry-zero"), async () => {
+  const c = await openPage(EXAMPLE_URL);
+  await waitFirstState(c, "ready");
+  await bidi.evaluate(c, `(()=>{
+    EpoCHA.ids().forEach(id=>EpoCHA.destroy(id));
+    const orig=window.fetch;
+    window.__retry={calls:0,successes:[],errors:[]};
+    window.fetch=function(url,opts){
+      if(new URL(url,location.href).pathname==='/api/challenge'){
+        window.__retry.calls++;
+        return Promise.resolve(new Response(JSON.stringify({'error-codes':['challenge-unavailable']}),
+          {status:503,headers:{'Content-Type':'application/json','Retry-After':'1'}}));
+      }
+      return orig.call(this,url,opts);
+    };
+    const form=document.createElement('form');document.body.appendChild(form);
+    const container=document.createElement('div');container.id='retry-widget';form.appendChild(container);
+    window.__retry.id=EpoCHA.render(container,{apiBase:${JSON.stringify(EPOCHA_API)},siteKey:${JSON.stringify(SITE_KEY)},
+      maxAutoRetry:0,onSuccess:token=>window.__retry.successes.push(token),onError:err=>window.__retry.errors.push(err.code)});
+  })()`);
+  await waitFirstState(c, "error", 5000, "#retry-widget");
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const result = await bidi.evaluateJSON(c, `(()=>{const w=window.__retry;return {calls:w.calls,state:EpoCHA.state(w.id),token:EpoCHA.getResponse(w.id),field:document.querySelector('#retry-widget input[type=hidden]').value,successes:w.successes,errors:w.errors};})()`);
+  assert.equal(result.calls, 1);
+  assert.equal(result.state, "error");
+  assert.equal(result.token, "");
+  assert.equal(result.field, "");
+  assert.deepEqual(result.successes, []);
+  assert.deepEqual(result.errors, ["challenge-unavailable"]);
+});
+
+test(caseTitle("widget.expiry-clears-response"), async () => {
   const c = await openPage(TTL_URL);
   await waitFirstState(c, "ready");
   // 这个演示站点的 response_ttl_sec=2（服务端权威），所以客户端必须在 2 秒后自己作废。

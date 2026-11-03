@@ -115,6 +115,305 @@ func TestPoolEmptyDoesNotCreateChallenge(t *testing.T) {
 	}
 }
 
+func TestClaimRequiresStrictlyLongerQuestionLifetime(t *testing.T) {
+	d := newDB(t)
+	site := questionSite(t, d, "strict-expiry")
+	base := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	challengeExpiry := base.Add(time.Hour)
+	for id, expiry := range map[string]time.Time{
+		"equal-expiry":  challengeExpiry,
+		"longer-expiry": challengeExpiry.Add(time.Nanosecond),
+	} {
+		q := &PoolQuestion{
+			ID: id, GeneratorID: testSpec.GeneratorID, Version: testSpec.Version, Difficulty: testSpec.Difficulty,
+			Status: PoolReady, PayloadJSON: `{"task":"1 + 1","answer_type":"integer","max_answer_len":14}`,
+			Verifier: []byte("private-verifier"), CreatedAt: base, ExpiresAt: expiry,
+		}
+		if err := d.InsertQuestion(t.Context(), q, poolLimits(10)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := &Challenge{
+		ID: "strict-expiry-challenge", SiteID: site.ID, PowSeed: []byte("0123456789abcdef"), PowBits: 12,
+		CreatedAt: base, ExpiresAt: challengeExpiry,
+	}
+	claimed, err := d.IssueChallengeWithQuestion(t.Context(), c, testCaps, &testSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.ID != "longer-expiry" {
+		t.Fatalf("expires_at 必须严格大于 challenge.expires_at；领取到 %q", claimed.ID)
+	}
+	if n, err := d.ReadyCount(t.Context(), testSpec, challengeExpiry); err != nil || n != 0 {
+		t.Fatalf("expires_at 恰好等于阈值时不应计入可领供给：ready=%d err=%v", n, err)
+	}
+}
+
+func TestRedeemAtExpiryRejectsBothAnswers(t *testing.T) {
+	for _, correct := range []bool{false, true} {
+		name := "wrong"
+		if correct {
+			name = "correct"
+		}
+		t.Run(name, func(t *testing.T) {
+			d := newDB(t)
+			site := questionSite(t, d, "expiry")
+			seedQuestions(t, d, testSpec, 1, 3*time.Hour)
+			c := newChallengeRow(site.ID, time.Minute)
+			if _, err := d.IssueChallengeWithQuestion(t.Context(), c, testCaps, &testSpec); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.RedeemAttempt(t.Context(), c.ID, c.ExpiresAt, time.Minute, correct); !errors.Is(err, ErrNotRedeemable) {
+				t.Fatalf("expires_at==now 不可兑换，correct=%v err=%v", correct, err)
+			}
+			got, err := d.Challenge(t.Context(), c.ID)
+			if err != nil || got.Attempts != 0 || got.Status != statusIssued {
+				t.Fatalf("过期兑换不得改变账本：challenge=%+v err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestQuestionBucketsUsesEnabledTTL(t *testing.T) {
+	d := newDB(t)
+	for _, tc := range []struct {
+		name       string
+		difficulty int
+		ttl        time.Duration
+		enabled    bool
+		mode       string
+	}{
+		{"short", 2, 3 * time.Minute, true, ModePowQuestion},
+		{"long", 2, time.Hour, true, ModePowQuestion},
+		{"other-difficulty", 3, 5 * time.Minute, true, ModePowQuestion},
+		{"disabled", 3, time.Hour, false, ModePowQuestion},
+		{"pow-only", 3, time.Hour, true, ModePowOnly},
+	} {
+		site, _, err := d.CreateSite(t.Context(), tc.name, "sk-"+tc.name, SitePolicy{
+			PowBits: 12, VerifyMode: tc.mode, GeneratorID: testSpec.GeneratorID,
+			Difficulty: tc.difficulty, ChallengeTTL: tc.ttl,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !tc.enabled {
+			if _, err := d.SetSiteEnabled(t.Context(), site.ID, false); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	buckets, err := d.QuestionBuckets(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 2 {
+		t.Fatalf("expected two enabled question buckets, got %+v", buckets)
+	}
+	for _, b := range buckets {
+		want := time.Hour
+		if b.Difficulty == 3 {
+			want = 5 * time.Minute
+		}
+		if b.GeneratorID != testSpec.GeneratorID || b.MaxChallengeTTL != want {
+			t.Fatalf("bucket max TTL includes inactive or unrelated policy: %+v want=%v", b, want)
+		}
+	}
+}
+
+func TestDiscardAgedReadyIsBoundedAndKeepsBindings(t *testing.T) {
+	d := newDB(t)
+	site := questionSite(t, d, "discard")
+	seedQuestions(t, d, testSpec, 502, time.Hour)
+	c := newChallengeRow(site.ID, time.Minute)
+	if _, err := d.IssueChallengeWithQuestion(t.Context(), c, testCaps, &testSpec); err != nil {
+		t.Fatal(err)
+	}
+	threshold := c.CreatedAt.Add(2 * time.Hour)
+	if n, err := d.DiscardAgedReady(t.Context(), testSpec, threshold); err != nil || n != 500 {
+		t.Fatalf("first discard must be capped at 500: n=%d err=%v", n, err)
+	}
+	if n, err := d.DiscardAgedReady(t.Context(), testSpec, threshold); err != nil || n != 1 {
+		t.Fatalf("second discard must remove only last ready row: n=%d err=%v", n, err)
+	}
+	if q, err := d.QuestionForChallenge(t.Context(), c.ID); err != nil || q.Status != PoolAssigned {
+		t.Fatalf("discard must never remove an assigned binding: q=%+v err=%v", q, err)
+	}
+	if _, err := d.RedeemAttempt(t.Context(), c.ID, c.CreatedAt, time.Minute, true); err != nil {
+		t.Fatalf("preserved binding must remain redeemable: %v", err)
+	}
+}
+
+func TestPurgeRemovesTerminalRowsInBatchesOf500(t *testing.T) {
+	d := newDB(t)
+	now := time.Now().UTC()
+	for i := 0; i < 501; i++ {
+		id := "terminal-batch-" + randSuffix()
+		_, err := d.h.ExecContext(t.Context(), `
+INSERT INTO pool(id, generator_id, version, difficulty, status, payload_json, verifier_blob,
+                 created_at, expires_at)
+VALUES(?,?,?,?,'terminal','{}',x'01',?,?)`, id, testSpec.GeneratorID, testSpec.Version,
+			testSpec.Difficulty, formatTime(now), formatTime(now.Add(time.Hour)))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := d.Purge(t.Context(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Pool != purgeBatchRows {
+		t.Fatalf("单轮终态清理必须保留 %d 行批次上限，got %d", purgeBatchRows, first.Pool)
+	}
+	if n, err := d.PoolCount(t.Context()); err != nil || n != 1 {
+		t.Fatalf("第一轮后应留 1 行，got %d err=%v", n, err)
+	}
+	second, err := d.Purge(t.Context(), now)
+	if err != nil || second.Pool != 1 {
+		t.Fatalf("第二轮应清除余下终态行，counts=%+v err=%v", second, err)
+	}
+}
+
+func TestPurgeAndRedeemRaceKeepsLiveAttempt(t *testing.T) {
+	for _, correct := range []bool{false, true} {
+		name := "wrong"
+		if correct {
+			name = "correct"
+		}
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "live-race.db")
+			a, _ := newDBAt(t, path)
+			site := questionSite(t, a, "live-race")
+			seedQuestions(t, a, testSpec, 1, 3*time.Hour)
+			c := newChallengeRow(site.ID, time.Hour)
+			if _, err := a.IssueChallengeWithQuestion(t.Context(), c, testCaps, &testSpec); err != nil {
+				t.Fatal(err)
+			}
+			b, err := Open(t.Context(), path, testPepper())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = b.Close() })
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			var result *RedeemResult
+			var redeemErr, purgeErr error
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				<-start
+				result, redeemErr = b.RedeemAttempt(t.Context(), c.ID, c.CreatedAt, time.Hour, correct)
+			}()
+			go func() {
+				defer wg.Done()
+				<-start
+				_, purgeErr = a.Purge(t.Context(), c.CreatedAt)
+			}()
+			close(start)
+			wg.Wait()
+			if purgeErr != nil {
+				t.Fatal(purgeErr)
+			}
+			if redeemErr != nil {
+				var sqliteErr interface{ Code() int }
+				if !errors.As(redeemErr, &sqliteErr) || sqliteErr.Code()&255 != 5 {
+					t.Fatalf("live attempt cannot be lost to purge: %v", redeemErr)
+				}
+				got, err := a.Challenge(t.Context(), c.ID)
+				if err != nil || got.Status != statusIssued || got.Attempts != 0 {
+					t.Fatalf("SQLITE_BUSY must roll back challenge: c=%+v err=%v", got, err)
+				}
+				q, err := a.QuestionForChallenge(t.Context(), c.ID)
+				if err != nil || q.Status != PoolAssigned {
+					t.Fatalf("live binding lost: q=%+v err=%v", q, err)
+				}
+				result, redeemErr = a.RedeemAttempt(t.Context(), c.ID, c.CreatedAt, time.Hour, correct)
+				if redeemErr != nil {
+					t.Fatalf("retry after whole-transaction rollback: %v", redeemErr)
+				}
+			}
+			if result == nil || (correct && (result.Outcome != OutcomeIssued || result.Response == nil)) || (!correct && result.Outcome != OutcomeWrongAnswer) {
+				t.Fatalf("live result=%+v correct=%v", result, correct)
+			}
+			if _, err := a.Purge(t.Context(), c.CreatedAt); err != nil {
+				t.Fatal(err)
+			}
+			if countPoolByChallenge(t, a, c.ID) != 0 {
+				t.Fatal("terminal resources were not reclaimed")
+			}
+			if correct {
+				if _, err := a.ConsumeResponse(t.Context(), result.Response.ID, site.ID, c.CreatedAt); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := a.RedeemAttempt(t.Context(), c.ID, c.CreatedAt, time.Hour, true); !errors.Is(err, ErrNotRedeemable) {
+				t.Fatalf("purge revived terminal challenge: %v", err)
+			}
+		})
+	}
+}
+
+func TestPurgeAndRedeemRaceDoesNotReviveExpiredChallenge(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "epocha.db")
+	a, _ := newDBAt(t, path)
+	site := questionSite(t, a, "race")
+	seedQuestions(t, a, testSpec, 1, 3*time.Hour)
+	c := newChallengeRow(site.ID, time.Second)
+	if _, err := a.IssueChallengeWithQuestion(t.Context(), c, testCaps, &testSpec); err != nil {
+		t.Fatal(err)
+	}
+	b, err := Open(t.Context(), path, testPepper())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var redeemResult *RedeemResult
+	var redeemErr, purgeErr error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		redeemResult, redeemErr = b.RedeemAttempt(t.Context(), c.ID, c.ExpiresAt.Add(-time.Nanosecond), time.Hour, true)
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		_, purgeErr = a.Purge(t.Context(), c.ExpiresAt)
+	}()
+	close(start)
+	wg.Wait()
+	if purgeErr != nil {
+		t.Fatalf("并发 Purge: %v", purgeErr)
+	}
+	var sqliteErr interface{ Code() int }
+	busy := errors.As(redeemErr, &sqliteErr) && sqliteErr.Code()&255 == 5
+	if redeemErr != nil && !errors.Is(redeemErr, ErrNotRedeemable) && !busy {
+		t.Fatalf("并发兑换必须成功、不可兑换或因旧快照 SQLITE_BUSY 整笔回滚，got %v", redeemErr)
+	}
+	if countPoolByChallenge(t, a, c.ID) != 0 {
+		t.Fatal("过期 challenge 竞态后仍残留绑定题")
+	}
+	var responses int
+	if err := a.h.QueryRowContext(t.Context(), `SELECT count(*) FROM responses WHERE challenge_id=?`, c.ID).Scan(&responses); err != nil {
+		t.Fatal(err)
+	}
+	if redeemErr == nil {
+		if redeemResult == nil || redeemResult.Outcome != OutcomeIssued || responses != 1 {
+			t.Fatalf("兑换成功时必须恰有一条 response: result=%+v responses=%d", redeemResult, responses)
+		}
+		if _, err := a.ConsumeResponse(t.Context(), redeemResult.Response.ID, site.ID, c.ExpiresAt); err != nil {
+			t.Fatalf("清理不得破坏仍有效的 response: %v", err)
+		}
+	} else if responses != 0 {
+		t.Fatalf("兑换被清理先完成拒绝时不应有 response，got %d", responses)
+	}
+	if _, err := a.Challenge(t.Context(), c.ID); redeemErr != nil && !errors.Is(err, ErrNotFound) {
+		t.Fatalf("清理先完成时过期 challenge 应移除，got %v", err)
+	}
+}
+
 // TestAssignedNeverReturnsToReady 不变量 #2：领取后无论答案对错都不回池。
 func TestAssignedNeverReturnsToReady(t *testing.T) {
 	d := newDB(t)

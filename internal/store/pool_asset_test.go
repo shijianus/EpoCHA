@@ -262,6 +262,236 @@ func TestPurgeReleasesImageBytes(t *testing.T) {
 	}
 }
 
+func TestPurgeReclaimsExpiredAssignedImageBudget(t *testing.T) {
+	d := newDB(t)
+	site := questionSite(t, d, "abandoned-image")
+	base := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	q := imageQuestion("abandoned-image", pngOf(MaxAssetBytes))
+	q.CreatedAt, q.ExpiresAt = base, base.Add(4200*time.Second)
+	limits := PoolLimits{MaxRows: 1, MaxImageBytes: MaxAssetBytes}
+	if err := d.InsertQuestion(t.Context(), q, limits); err != nil {
+		t.Fatal(err)
+	}
+	spec := q.Spec()
+	c := newChallengeRow(site.ID, time.Minute)
+	c.CreatedAt, c.ExpiresAt = base, base.Add(time.Minute)
+	if _, err := d.IssueChallengeWithQuestion(t.Context(), c, testCaps, &spec); err != nil {
+		t.Fatal(err)
+	}
+	if counts, err := d.Purge(t.Context(), c.ExpiresAt.Add(-time.Nanosecond)); err != nil || counts.Pool != 0 {
+		t.Fatalf("过期前 1ns 必须保留有效绑定，counts=%+v err=%v", counts, err)
+	}
+	if v, err := d.QuestionVerifierForChallenge(t.Context(), c.ID); err != nil || !bytes.Equal(v, q.Verifier) {
+		t.Fatalf("有效作答的 verifier 必须保留，err=%v", err)
+	}
+	counts, err := d.Purge(t.Context(), c.ExpiresAt.In(time.FixedZone("UTC+8", 8*3600)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Pool != 1 || counts.Challenges != 1 {
+		t.Fatalf("恰好到期的 abandoned assigned 必须释放题与账本，counts=%+v", counts)
+	}
+	if used, err := d.ImageAssetBytes(t.Context()); err != nil || used != 0 {
+		t.Fatalf("已过期绑定仍占图片预算：bytes=%d err=%v", used, err)
+	}
+	if _, err := d.QuestionVerifierForChallenge(t.Context(), c.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("清理须释放 verifier，got %v", err)
+	}
+	for _, clock := range []time.Time{base, c.ExpiresAt} {
+		if _, err := d.RedeemAttempt(t.Context(), c.ID, clock, time.Minute, true); !errors.Is(err, ErrNotRedeemable) {
+			t.Fatalf("已移除的旧 challenge 不得因时钟回退复活，got %v", err)
+		}
+	}
+	fresh := imageQuestion("fresh-after-abandon", pngOf(MaxAssetBytes))
+	fresh.CreatedAt, fresh.ExpiresAt = c.ExpiresAt, c.ExpiresAt.Add(4200*time.Second)
+	if err := d.InsertQuestion(t.Context(), fresh, limits); err != nil {
+		t.Fatalf("回收后必须能用同一行数/图片预算插入新题：%v", err)
+	}
+	next := newChallengeRow(site.ID, time.Minute)
+	next.CreatedAt, next.ExpiresAt = c.ExpiresAt, c.ExpiresAt.Add(time.Minute)
+	claimed, err := d.IssueChallengeWithQuestion(t.Context(), next, testCaps, &spec)
+	if err != nil || claimed.ID != fresh.ID {
+		t.Fatalf("预算恢复必须领到新题，不能让旧题回池：q=%+v err=%v", claimed, err)
+	}
+}
+
+func TestPurgeAssignedBatchBudgetSurvivesReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "assigned-batch.db")
+	d, _ := newDBAt(t, path)
+	site := questionSite(t, d, "assigned-batch")
+	base := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	const rows, assetSize = 501, 128
+	tx, err := d.h.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for i := 0; i < rows; i++ {
+		cid, qid := fmt.Sprintf("abandoned-%d", i), fmt.Sprintf("image-%d", i)
+		if _, err := tx.ExecContext(t.Context(), `
+INSERT INTO challenges(id, site_id, pow_seed, pow_bits, status, created_at, expires_at, mode, generator_id)
+VALUES(?,?,x'01020304',12,'issued',?,?,'pow_question','text-image-v1')`,
+			cid, site.ID, formatTime(base), formatTime(base.Add(time.Minute))); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.ExecContext(t.Context(), `
+INSERT INTO pool(id, generator_id, version, difficulty, status, payload_json, verifier_blob,
+                 created_at, expires_at, challenge_id, assigned_at, asset_blob, asset_mime)
+VALUES(?,'text-image-v1','v1',2,'assigned','{}',x'01',?,?,?,?,?,'image/png')`,
+			qid, formatTime(base), formatTime(base.Add(4200*time.Second)), cid, formatTime(base), pngOf(assetSize)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []int64{500, 1} {
+		counts, err := d.Purge(t.Context(), base.Add(time.Minute))
+		if err != nil || counts.Pool != want || counts.Challenges != want {
+			t.Fatalf("batch %d: counts=%+v want=%d err=%v", i, counts, want, err)
+		}
+		remaining := int64(rows-500) * assetSize
+		if i == 1 {
+			remaining = 0
+		}
+		if used, err := d.ImageAssetBytes(t.Context()); err != nil || used != remaining {
+			t.Fatalf("batch %d budget=%d want=%d err=%v", i, used, remaining, err)
+		}
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, _ := newDBAt(t, path)
+	if _, err := reopened.RedeemAttempt(t.Context(), "abandoned-0", base, time.Minute, true); !errors.Is(err, ErrNotRedeemable) {
+		t.Fatalf("reopen and clock rollback revived old challenge: %v", err)
+	}
+	q := imageQuestion("after-batch", pngOf(assetSize))
+	q.CreatedAt, q.ExpiresAt = base.Add(time.Minute), base.Add(time.Hour)
+	if err := reopened.InsertQuestion(t.Context(), q, PoolLimits{MaxRows: 1, MaxImageBytes: assetSize}); err != nil {
+		t.Fatalf("reclaimed capacity must be reusable after restart: %v", err)
+	}
+}
+
+func TestPurgeRollbackPreservesBindingAndBudget(t *testing.T) {
+	d := newDB(t)
+	site := questionSite(t, d, "purge-rollback")
+	base := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	q := imageQuestion("rollback-image", pngOf(1024))
+	q.CreatedAt, q.ExpiresAt = base, base.Add(4200*time.Second)
+	if err := d.InsertQuestion(t.Context(), q, poolLimits(10)); err != nil {
+		t.Fatal(err)
+	}
+	c := newChallengeRow(site.ID, time.Minute)
+	c.CreatedAt, c.ExpiresAt = base, base.Add(time.Minute)
+	spec := q.Spec()
+	if _, err := d.IssueChallengeWithQuestion(t.Context(), c, testCaps, &spec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.h.ExecContext(t.Context(), `
+CREATE TRIGGER fail_purge_challenge BEFORE DELETE ON challenges BEGIN
+ SELECT RAISE(ABORT, 'injected purge failure'); END;`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Purge(t.Context(), c.ExpiresAt); err == nil {
+		t.Fatal("injected challenge deletion failure must fail purge")
+	}
+	if used, err := d.ImageAssetBytes(t.Context()); err != nil || used != 1024 {
+		t.Fatalf("failed purge must roll back image deletion: bytes=%d err=%v", used, err)
+	}
+	if got, err := d.QuestionForChallenge(t.Context(), c.ID); err != nil || got.Status != PoolAssigned {
+		t.Fatalf("failed purge must retain assigned binding: q=%+v err=%v", got, err)
+	}
+	if _, err := d.RedeemAttempt(t.Context(), c.ID, c.ExpiresAt, time.Minute, true); !errors.Is(err, ErrNotRedeemable) {
+		t.Fatalf("rollback must not make an expired challenge usable: %v", err)
+	}
+}
+
+func TestPurgeAssignedUsesAuthoritativeChallenge(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		challengeStatus string
+		poolAlreadyAged bool
+		wantRemoved     bool
+	}{
+		{"live", statusIssued, false, false},
+		{"live-with-aged-pool-clock", statusIssued, true, false},
+		{"invalid", statusInvalid, false, true},
+		{"redeemed", statusRedeemed, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newDB(t)
+			site := questionSite(t, d, "authoritative")
+			base := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+			q := imageQuestion("authoritative", pngOf(1024))
+			q.CreatedAt, q.ExpiresAt = base, base.Add(4200*time.Second)
+			if err := d.InsertQuestion(t.Context(), q, poolLimits(10)); err != nil {
+				t.Fatal(err)
+			}
+			c := newChallengeRow(site.ID, time.Hour)
+			c.CreatedAt, c.ExpiresAt = base, base.Add(time.Hour)
+			spec := q.Spec()
+			if _, err := d.IssueChallengeWithQuestion(t.Context(), c, testCaps, &spec); err != nil {
+				t.Fatal(err)
+			}
+			if tc.challengeStatus != statusIssued {
+				if _, err := d.h.ExecContext(t.Context(), `UPDATE challenges SET status=? WHERE id=?`, tc.challengeStatus, c.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.poolAlreadyAged {
+				if _, err := d.h.ExecContext(t.Context(), `UPDATE pool SET expires_at=? WHERE id=?`, formatTime(base.Add(-time.Second)), q.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			counts, err := d.Purge(t.Context(), base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (counts.Pool == 1) != tc.wantRemoved {
+				t.Fatalf("assigned 资源须按权威 challenge 存活性处理：counts=%+v remove=%v", counts, tc.wantRemoved)
+			}
+			if !tc.wantRemoved {
+				if _, err := d.QuestionVerifierForChallenge(t.Context(), c.ID); err != nil {
+					t.Fatalf("有效 challenge 的 verifier 被移除：%v", err)
+				}
+				if _, err := d.RedeemAttempt(t.Context(), c.ID, base, time.Minute, true); err != nil {
+					t.Fatalf("保留的有效作答必须能兑换：%v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestPurgeExpiryIsInclusiveForReadyAndResponses(t *testing.T) {
+	d := newDB(t)
+	site := questionSite(t, d, "inclusive")
+	base := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	q := imageQuestion("ready-at-now", pngOf(1024))
+	q.CreatedAt, q.ExpiresAt = base.Add(-time.Hour), base
+	if err := d.InsertQuestion(t.Context(), q, poolLimits(10)); err != nil {
+		t.Fatal(err)
+	}
+	c := newChallengeRow(site.ID, time.Minute)
+	c.CreatedAt, c.ExpiresAt = base.Add(-time.Minute), base
+	if err := d.InsertChallenge(t.Context(), c, testCaps); err != nil {
+		t.Fatal(err)
+	}
+	r, err := d.Redeem(t.Context(), c.ID, base.Add(-time.Second), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts, err := d.Purge(t.Context(), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Pool != 1 || counts.Responses != 1 || counts.Challenges != 1 {
+		t.Fatalf("expires_at==now 已不可消费，应同轮释放：%+v", counts)
+	}
+	if _, err := d.ConsumeResponse(t.Context(), r.ID, site.ID, base.Add(-time.Nanosecond)); !errors.Is(err, ErrConsumed) {
+		t.Fatalf("清理后的 response 不得因时钟回退重新消费，got %v", err)
+	}
+}
+
 // TestMigration0004FromStage3ADatabase 拿一个**只有 0001..0003** 的库让当前程序打开：
 // 0004 必须是纯增量（旧行 asset 为 NULL、旧流程不变），而不是"重建表"。
 func TestMigration0004FromStage3ADatabase(t *testing.T) {
@@ -336,9 +566,11 @@ VALUES('legacy-1','arithmetic-baseline-v1','v1',3,'ready','{"task":"1 + 1","answ
 		t.Fatalf("旧题兑换失败: %v %+v", err, res)
 	}
 	// 二次打开不再改动版本（迁移幂等）
-	if _, err := Open(ctx, path, testPepper()); err != nil {
+	reopened, err := Open(ctx, path, testPepper())
+	if err != nil {
 		t.Fatalf("重复打开失败: %v", err)
 	}
+	t.Cleanup(func() { _ = reopened.Close() })
 }
 
 // TestInsertLimitsValidated 上限参数本身也要有界：

@@ -70,24 +70,27 @@ avail_kb_of() { df -Pk "$(anchor_of "$1")" 2>/dev/null | awk 'NR==2{print $4}'; 
 # 目录块：只 stat。writable 用 test -w，不创建文件（这就是只读边界）；
 # 已知偏差：ACL 或只读挂载下 test -w 可能偏乐观，所以 fstype/mount 一起给出让人核对。
 dir_block() {
-  local d="$1" exists=false owner="" mode="" writable=false fs="" mnt="" note="" anchor
+  local field="$1" d="$2" exists=false owner="" mode="" writable=false fs="" mnt="" note="" anchor avail block
   anchor="$(anchor_of "$d")"
   if [[ -d "$d" ]]; then
     exists=true
     owner="$(stat -c '%u:%g' "$d" 2>/dev/null || echo unknown)"
     mode="$(stat -c '%a' "$d" 2>/dev/null || echo unknown)"
     [[ -w "$d" ]] && writable=true
-    if [[ "$owner" != "$(id -u):$(id -g)" && "$writable" != true ]]; then
-      note="属主 $owner 与当前用户不同且不可写 ⇒ 服务或离线运维会拿到 ErrLockAccess（身份不对），而不是 ErrLockHeld（被占用）"
+    if [[ "$writable" != true ]]; then
+      note="目录对当前用户不可写（属主 $owner）⇒ 服务或离线运维可能拿到 ErrLockAccess（权限问题），而不是 ErrLockHeld（被占用）"
       warn "[$d] $note（见 DEPLOYMENT §5.5）"
     fi
   else
     note="不存在。首次部署要由运维按 DEPLOYMENT §2 创建；本脚本不创建、不 chown"
   fi
   fs="$(fs_of "$d")"; mnt="$(mount_of "$d")"
-  printf '{"path":"%s","exists":%s,"owner":"%s","mode":"%s","writable_by_runner":%s,"fstype":"%s","mount":"%s","avail_kb":%s,"space_measured_on":"%s","note":"%s"}' \
+  avail="$(avail_kb_of "$d")"
+  [[ "$avail" =~ ^[0-9]+$ ]] || avail=null
+  printf -v block '{"path":"%s","exists":%s,"owner":"%s","mode":"%s","writable_by_runner":%s,"fstype":"%s","mount":"%s","avail_kb":%s,"space_measured_on":"%s","note":"%s"}' \
     "$(esc "$d")" "$exists" "$(esc "${owner:-unknown}")" "$(esc "${mode:-unknown}")" "$writable" \
-    "$(esc "${fs:-unknown}")" "$(esc "${mnt:-unknown}")" "$(avail_kb_of "$d")" "$(esc "$anchor")" "$(esc "$note")"
+    "$(esc "${fs:-unknown}")" "$(esc "${mnt:-unknown}")" "$avail" "$(esc "$anchor")" "$(esc "$note")"
+  f_raw "$field" "$block"
 }
 
 # ---------- 机器与身份 ----------
@@ -121,9 +124,10 @@ if [[ "$RUN_UID" != "0" ]]; then
 fi
 
 # ---------- 三个目录 ----------
-f_raw data_dir   "$(dir_block "$DATA_DIR")"
-f_raw keys_dir   "$(dir_block "$KEYS_DIR")"
-f_raw backup_dir "$(dir_block "$BACKUP_DIR")"
+# 告警与字段必须在主 shell 汇总；命令替换会丢掉子 shell 对 WARNS 的追加。
+dir_block data_dir   "$DATA_DIR"
+dir_block keys_dir   "$KEYS_DIR"
+dir_block backup_dir "$BACKUP_DIR"
 [[ "$DATA_DIR" == "$BACKUP_DIR" ]] && warn "数据目录与备份目录同路径：一次误删同时带走库与备份，而且恢复没法在隔离目录做（BACKUP-RESTORE §5 第 2 步）。"
 if [[ "$KEYS_DIR" == "$DATA_DIR" ]]; then
   warn "密钥目录与数据目录同路径：pepper 与库同处一地会让摘要保护直接归零（DESIGN §6）。"
@@ -191,14 +195,21 @@ for p in $PORTS; do
   [[ "$p" =~ ^[0-9]{1,5}$ ]] || { warn "忽略非法端口写法：$p"; continue; }
   st=unknown
   case "$LISTENER_TOOL" in
-    ss) o="$(ss -ltn "sport = :$p" 2>/dev/null || true)"
-        # 有第二行才算在监听：空输出与"只有表头"都是空闲
-        if [[ "$o" == *$'\n'* ]]; then st=occupied; else st=free; fi ;;
-    netstat) if netstat -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$p\$"; then st=occupied; else st=free; fi ;;
+    ss) if o="$(ss -H -ltn "sport = :$p" 2>/dev/null)"; then
+          # -H 去表头。只有成功的空结果才证明本次没有监听；非零出口保持 unknown。
+          if [[ -n "$o" ]]; then st=occupied; else st=free; fi
+        fi ;;
+    netstat) if o="$(netstat -ltn 2>/dev/null)"; then
+          if state="$(awk -v p="$p" '$1 ~ /^tcp/ && $4 ~ ("[:.]" p "$") {found=1} END {print found ? "occupied" : "free"}' <<<"$o")"; then
+            st="$state"
+          fi
+        fi ;;
     proc_net_tcp) hp="$(printf '%04X' "$p")"
-        if awk -v h="$hp" '$4=="0A"{n=split($2,a,":"); if (a[n]==h) {print "y"; exit}}' /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -q y; then
-          st=occupied; else st=free; fi ;;
+        if state="$(awk -v h="$hp" '$4=="0A"{n=split($2,a,":"); if (a[n]==h) found=1} END {print found ? "occupied" : "free"}' /proc/net/tcp /proc/net/tcp6 2>/dev/null)"; then
+          st="$state"
+        fi ;;
   esac
+  [[ "$st" == unknown ]] && warn "端口 $p 探测失败或不可用（$LISTENER_TOOL）⇒ unknown；不能当成空闲。"
   [[ $first -eq 1 ]] && first=0 || ports_json+=","
   ports_json+="{\"port\":$p,\"state\":\"$st\"}"
   if [[ "$st" == occupied ]]; then

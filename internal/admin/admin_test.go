@@ -745,6 +745,7 @@ func (x *h) closeDB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = db.Close() })
 	x.db = db
 }
 

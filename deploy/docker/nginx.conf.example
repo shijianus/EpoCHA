@@ -9,8 +9,11 @@
 #   - 不缓存三个动态端点（一次性的 challenge/redeem/siteverify 被缓存等于把一次性语义变成可重放）。
 #   - widget 静态资源沿用**后端自己给的** Cache-Control（web/widget/widget.go: `public, max-age=3600`）。
 #     这里不覆盖成 immutable：同一 URL 的内容在小版本里会变，immutable 会让修复发不出去。
-#   - 访问日志只记 `$uri`，不记 query、不记体。token/secret 在体里，但接入方手测时常把它们放进 query；
-#     少记一层比"配一个正则去掩码"更难写错。
+#   - 两个入口都显式选择安全日志，不继承宿主 combined：访问日志只记路径/状态/时延，
+#     不记 query、体或任意请求头；客户端字段也可能夹带凭据，不能保留 User-Agent/Referer。
+#   - Nginx 原生 error_log 不能按 log_format 去掉 request URI，错误文本可能带 query；
+#     两个 server 都丢弃这类日志，代价是失去请求级错误详情，排障看状态/时延与后端白名单日志。
+#     主配置、默认站点、容器 stdout/stderr 等其他日志载体仍须实际用哨兵检查（DEPLOYMENT §6）。
 #   - X-Forwarded-For 由本模板**覆写**为真实对端地址，客户端自写的 XFF 直接丢弃。
 #   - CF-Connecting-IP 默认**不转发**；只有显式启用 Cloudflare 段才打开那一段。
 
@@ -24,13 +27,15 @@ upstream epocha_backend {
 
 # --- 访问日志：只记路径，不记 query/体/头 ---
 log_format epocha_access '$remote_addr - [$time_local] "$request_method" $uri '
-                         '$status $body_bytes_sent rt=$request_time '
-                         '"$http_user_agent"';
+                         '$status $body_bytes_sent rt=$request_time';
 
 server {
     listen 80;
     listen [::]:80;
     server_name captcha.example.com;
+
+    access_log /var/log/nginx/epocha.access.log epocha_access;
+    error_log  /dev/null crit;
 
     # 80 只做跳转。TLS 证书签发与公网 DNS 不在阶段 5A 范围内（docs/DEPLOYMENT.md §7 明确标注）。
     location /.well-known/acme-challenge/ { root /var/www/certbot; }
@@ -52,7 +57,7 @@ server {
     ssl_session_timeout 1h;
 
     access_log /var/log/nginx/epocha.access.log epocha_access;
-    error_log  /var/log/nginx/epocha.error.log warn;
+    error_log  /dev/null crit;
 
     # --- 请求体与超时（红线 6：所有输入有上限）---
     # 8k：/api/redeem 的体 = token(≤4096B) + 答案(≤64B)，/siteverify 的体 = secret(68B) + response(≤4096B)。

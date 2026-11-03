@@ -98,7 +98,7 @@ func New(cfg *config.Config, db *store.DB, signer *token.Signer, gens *generator
 	return &Server{
 		db: db, signer: signer, gens: gens, src: src, ipLimit: ipLimit, siteLimit: siteLimit,
 		log: log, now: time.Now,
-		caps: store.Caps{MaxActive: cfg.MaxActiveChallenges, MaxActivePerSite: cfg.MaxActivePerSite},
+		caps: store.Caps{MaxTotal: cfg.MaxLedgerRows, MaxActive: cfg.MaxActiveChallenges, MaxActivePerSite: cfg.MaxActivePerSite},
 	}, nil
 }
 

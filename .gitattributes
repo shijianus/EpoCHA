@@ -1,0 +1,24 @@
+# Keep executable/test bytes stable on every checkout, independent of user Git settings.
+* text=auto eol=lf
+
+# Binary assets must never undergo newline conversion.
+*.png -text
+*.jpg -text
+*.jpeg -text
+*.gif -text
+*.webp -text
+*.ico -text
+*.pdf -text
+*.ttf -text
+*.otf -text
+*.woff -text
+*.woff2 -text
+*.gz -text
+*.tar -text
+*.zip -text
+*.7z -text
+*.exe -text
+*.test -text
+*.db -text
+*.db-wal -text
+*.db-shm -text

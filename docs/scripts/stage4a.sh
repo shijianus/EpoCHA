@@ -36,6 +36,7 @@ STEP=0
 N_PASS=0
 N_BLOCKED=0
 N_NOTRUN=0
+MANUAL_RC=0
 RUST_LOG_TARGET="$WORK/epocha.log"
 BIDI_PORT="${EPOCHA_BIDI_PORT:-9333}"
 # 浏览器必需验收是否**真实执行过**。没执行过就不能把整轮当通过——脚本开头写的退出码契约
@@ -54,6 +55,16 @@ fail() {
     tail -n 40 "$f" >&2 || true
   done
   exit 1
+}
+manual_result() {
+  local check_id="$1" label="$2" rc=0
+  node "$ROOT/docs/scripts/manual-evidence.mjs" --root "$ROOT" --check "$check_id" || rc=$?
+  case "$rc" in
+    0) pass "$label（人工证据已核验：$check_id）" ;;
+    3) notrun "$label（缺少本源码快照的人工证据：$check_id）" ;;
+    *) fail "$label（人工证据无效，退出码 $rc：$check_id）" ;;
+  esac
+  return "$rc"
 }
 cleanup() {
   local rc=$?
@@ -331,73 +342,18 @@ else
     HARD_SITE_KEY="$HARD_KEY" SLOW_SITE_KEY="$SLOW_KEY" \
     EXAMPLE_WORKERFILE_URL="http://127.0.0.1:8393/" EXAMPLE_HARD_URL="http://127.0.0.1:8394/" \
     EXAMPLE_TTL_URL="http://127.0.0.1:8396/" TTL_SITE_KEY="pk_stage4a_ttl" \
-      node --test docs/scripts/browser/widget_browser.test.mjs 2>&1 | tee "$WORK/browser.log"
+      node --test --test-reporter=tap docs/scripts/browser/widget_browser.test.mjs 2>&1 | tee "$WORK/browser.log"
     browser_rc=${PIPESTATUS[0]}
     set -e
     [[ $browser_rc -eq 0 ]] || { tail -n 40 "$WORK/browser.log"; fail "浏览器交互验收未通过（node --test 退出码 $browser_rc）"; }
 
-    # node:test 的 skip 是"这条没执行"，不是"这条过了"。这里**逐项核对跳过了什么**：
-    # 原先只判断"有没有 skip"，然后把任何一条都当成 375px 那一项——于是"高难度取消"
-    # "方案 B 同源 worker 文件""过期清空 token"这三条必需交互只要没跑，门禁照样绿。
-    SKIP_COUNT="$(awk '/^# skipped /{print $3}' "$WORK/browser.log")" || SKIP_COUNT=0
-    PASS_COUNT="$(awk '/^# pass /{print $3}' "$WORK/browser.log")" || PASS_COUNT=0
-    SKIP_COUNT="${SKIP_COUNT:-0}"; PASS_COUNT="${PASS_COUNT:-0}"
-    case "$SKIP_COUNT$PASS_COUNT" in (*[!0-9]*|'') fail "读不到 node:test 的 pass/skipped 计数（报告格式变了？）";; esac
-    [[ $SKIP_COUNT -eq 0 ]] \
-      || fail "浏览器用例跳过 $SKIP_COUNT 项：本文件现在不该有任何 skip（窄屏已由 browsingContext.setViewport 真实执行）"
-
-    # **按身份核对**，不只数条数：数 `^test(` 只能发现"少了几条"，发现不了"关键那条被改名/换成了
-    # 一条更弱但同名的断言"。下面逐条要求它作为**通过项**出现在 TAP 输出里。
-    # 用子串匹配（不是正则）：用例标题里有全角括号与 → 之类，正则化只会带来转义事故。
-    OK_TITLES="$(grep -E '^ok [0-9]+ - ' "$WORK/browser.log" || true)"
-    REQUIRED_TESTS=(
-      "闭环：显示图片 → 输入 → 浏览器内 PoW → redeem → 业务表单 → 服务端写入"
-      "答错即终结：同一题不能重试；换题拿到的是另一道题"
-      "一次性：同一个 token 重复提交必然被服务端拒绝"
-      "多实例隔离 + 隐藏字段：各自领题、各自写字段、销毁不串台"
-      "晚到的旧响应不能覆盖新题（刷新换代）"
-      "reset 与 destroy：清空 token/输入、移除 DOM 与隐藏字段、注销注册表"
-      "计算超时是真实约束：预算到点即明确失败，不去兑换"
-      "高难度站点：取消正在进行的计算不会晚到生效"
-      "CSP 禁止 Worker：明确失败，绝不假装通过"
-      "键盘可完成：Tab 到达输入框与按钮，Enter 提交"
-      "过期时清空 token 与隐藏字段（客户端倒计时跟着服务端的 response_ttl）"
-      "方案 B：同源 worker 文件路径可用（该页 CSP 禁 blob:，能过就说明确实走的是文件）"
-      "页面与组件的请求面：只打 /api/challenge 与 /api/redeem，不带凭据"
-      "窄屏 375×667：视口真的设成 375，布局不溢出、图片比例正确、控件全部可命中"
-      "窄屏 375：真实鼠标点击 + 键盘输入走完验证与业务提交"
-      "窄屏 375：错误文案不撑破布局（CSP 禁 Worker 的档位）"
-      "窄屏 414×896（较宽手机档）回归：无横向溢出、控件可命中、容器不吃满超宽"
-      "文档最小示例 fixture：deferred 脚本顺序确定，init 里 EpoCHA 已定义，字段属于目标 form"
-      "文档最小示例 fixture：FormData 带上 token，原生 form POST 真写入；没验证时同一按钮被服务端拒"
-      "隐藏字段的三种归属：form 外无关联即抛错且不留孤儿字段、显式 form 关联可用、fieldName:'' 不建字段"
-      "fixture：reset 从 FormData 里拿掉 token，destroy 移除字段本身"
-    )
-    MISSING=()
-    for want in "${REQUIRED_TESTS[@]}"; do
-      [[ "$OK_TITLES" == *"$want"* ]] || MISSING+=("$want")
-    done
-    [[ ${#MISSING[@]} -eq 0 ]] || fail "下列必需浏览器交互没有作为通过项出现：${MISSING[*]}"
-
-    # 反向也要成立：文件里新增的用例如果没进必需清单，就会"跑了但没人核对"。
-    # 这条把"清单与用例同步维护"变成门禁要求，而不是靠自觉。
-    while IFS= read -r title; do
-      covered=0
-      for want in "${REQUIRED_TESTS[@]}"; do
-        [[ "$want" == "$title" ]] && covered=1
-      done
-      [[ $covered -eq 1 ]] || fail "用例「$title」存在于测试文件但不在必需清单里：请把它纳入核对"
-    done < <(grep -oP '^test\("\K[^"]+' docs/scripts/browser/widget_browser.test.mjs)
-
-    # 再钉一道总量：文件里声明了几条，pass 就必须是几条（防止"必需项全过、额外项被悄悄删掉"）。
-    DECLARED="$(grep -c '^test(' docs/scripts/browser/widget_browser.test.mjs || true)"
-    DECLARED="${DECLARED:-0}"
-    case "$DECLARED" in (''|*[!0-9]*) fail "读不到浏览器用例的声明条数";; esac
-    [[ $DECLARED -gt 0 ]] || fail "浏览器用例文件里一条 test 都没声明"
-    [[ $PASS_COUNT -eq $DECLARED ]] \
-      || fail "浏览器用例对不上账：声明 $DECLARED 条，实测 pass=$PASS_COUNT skip=$SKIP_COUNT"
-    BROWSER_RAN=1
-    pass "真实浏览器交互断言：${#REQUIRED_TESTS[@]} 条必需用例**逐条按标题**通过，总量对账 $DECLARED 条声明 = $PASS_COUNT pass / $SKIP_COUNT skip（Node 内置 WebSocket + Firefox BiDi，退出码 $browser_rc）"
+    manifest_rc=0
+    node docs/scripts/release-check.mjs --check-browser-manifest docs/scripts/browser/cases.mjs docs/scripts/browser/widget_browser.test.mjs "$WORK/browser.log" || manifest_rc=$?
+    case "$manifest_rc" in
+      0) BROWSER_RAN=1; pass "真实浏览器必需用例全部通过，TAP 与统一 manifest 逐项一致（退出码 $browser_rc）" ;;
+      3) blocked "浏览器必需用例包含 SKIP/TODO/cancelled，本轮验收未完整执行" ;;
+      *) fail "浏览器 manifest 对账失败（退出码 $manifest_rc）" ;;
+    esac
 
     # 题池余量：每个 openPage/refresh 都消耗一道**不同的**受控题，注入上限是 devseed 的 50。
     # 这里实测还剩多少，低于下限就失败 —— 让"用例增加把池吃光"在下一次加用例时暴露，
@@ -499,7 +455,7 @@ log "第十六步：效果类结论（不写 PASS）"
 # 本机有 Docker，OCR 基线由 docs/scripts/ocr/run-baseline.sh 真实执行。
 # 它**不属于本门禁**，所以正确状态是 NOT_RUN（本轮没跑）而不是 BLOCKED（条件不足）。
 notrun "OCR 效果实测：不在本门禁范围内 ⇒ 本轮未执行（由阶段 4B 的 docs/scripts/ocr/run-baseline.sh 跑，结果见 docs/STAGE4B.md）"
-notrun "人工可读性：不在本门禁范围内 ⇒ 本轮未执行（盲测入口见 make blindtest，需真人完成）"
+manual_result "stage4a.human-readability" "人工可读性（盲测入口见 make blindtest，需真人完成）" || MANUAL_RC=$?
 notrun "widget 完整无障碍合规（音频/非视觉等价通道）：本阶段只交付视觉通道，缺口记录在 docs/WIDGET.md"
 
 log "工程项 $N_PASS 项 PASS；BLOCKED $N_BLOCKED；NOT_RUN $N_NOTRUN"
@@ -510,8 +466,12 @@ log "工程项 $N_PASS 项 PASS；BLOCKED $N_BLOCKED；NOT_RUN $N_NOTRUN"
 if [[ $BROWSER_RAN -ne 1 ]]; then
   log "结论口径：本轮**未**取得浏览器交互证据 ⇒ 阶段 4A 浏览器必需验收为 BLOCKED，不声称组件闭环已在浏览器中通过。"
   log "本脚本**不**声称抗 AI/抗 OCR，也**不**等于阶段 4 完成。"
-  printf '[stage4a] 结果: 浏览器必需验收本轮**没有真实执行**（见上面的 BLOCKED）⇒ 退出码 1\n' >&2
-  exit 1
+  printf '[stage4a] 结果: 浏览器必需验收未完整执行（见 BLOCKED）⇒ 退出码 3\n' >&2
+  exit 3
 fi
-log "结论口径：widget 与业务接入的工程闭环 + 真实浏览器交互 = PASS；OCR 效果与人工可读性都不在本门禁内（NOT_RUN）。"
+log "结论口径：widget 与业务接入的工程闭环 + 真实浏览器交互 = PASS；OCR 效果不在本门禁内；人工可读性按证据条目单独判定。"
 log "本脚本**不**声称抗 AI/抗 OCR，也**不**等于阶段 4 完成（正式 widget 的其余项在 4B）。"
+if [[ $MANUAL_RC -ne 0 ]]; then
+  log "人工验收证据未满足，保留 helper 退出码 $MANUAL_RC。"
+  exit "$MANUAL_RC"
+fi

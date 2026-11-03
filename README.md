@@ -1,7 +1,7 @@
 # epocha
 
-自托管人机验证服务：单 Go 二进制 + SQLite，调用契约与 reCAPTCHA 的 `POST /siteverify` 兼容。
-核心防线是**生成式题池**（程序化生成、随机变换、一次性使用、用后即焚），外层是 PoW 成本门槛，最内层是风险打分决策。
+自托管人机验证服务：单 Go 二进制 + SQLite，提供 reCAPTCHA 风格的 `POST /siteverify` 契约；不承诺所有 SDK 的额外字段兼容。
+现有防线为 PoW 成本门槛与一次性生成式题池；风险打分决策尚未实现。
 
 - 设计与决策：`docs/DESIGN.md`（v2.6）；修订理由与历史错误表述：`docs/DECISIONS.md`
 - 工程约定与安全红线：`AGENTS.md`
@@ -22,6 +22,16 @@
 
 ## 状态
 
+下表为历史里程碑，不是 2026-11-02 当前工作树的发布验收。审计后修复的工程检查使用 Go **1.27.3**、Node **24**；正式部署仍限 B 路径 / Linux arm64 / 实测 UID:GID `1000:1000`。新候选必须有固定完整 OID、匹配产物 manifest 与当次验收证据；尚未生成的 freeze OID 不作为部署指令。
+
+```bash
+node --test --test-reporter=tap docs/scripts/release-check.test.mjs
+node docs/scripts/release-check.mjs --profile engineering  # 工程子集，非发布验收
+node docs/scripts/release-check.mjs --profile full         # 直接调用保留 0/1/3；JSON 收据写入 release-artifacts/
+```
+
+full 保留 stage4b/5a/5b/admin-ui 原有最强检查，任何未完成项与脚本 exit 3 都保留。Linux、Docker、Firefox 等条件不足时明确 BLOCKED，不据此改为 PASS。`.github/workflows/ci.yml` 是本轮新增配置，**尚无远端执行证明**；完整验收的独占 Linux runner 仍待配置。准备方法与返回码见 `docs/DEPLOYMENT.md` §11.5。
+
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | 0 | 设计基线 + 目录骨架 + 测试入口 | 完成（tag `stage-0-done`） |
@@ -29,8 +39,8 @@
 | 1 | PoW + token + 持久化防重放 + `/siteverify` 最小闭环 | 完成（tag `stage-1-done`） |
 | 2 | 多站点与 Key 管理 API、来源白名单、站点级配置、审计 | 完成（tag `stage-2-done`） |
 | 3A | 生成器契约 + 有界预生成题池 + 原子领题 + 单次答案提交 + `arithmetic-baseline-v1` | 完成（tag `stage-3a-done`） |
-| 3B | 首个视觉题型 `text-image-v1` + 图片资产入库/内联下发 + 本地预览 + 离线评测脚手架 | 工程闭环完成（tag `stage-3b-done`）；**OCR 与人工可读性未测**，`production_ready:false` |
-| 3C | 题型权重与多生成器选择、风险打分（第三层）、分级淘汰、OCR/人工基线测量 | 未开始 |
+| 3B | 首个视觉题型 `text-image-v1` + 图片资产入库/内联下发 + 本地预览 + 离线评测脚手架 | 工程闭环完成（tag `stage-3b-done`）；**当时** OCR 与人工可读性未测，后续 OCR 历史结果见 4B；`production_ready:false` |
+| 3C | 题型权重与多生成器选择、风险打分（第三层）、分级淘汰、人工基线测量 | 未开始；OCR 固定工具基线已在历史 4B 测量 |
 | 4A | 生产 widget（零依赖原生 JS）+ 示例业务后端 + 真实浏览器闭环验收 | 工程与浏览器闭环完成（tag `stage-4a-done`）；人工项 NOT_RUN |
 | 4B | 接入收尾（表单 fixture + 原生 POST）、真实窄屏视口、离线 OCR 基线、人工盲测入口 | 工程与窄屏完成；**OCR 基线已测出真实数字**（低/中/高档 96%/31%/3%）；人工可读性需真人执行 ⇒ NOT_RUN |
 | 4C | 非视觉等价通道（音频等）、`fallback_base`、人工验收项（题型人工各过 5 次、辅助技术实测） | 未开始 |
@@ -55,7 +65,7 @@ make build          # 单二进制（实测 10.31 MiB，阶段 3B 后；预算 3
 make stage1-check   # 端到端验收：真实暴力求解 PoW，10 项检查
 make check          # fmt-check + vet + go test -race -count=1 + 体积预算
 make stage2-check   # 阶段 2 端到端验收
-make stage5a-check  # 部署包 + 备份恢复 + 容器边界 + 资源演练（退出码 0/1/3）
+make stage5a-check  # 部署包 + 备份恢复 + 容器边界 + 资源演练；脚本 0/1/3，make 只给 0/2
 make stage5b-check  # 运行互斥 + 恢复边界 + 启动配方 + 候选清单 + 5 分钟持续演练（结论只由必需项决定；make 只会报 0 或 2，真码看 RESULT/SCRIPT_RC）
 ```
 
@@ -149,11 +159,8 @@ curl -s http://127.0.0.1:8081/api/admin/pool -H "Authorization: Bearer $EPOCHA_A
 两条边界都在 INSERT 的 SQL 里原子判定），签发时**内联**在 `/api/challenge` 的公开 DTO 里（`image_mime` + `image_base64`），
 **没有可枚举的裸媒体端点**。判分沿用 3A 的 `nonce || HMAC(K_qver, 规范化答案)`，图片渲染与判分完全解耦。
 
-**它是实验性题型，不是"抗 OCR/抗 AI"的结论**：字符在图里是给人读的，M4（每次尝试成本）**未测**——
-本机没有离线 OCR，未获授权安装或下载模型；`make ocr-baseline` 在没有工具时**打印 BLOCKED**，
-真实退出码 3 只有直接跑二进制/跑脚本才拿得到（`go run` 折叠成 1、`make` 折叠成 2）。
-人工可读性同样**未测**（盲测页面已交付，但没有真实参与者数据）。因此管理面对它报
-`experimental:true` / `production_ready:false`，且未经评测不得翻转。
+**它是实验性题型，不构成“抗 OCR/抗 AI”的结论**。3B 时 OCR 未执行；4B 后已有历史固定工具基线：低/中/高档 **96%/31%/3%** 整串严格通过率（tesseract 5.3.4 + eng 4.1.0，holdout 每档 100 张，详见 `docs/STAGE4B.md`）。本轮未重测，不能外推为抗现代 AI，也不是完整 M4 攻击成本证明。
+`make ocr-baseline` 在工具不足时会打印 BLOCKED，真实退出码 3 只有直接跑二进制/脚本取得；`go run` 折叠成 1、`make` 折叠成 2。人工可读性仍无真实参与者数据；`experimental:true` / `production_ready:false` 保持不变。
 
 一条命令起本地预览（需服务已在跑，浏览器里自己算 PoW 并走完签发→作答→`/siteverify`）：
 
@@ -171,7 +178,7 @@ make stage3b-check   # 21 项工程检查 + 1 BLOCKED + 1 NOT_RUN（含 make che
 make eval-samples    # 离线评测样本：dev 调参集 + 固定 seed 的 holdout 验收集（输出 eval-out/，不入库）
 ```
 
-**3B 之后仍未实现**：题型权重与多生成器选择、风险打分（第三层）、分级淘汰与统计面、OCR 与人工基线测量。
+**当前仍未实现**：题型权重与多生成器选择、风险打分（第三层）、分级淘汰与统计面、人工基线测量；OCR 历史固定工具结果见 4B。
 `make stage3b-check` 全绿只代表工程闭环，不代表效果结论。
 
 ## 阶段 4A / 4B 现状（widget + 业务接入 + 真实窄屏 + OCR 基线）
@@ -224,27 +231,10 @@ go run ./cmd/exampleapp --listen 127.0.0.1:8091 --api http://127.0.0.1:8080   --
 
 ## 部署（新机复刻）
 
-权威配方在 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) §11，是**复制即可执行**的那一段（已在
-`make stage5b-check` 的容器演练里真跑过：启动 → 容器内管理命令 → 站点闭环 → 重放拒绝 →
-重建容器后状态仍在 → 停止后端口释放）。形状只有五步，全部**从仓库根**执行：
+权威配方见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) §2/§11。试部署先按 [`docs/TRIAL-DEPLOYMENT.md`](docs/TRIAL-DEPLOYMENT.md) §0 核对**已验收的完整 OID 和匹配 manifest**；旧 `stage-5b-done` 缺少恢复修复，不能用作当前候选。当前未完成项原样保留，不把源码冻结说成已上线。
 
-```bash
-EP=deploy/docker && set -C
-mkdir -p "$EP/data" "$EP/keys" "$EP/backups" && chmod 700 "$EP/"{data,keys,backups}
-for k in master pepper; do [[ -e "$EP/keys/$k" ]] || head -c32 /dev/urandom | base64 > "$EP/keys/$k"; chmod 600 "$EP/keys/$k"; done
-test -f "$EP/.env" || cp deploy/docker/.env.example "$EP/.env"     # 再把 EPOCHA_UID/GID 改成 id -u/-g
-make docker-image-local                                            # B 路径：宿主 CGO_ENABLED=0 静态编译 + named build context
-docker compose -f $EP/compose.yml --project-directory $EP --env-file $EP/.env up -d --wait
-curl -sS http://127.0.0.1:8080/readyz                              # ready
-```
+在授权的 Linux 主机上，以与容器相同的非 root UID/GID 生成密钥，再按文档配置 `.env`、构建并启动。`bash deploy/prepare-keys.sh <密钥目录>` 会排他创建缺失文件，拒绝错误属主/宽权限，重跑保留已有内容；不要通过重新生成 master/pepper 解决启动错误。
 
-三条会咬人的边界（详见 §4/§8/§11 与 ADR-015/017）：
+公共端口绑定 `127.0.0.1`，管理端口 8081 不发布。单实例是本项目的实现与运维边界，数据目录使用 `flock` 排他锁；身份或挂载不匹配报 `ErrLockAccess`。
 
-- **密钥只在不存在时生成**。`set -C` 就是为这个：重跑绝不能换掉 master/pepper——换 master 等于
-  撤销所有已签发 token，换 pepper 等于让站点摘要与管理凭据全部失效。
-- **`EPOCHA_PUBLIC_BIND=127.0.0.1` 不能省**成 `8080:8080`（那会绑 0.0.0.0）；管理端口 8081 在
-  compose 里**没有发布项**，只能在容器内 `epocha-ops admin …` 触达。
-- **单实例是实现与运维边界**：数据目录上一把 `flock` 排他锁，uid/挂载不对会直接 `ErrLockAccess`
-  （是"身份不对"，不是"有人在用"）。旧的 `epocha-offline-assets.tar.gz` 已随仓库跟踪，新机会在启动时
-  自行装载；`eval-out/` 与 `bin/` 是可再生产物（`make eval-samples` / `make build`），
-  2026-10-23 那一版评测素材另存于 `backup/vps-replica-20261023` 分支的加密包内。
+`epocha-offline-assets.tar.gz` 是仓库保留的**历史开发评测归档**，启动代码没有自动装载入口，生产生成器的内嵌字体不依赖它。本轮保留该文件，并从 Docker 构建上下文排除；不据此声称归档已进入运行镜像。`eval-out/`、`bin/` 与 `release-artifacts/` 都是忽略的本地产物，分别通过评测、构建、发布检查入口生成。历史备份分支里的材料不替代当前候选和验收证据。

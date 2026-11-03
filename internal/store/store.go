@@ -11,7 +11,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -64,9 +63,12 @@ const (
 // 长时间占住写入，"有界、可停止"比"一轮清干净"更重要。剩余行由下一轮处理。
 const purgeBatchRows = 500
 
+const DefaultMaxLedgerRows = 100000
+
 // Caps 是签发侧的存量上限。它与限流器是两个量：限流控制速率，Caps 控制数据库里同时
 // 存在的活动 challenge 行数——缺了后者，攻击者用足够多的源地址仍能持续扩大账本。
 type Caps struct {
+	MaxTotal         int
 	MaxActive        int // 全局 issued 且未过期的 challenge 上限
 	MaxActivePerSite int // 单站点同上
 }
@@ -289,9 +291,12 @@ func insertChallengeTx(ctx context.Context, tx *sql.Tx, c *Challenge, caps Caps,
 	if c == nil || c.ID == "" || c.SiteID <= 0 || len(c.PowSeed) == 0 || c.ExpiresAt.IsZero() {
 		return fmt.Errorf("%w: challenge 字段不完整", ErrBadConfig)
 	}
-	if caps.MaxActive <= 0 || caps.MaxActivePerSite <= 0 {
-		return fmt.Errorf("%w: challenge 上限必须为正（全局=%d 单站=%d）",
-			ErrBadConfig, caps.MaxActive, caps.MaxActivePerSite)
+	if caps.MaxTotal == 0 {
+		caps.MaxTotal = DefaultMaxLedgerRows
+	}
+	if caps.MaxTotal < 1 || caps.MaxActive <= 0 || caps.MaxActivePerSite <= 0 {
+		return fmt.Errorf("%w: challenge 上限必须为正（总量=%d 全局=%d 单站=%d）",
+			ErrBadConfig, caps.MaxTotal, caps.MaxActive, caps.MaxActivePerSite)
 	}
 	if mode != ModePowOnly && mode != ModePowQuestion {
 		return fmt.Errorf("%w: 未知验证模式 %q", ErrBadConfig, mode)
@@ -299,10 +304,12 @@ func insertChallengeTx(ctx context.Context, tx *sql.Tx, c *Challenge, caps Caps,
 	res, err := tx.ExecContext(ctx, `
 INSERT INTO challenges(id, site_id, pow_seed, pow_bits, status, attempts, created_at, expires_at, origin, mode, generator_id)
 SELECT ?,?,?,?,?,?,?,?,?,?,?
-WHERE (SELECT count(*) FROM challenges WHERE status=? AND expires_at>?) < ?
+WHERE (SELECT count(*) FROM challenges) < ?
+  AND (SELECT count(*) FROM challenges WHERE status=? AND expires_at>?) < ?
   AND (SELECT count(*) FROM challenges WHERE site_id=? AND status=? AND expires_at>?) < ?`,
 		c.ID, c.SiteID, c.PowSeed, int(c.PowBits), statusIssued, 0,
 		formatTime(c.CreatedAt.UTC()), formatTime(c.ExpiresAt.UTC()), c.Origin, mode, gen,
+		caps.MaxTotal,
 		statusIssued, formatTime(c.CreatedAt.UTC()), caps.MaxActive,
 		c.SiteID, statusIssued, formatTime(c.CreatedAt.UTC()), caps.MaxActivePerSite)
 	if err != nil {
@@ -413,8 +420,8 @@ func (d *DB) RedeemAttempt(ctx context.Context, challengeID string, now time.Tim
 		// 错误答案：条件置终态。status='issued' 是唯一的可终结状态——
 		// 已 redeemed / 已 invalid / 已过期都返回"不可兑换"，不给探测信号。
 		res, err := tx.ExecContext(ctx, `
-UPDATE challenges SET status=?, attempts=attempts+1 WHERE id=? AND status=?`,
-			statusInvalid, challengeID, statusIssued)
+UPDATE challenges SET status=?, attempts=attempts+1 WHERE id=? AND status=? AND expires_at>?`,
+			statusInvalid, challengeID, statusIssued, formatTime(now.UTC()))
 		if err != nil {
 			return nil, fmt.Errorf("store: 终结错误答案: %w", err)
 		}
@@ -555,8 +562,13 @@ WHERE r.id=? AND r.site_id=?`, responseID, siteID).Scan(&v.ChallengeID, &created
 // challenges 的删除条件是"已过期"，不再要求"非 issued"：被放弃的 issued 行若永不清理，
 // 池行与账本都会单调增长。删除过期行不削弱防重放——过期行本来就不可消费，
 // 而已消费行删除后重放会走到"记录不存在"，同样 fail closed（有测试钉住）。
+// pool 的 assigned 资源以绑定 challenge 为权威：issued 且 expires_at>now 必须保留，
+// 无论 pool 自身时间；已过期（包含恰好等于 now）或已终结才可删除。题不回 ready，
+// 删除后旧 challenge 的兑换仍由状态/过期和 require=true 的绑定检查拒绝。
+// SQL 分支分别走 pool_expire 与 challenge 主键查找，不读取 BLOB；最坏扫描 assigned
+// 索引行并逐条探测 challenge，删除总量仍封顶 500，不能把批次上限说成扫描行数上限。
 func (d *DB) Purge(ctx context.Context, now time.Time) (counts PurgeCounts, err error) {
-	limit := strconv.Itoa(purgeBatchRows)
+	limit := purgeBatchRows
 	ts := formatTime(now.UTC())
 	tx, err := d.h.BeginTx(ctx, nil)
 	if err != nil {
@@ -566,31 +578,43 @@ func (d *DB) Purge(ctx context.Context, now time.Time) (counts PurgeCounts, err 
 
 	r1, err := tx.ExecContext(ctx, `
 DELETE FROM responses WHERE id IN (
-  SELECT id FROM responses WHERE used=1 OR expires_at < ? LIMIT ?)`, ts, limit)
+  SELECT id FROM responses WHERE used=1 OR expires_at <= ? LIMIT ?)`, ts, limit)
 	if err != nil {
 		return counts, fmt.Errorf("store: 清理 responses: %w", err)
 	}
-	counts.Responses, _ = r1.RowsAffected()
+	if counts.Responses, err = r1.RowsAffected(); err != nil {
+		return PurgeCounts{}, fmt.Errorf("store: 读取 responses 清理行数: %w", err)
+	}
 
 	rp, err := tx.ExecContext(ctx, `
 DELETE FROM pool WHERE id IN (
-  SELECT id FROM pool WHERE status=? OR expires_at < ? LIMIT ?)`, PoolTerminal, ts, limit)
+  SELECT id FROM pool WHERE status=?
+  UNION ALL
+  SELECT id FROM pool WHERE status=? AND expires_at<=? AND challenge_id IS NULL
+  UNION ALL
+  SELECT p.id FROM pool p JOIN challenges c ON c.id=p.challenge_id
+  WHERE p.status=? AND (c.expires_at<=? OR c.status IN (?,?))
+  LIMIT ?)`, PoolTerminal, PoolReady, ts, PoolAssigned, ts, statusRedeemed, statusInvalid, limit)
 	if err != nil {
 		return counts, fmt.Errorf("store: 清理题池: %w", err)
 	}
-	counts.Pool, _ = rp.RowsAffected()
+	if counts.Pool, err = rp.RowsAffected(); err != nil {
+		return PurgeCounts{}, fmt.Errorf("store: 读取题池清理行数: %w", err)
+	}
 
 	r2, err := tx.ExecContext(ctx, `
 DELETE FROM challenges WHERE id IN (
   SELECT id FROM challenges
-  WHERE expires_at < ?
+  WHERE expires_at <= ?
     AND NOT EXISTS (SELECT 1 FROM responses r WHERE r.challenge_id = challenges.id)
     AND NOT EXISTS (SELECT 1 FROM pool p WHERE p.challenge_id = challenges.id)
   LIMIT ?)`, ts, limit)
 	if err != nil {
 		return counts, fmt.Errorf("store: 清理 challenges: %w", err)
 	}
-	counts.Challenges, _ = r2.RowsAffected()
+	if counts.Challenges, err = r2.RowsAffected(); err != nil {
+		return PurgeCounts{}, fmt.Errorf("store: 读取 challenges 清理行数: %w", err)
+	}
 
 	if err := tx.Commit(); err != nil {
 		return counts, fmt.Errorf("store: 提交清理: %w", err)

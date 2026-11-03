@@ -187,12 +187,64 @@ case "${1:-}" in
 esac
 set -e
 
+# Prerequisites are classified before mktemp/traps: an unsupported host must not touch Docker or old artifacts.
+export GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off GOENV=off GOWORK=off
+GO="${GO:-go}"
+prerequisite_blocked() {
+  blocked "$1" "在既定 Linux/arm64、Go 1.27.3、Node 24 与独占本地 Docker 环境重跑；不安装或改变本机"
+  printf '[stage5b] 必需项(B 路径部署工程) PASS=0 FAIL=0 BLOCKED=1 NOT_RUN=0\n'
+  printf '[stage5b] 可选项(A 路径/未验证平台) PASS=0 FAIL=0 BLOCKED=0 NOT_RUN=0\n'
+  printf '[stage5b] RESULT=blocked（环境不足，未执行部署演练）\n[stage5b] SCRIPT_RC=3\n'
+  exit 3
+}
+[[ "$(uname -s)" == Linux ]] || prerequisite_blocked "本机不是 Linux；交叉编译不能代替运行互斥与 Docker 实测"
+for tool in docker curl jq node make ss "$GO"; do
+  command -v "$tool" >/dev/null 2>&1 || prerequisite_blocked "缺少工具 $tool"
+done
+[[ "$("$GO" env GOVERSION)" == go1.27.3 ]] || prerequisite_blocked "需要明确安装的 Go 1.27.3（GOTOOLCHAIN=local）"
+[[ "$(node -p 'process.versions.node.split(".")[0]')" == 24 ]] || prerequisite_blocked "需要 Node 24"
+docker info >/dev/null 2>&1 || prerequisite_blocked "Docker daemon 不可达"
+
+# Refuse to clean or overwrite any pre-existing resource with a name this drill could use.
+# This check runs before mktemp, compose, build, traps, or any cleanup action. A stale prior
+# run is still an external conflict: the operator must inspect it, never let this script guess ownership.
+IMAGE="${EPOCHA_IMAGE:-epocha:stage5b-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+PROJECT="epocha5b"
+for resource in epocha5b-second epocha5b-measure; do
+  if docker container inspect "$resource" >/dev/null 2>&1; then
+    prerequisite_blocked "Docker 容器 $resource 已存在；拒绝清理或复用同名资源"
+  fi
+done
+for network in "${PROJECT}_default" epocha5b-recipe; do
+  if docker network inspect "$network" >/dev/null 2>&1; then
+    prerequisite_blocked "Docker 网络 $network 已存在；拒绝清理或复用同名资源"
+  fi
+done
+if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  prerequisite_blocked "Docker 镜像标签 $IMAGE 已存在；拒绝覆盖可变同名标签"
+fi
+if [[ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT")" ]]; then
+  prerequisite_blocked "Compose 项目 $PROJECT 已有容器；拒绝对用户资源执行 down"
+fi
+if [[ -n "$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT")" ]]; then
+  prerequisite_blocked "Compose 项目 $PROJECT 已有卷；拒绝清理用户资源"
+fi
+
 cd "$ROOT"
+# These are captured once, before any actual build, and passed as make command-line values.
+VERSION="$(git describe --tags --always --dirty)"
+COMMIT="$(git rev-parse HEAD)"
+BUILDDATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+BUILD_GOOS=linux
+BUILD_GOARCH="$("$GO" env GOARCH)"
+BUILD_OK=0
+PREBUILT_DIR=""
+EVIDENCE_DIR=""
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/epocha-stage5b.XXXXXX")"
 chmod 700 "$WORK"
 
-IMAGE="${EPOCHA_IMAGE:-epocha:5a}"
-PROJECT="epocha5b"
+IMAGE="${IMAGE:-epocha:stage5b-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+PROJECT="${PROJECT:-epocha5b}"
 PUBLIC_PORT="${EPOCHA_5B_PORT:-18180}"
 SECOND_PORT="${EPOCHA_5B_SECOND_PORT:-18181}"
 MEASURE_PORT="${EPOCHA_5B_MEASURE_PORT:-18182}"
@@ -210,6 +262,23 @@ cleanup() {
   local rc=$?
   trap - EXIT
   set +e
+  if [[ -n "${SOAK_PID:-}" ]]; then
+    kill -TERM "$SOAK_PID" 2>/dev/null
+    wait "$SOAK_PID" 2>/dev/null
+  fi
+  if [[ -n "${SAMPLE_PID:-}" ]]; then
+    kill -TERM "$SAMPLE_PID" 2>/dev/null
+    wait "$SAMPLE_PID" 2>/dev/null
+  fi
+  # Only public, allowlisted evidence escapes the temporary data/credential tree.
+  if [[ -n "$EVIDENCE_DIR" ]]; then
+    for evidence in selftest.log locktests.log race.log static.log build.log recipe-flow.log recipe-flow2.log \
+      soak.txt soak-run.json soak-samples.txt soak-sample-errors.log soak-summary.json pool-before.json pool-after.json purge.log; do
+      if [[ -f "$LOGS/$evidence" ]]; then cp -n "$LOGS/$evidence" "$EVIDENCE_DIR/$evidence"; fi
+    done
+    printf 'script_exit=%s\n' "$rc" >"$EVIDENCE_DIR/stage5b-exit.txt"
+    log "本轮无凭据/DB证据保留于 $EVIDENCE_DIR；原始构建保留于 $PREBUILT_DIR"
+  fi
   # 只清理**本脚本自己**创建的容器/网络/目录；绝不 prune，也不碰别人留下的东西。
   if [[ -n "${RECIPE_COMPOSE:-}" ]]; then
     $RECIPE_COMPOSE down -v --remove-orphans >/dev/null 2>&1
@@ -301,13 +370,14 @@ else
 fi
 log "第 1 步：运行锁的测试（真实子进程）"
 rc=0
-go test -count=1 -race -timeout 600s ./internal/store/ ./cmd/server/ ./cmd/ops/ ./cmd/loadtest/ >"$LOGS/locktests.log" 2>&1 || rc=$?
+"$GO" test -count=1 -race -timeout 600s ./internal/store/ ./cmd/server/ ./cmd/ops/ ./cmd/loadtest/ >"$LOGS/locktests.log" 2>&1 || rc=$?
 if [[ $rc -ne 0 ]]; then
   tail -n 40 "$LOGS/locktests.log"
   fail "锁相关包的 -race 测试退出码 $rc"
 else
   pass "internal/store(锁+备份恢复) / cmd/server(真实进程互斥) / cmd/ops(真实进程互斥+恢复边界) / cmd/loadtest(节流) 的 -race 测试全通过"
 fi
+missing_server_tests=0
 for want in \
   "TestSecondServerCannotOpenSameDataDir" \
   "TestGracefulStopAllowsRestart" \
@@ -316,10 +386,14 @@ for want in \
   "TestStartupVersusOfflineHolderIsMutuallyExclusive" \
   "TestHolderAndServerOnSameDirConflictViaDirLock"; do
   if ! grep -q "^func $want" cmd/server/lock_test.go; then
+    missing_server_tests=1
     fail "缺少必需的真实进程测试 $want"
   fi
 done
-pass "服务侧 6 条真实子进程测试都在（抢同一数据目录、优雅重启、SIGKILL、陈旧锁文件、启动竞态、目录锁冲突）"
+if [[ $missing_server_tests -eq 0 ]]; then
+  pass "服务侧 6 条真实子进程测试都在（抢同一数据目录、优雅重启、SIGKILL、陈旧锁文件、启动竞态、目录锁冲突）"
+fi
+missing_ops_tests=0
 for want in \
   "TestAdminRecoverRefusesWhileLockHeldByAnotherProcess" \
   "TestAdminRecoverSucceedsAfterHolderExit" \
@@ -327,14 +401,17 @@ for want in \
   "TestRestoreRefusesWhenOutDirIsInUse" \
   "TestTwoAdminRecoverProcessesRace"; do
   if ! grep -q "^func $want" cmd/ops/main_test.go; then
+    missing_ops_tests=1
     fail "缺少必需的运维侧测试 $want"
   fi
 done
-pass "运维侧 5 条测试都在：服务在跑时改不了库、退出后可重取、在线备份不需要停服、就地恢复被拒、两进程抢恢复恰好一个成功"
+if [[ $missing_ops_tests -eq 0 ]]; then
+  pass "运维侧 5 条测试都在：服务在跑时改不了库、退出后可重取、在线备份不需要停服、就地恢复被拒、两进程抢恢复恰好一个成功"
+fi
 
 log "第 1b 步：一次全量回归（-race ./...）"
 rc=0
-go test -race -count=1 -timeout 1200s ./... >"$LOGS/race.log" 2>&1 || rc=$?
+"$GO" test -race -count=1 -timeout 1200s ./... >"$LOGS/race.log" 2>&1 || rc=$?
 if [[ $rc -ne 0 ]]; then
   tail -n 30 "$LOGS/race.log"
   fail "go test -race ./... 退出码 $rc"
@@ -342,14 +419,14 @@ else
   pass "go test -race -count=1 ./... 退出码 0"
 fi
 rc=0
-make fmt-check vet size >"$LOGS/static.log" 2>&1 || rc=$?
+make GO="$GO" fmt-check vet size >"$LOGS/static.log" 2>&1 || rc=$?
 if [[ $rc -ne 0 ]]; then
   tail -n 20 "$LOGS/static.log"
   fail "fmt-check/vet/size 退出码 $rc"
 else
   pass "fmt-check / vet / size 全通过"
 fi
-DEPS="$(go list -deps ./cmd/server)"
+DEPS="$("$GO" list -deps ./cmd/server)"
 for banned in internal/eval cmd/preview cmd/devseed cmd/evalgen cmd/evalocr cmd/exampleapp cmd/blindtest cmd/loadtest web/preview; do
   if printf '%s\n' "$DEPS" | grep -q "EpoCHA/$banned"; then
     fail "服务二进制链接了开发期包 $banned"
@@ -360,13 +437,25 @@ pass "cmd/server 仍不链接任何开发期包（go list -deps 证明）"
 # --- 第 2 步：容器与宿主共享同一把锁 ---
 log "第 2 步：真实容器里的互斥（宿主 ↔ 容器，两个容器）"
 if [[ $DOCKER_OK -eq 1 ]]; then
+  mkdir -p "$ROOT/deploy/docker/.prebuilt" "$ROOT/release-artifacts"
+  BUILD_RUN="$(mktemp -d "$ROOT/deploy/docker/.prebuilt/run-XXXXXX")"
+  PREBUILT_DIR="$BUILD_RUN/build"
+  EVIDENCE_DIR="$(mktemp -d "$ROOT/release-artifacts/stage5b-XXXXXX")"
   rc=0
-  make docker-image-local >"$LOGS/build.log" 2>&1 || rc=$?
+  make docker-image-local VERSION="$VERSION" COMMIT="$COMMIT" BUILDDATE="$BUILDDATE" PREBUILT_DIR="$PREBUILT_DIR" DOCKER_IMAGE="$IMAGE" GO="$GO" BUILD_GOOS="$BUILD_GOOS" BUILD_GOARCH="$BUILD_GOARCH" >"$LOGS/build.log" 2>&1 || rc=$?
   if [[ $rc -ne 0 ]]; then
-    tail -n 25 "$LOGS/build.log"
-    fail "make docker-image-local 退出码 $rc"
+    fail "实际构建或镜像字节/版本对账失败（make rc=$rc）；停止演练，不复用同名旧标签。证据 $LOGS/build.log"
+    printf '[stage5b] 必需项(B 路径部署工程) PASS=%d FAIL=%d BLOCKED=%d NOT_RUN=%d\n' "$R_PASS" "$((R_FAIL))" "$R_BLOCKED" "$R_NOTRUN"
+    printf '[stage5b] 可选项(A 路径/未验证平台) PASS=%d FAIL=%d BLOCKED=%d NOT_RUN=%d\n' "$O_PASS" "$O_FAIL" "$O_BLOCKED" "$O_NOTRUN"
+    printf '[stage5b] 超范围项(产品效果，本门禁不判定) 登记=%d\n' "$S_NOTE"
+    printf '[stage5b] RESULT=fail（实际构建失败，未使用旧产物）\n[stage5b] SCRIPT_RC=1\n'
+    exit 1
   else
-    pass "镜像重建成功（$IMAGE，含本轮的锁实现）"
+    BUILD_OK=1
+    # All drills use the verified immutable local image ID, never re-resolve a mutable tag.
+    IMAGE_TAG="$IMAGE"
+    IMAGE="$(node -e 'const fs=require("node:fs"); process.stdout.write(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).image_id)' "$PREBUILT_DIR/image.json")"
+    pass "新镜像实际两份字节与版本完全对账（local image ID=$IMAGE，mutable tag=$IMAGE_TAG；均不称 registry digest）"
   fi
 
   gen_key() { head -c32 /dev/urandom | base64 >"$1"; chmod 600 "$1"; }
@@ -375,9 +464,9 @@ if [[ $DOCKER_OK -eq 1 ]]; then
   printf '%s' "$ADMIN0" >"$D/keys/admin"; chmod 600 "$D/keys/admin"
   cat >"$WORK/compose.env" <<EOF
 EPOCHA_IMAGE=$IMAGE
-EPOCHA_VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo dev)
-EPOCHA_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo none)
-EPOCHA_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EPOCHA_VERSION=$VERSION
+EPOCHA_COMMIT=$COMMIT
+EPOCHA_BUILD_DATE=$BUILDDATE
 EPOCHA_PUBLIC_BIND=127.0.0.1
 EPOCHA_PUBLIC_PORT=$PUBLIC_PORT
 EPOCHA_DATA_DIR=$D/data
@@ -412,7 +501,7 @@ EOF
     DB_SHA_BEFORE="$(sha "$D/data/epocha.db")"
 
     # (a) 服务在跑时，**宿主**上的 admin-recover 必须被拒。
-    CGO_ENABLED=0 go build -trimpath -o "$BIN/epocha-ops" ./cmd/ops
+    cp "$PREBUILT_DIR/out/epocha-ops" "$BIN/epocha-ops"
     rc=0
     EPOCHA_PEPPER_FILE="$D/keys/pepper" "$BIN/epocha-ops" admin-recover \
       --db "$D/data/epocha.db" --key-file "$D/recovered-key" >"$LOGS/recover-host.log" 2>&1 || rc=$?
@@ -728,7 +817,7 @@ else
         pass "管理端口 8081 在宿主上不可达（只有容器内 127.0.0.1:8081）"
       fi
 
-      go build -trimpath -o "$BIN/devclient" ./cmd/devclient
+      "$GO" build -trimpath -o "$BIN/devclient" ./cmd/devclient
       admin_r() { # $1=METHOD $2=PATH $3=OUT(可选第 4 个参数=请求体)
         local rc2=0
         if [[ -n "${4:-}" ]]; then
@@ -845,76 +934,28 @@ fi
 
 # --- 第 3 步：候选构建清单（受支持范围＝B 路径）---
 log "第 3 步：部署候选清单（必需＝B 路径；A 路径与未验证平台归为可选项）"
-# 候选清单**只有绑到干净提交才有意义**：dirty 树上的 SHA 不属于任何可检出的提交，
-# 拿它当"部署候选"就是给一个不存在的版本做保证。本轮实测撞过一次（跑门禁的同时改了文档），
-# 所以这里不是"记录一下工作树状态"，而是一条硬判据。
-GIT_STATUS="$(git status --porcelain)"
-WT=clean
-if [[ -n "$GIT_STATUS" ]]; then WT=dirty; fi
-LDFLAGS_TEXT="$(make -n build 2>/dev/null | grep -o '\-ldflags .*' | head -n1 || true)"
-{
-  echo "生成时间: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  echo "源码 commit: $(git rev-parse HEAD)  describe: $(git describe --tags --always --dirty 2>/dev/null || echo dev)"
-  echo "工作树: $WT"
-  # 宿主默认 CGO_ENABLED 与镜像构建用的值**分开记**：宿主有 gcc 时默认是 1，
-  # 而 scratch 运行时要求 0（5A 的实测教训）。写成一个笼统的"CGO_ENABLED=0"就是失准。
-  echo "宿主 go 默认: GOOS=$(go env GOOS) GOARCH=$(go env GOARCH) CGO_ENABLED=$(go env CGO_ENABLED) GOTOOLCHAIN=$(go env GOTOOLCHAIN)"
-  echo "镜像构建实际使用: CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-trimpath（deploy/docker/Dockerfile 与 make docker-image-local 一致）"
-  echo "构建路径: B（宿主静态编译 → deploy/docker/.prebuilt/out → named build context 装配）"
-  echo "ldflags: ${LDFLAGS_TEXT:-（make -n build 未给出，需手工核对 Makefile 的 LDFLAGS）}"
-  echo "Go: $(go version)"
-  echo "宿主架构: $(uname -m)  docker: $(docker --version | awk '{print $3}' | tr -d ',')"
-} >"$LOGS/manifest.txt"
-if [[ -f "$BIN/epocha-ops" ]]; then
-  {
-    echo "进镜像的 epocha sha256:      $(sha deploy/docker/.prebuilt/out/epocha)"
-    echo "进镜像的 epocha-ops sha256:  $(sha deploy/docker/.prebuilt/out/epocha-ops)"
-    echo "演练用 epocha-ops sha256:    $(sha "$BIN/epocha-ops")"
-    echo "本地镜像 ID: $(docker image inspect "$IMAGE" --format '{{.Id}}')   标签: $IMAGE"
-    echo "（本地 image ID 不是 registry digest：本轮不推送镜像，也就没有 digest）"
-    echo "镜像大小: $(docker image inspect "$IMAGE" --format '{{.Size}}') 字节"
-    echo "已测试的运行 UID/GID: $RUN_UID:$RUN_GID（镜像默认 USER 65534:65534，见 DEPLOYMENT §2）"
-  } >>"$LOGS/manifest.txt"
-  if [[ -n "${BK:-}" && -f "$D/backups/$BK.manifest.json" ]]; then
-    {
-      echo "schema 版本:      $(jq -r '.schema_version' "$D/backups/$BK.manifest.json")"
-      echo "app_version:      $(jq -r '.app_version' "$D/backups/$BK.manifest.json")"
-      echo "备份内 app/commit 与 manifest 一致: $([[ "$(jq -r '.commit' "$D/backups/$BK.manifest.json")" == "$(git rev-parse --short HEAD)" ]] && echo yes || echo no)"
-    } >>"$LOGS/manifest.txt"
+# The receipt was written by the actual build. Verification never invokes make or rebuilds the binaries.
+if [[ "$BUILD_OK" -eq 1 ]]; then
+  rc=0
+  node docs/scripts/build-receipt.mjs verify --out "$PREBUILT_DIR" --go "$GO" >"$LOGS/manifest.txt" 2>&1 || rc=$?
+  if [[ $rc -ne 0 ]]; then
+    fail "构建收据、原始字节、实际镜像版本或静态 ELF 复核不一致；见 $LOGS/manifest.txt"
+  elif [[ -z "${BK:-}" || ! -f "$D/backups/$BK.manifest.json" ]]; then
+    fail "当次备份 manifest 缺失；不能把 schema/app/commit 对账记成通过"
   else
-    echo "schema 版本: 本轮没有可用备份（清单不完整）" >>"$LOGS/manifest.txt"
-  fi
-  # 清单落到**忽略目录**里留档（deploy/docker/.prebuilt/ 已在 .gitignore）：
-  # 含当前 commit 的清单如果再提交进仓库就成了自引用循环（一改代码清单就过期）。
-  mkdir -p deploy/docker/.prebuilt
-  cp "$LOGS/manifest.txt" deploy/docker/.prebuilt/candidate-manifest.txt
-  if [[ "$WT" == "dirty" ]]; then
-    # 这些 SHA 属于"这个提交 + 一堆没提交的东西"，也就是**任何检出都拿不到**的那个版本。
-    # 判 FAIL 而不是记一行备注：候选清单的全部价值就在于它能绑定一个可复现的提交。
-    fail "候选清单在工作树 **dirty** 时生成，SHA 无法绑定干净提交。未提交改动：$(printf '%s' "$GIT_STATUS" | tr '\n' ' ' | cut -c1-200) ⇒ 先提交（或还原），再重新出候选"
-  else
-    pass "候选清单已落盘并绑定干净提交 $(git rev-parse --short HEAD)（commit／Go／GOOS-ARCH／CGO／构建路径／两份进镜像二进制 SHA-256／本地镜像 ID 与标签／schema／实测 uid）：deploy/docker/.prebuilt/candidate-manifest.txt"
+    rc=0
+    node docs/scripts/build-receipt.mjs candidate --root "$ROOT" --out "$PREBUILT_DIR" --go "$GO" \
+      --backup-manifest "$D/backups/$BK.manifest.json" --uid "$RUN_UID" --gid "$RUN_GID" >>"$LOGS/manifest.txt" 2>&1 || rc=$?
+    if [[ $rc -ne 0 ]]; then
+      fail "候选身份复核失败：需要构建时/验收后同一干净源码、linux/arm64 与实测 UID:GID 1000:1000；备份 app_version/完整 commit 任一不一致也 FAIL（$LOGS/manifest.txt）"
+    else
+      pass "当次候选身份完全对账；原始 server/ops、镜像拷出字节、实际命令与版本、schema 已封存于 $PREBUILT_DIR"
+    fi
   fi
 else
-  req_notrun "候选清单的二进制与镜像部分" "第 2 步没执行（磁盘不足）⇒ 清单无法绑定真实产物；释放磁盘后 bash docs/scripts/stage5b.sh"
+  req_notrun "候选清单的二进制与镜像部分" "未完成本轮真实构建；不读取旧 .prebuilt/out 或同名标签"
 fi
-# 静态链接断言（scratch 运行时的前提）：断言对象必须包含**进镜像的那两份**，
-# 演练自己用的 ops 只是顺带——真正会在生产里起不来的是 .prebuilt/out/ 里那两份。
-if command -v readelf >/dev/null 2>&1; then
-  BAD=""
-  PB="deploy/docker/.prebuilt/out"
-  for b in "$PB/epocha" "$PB/epocha-ops" "$BIN/epocha-ops"; do
-    if [[ ! -f "$b" ]]; then BAD="$BAD $b(缺失)"; continue; fi
-    if readelf -lW "$b" 2>/dev/null | grep -qi 'program interpreter'; then BAD="$BAD $b"; fi
-  done
-  if [[ -n "$BAD" ]]; then
-    fail "这些二进制是动态链接或缺失（scratch 里起不来）: $BAD"
-  else
-    pass "进镜像的两份二进制与演练用的 ops 都无 PT_INTERP（CGO_ENABLED=0 静态链接）"
-  fi
-else
-  blocked "静态链接断言：本机没有 readelf" "安装 binutils 后单独跑第 3 步，或直接用 file/objdump 核对 .prebuilt/out 两份"
-fi
+
 # --- 可选项：第一版正式支持范围之外的构建路径与平台（只如实登记，不决定退出码）---
 opt_notrun "A 路径（make docker-image，容器内 go build）" \
   "未纳入第一版正式支持；执行需要 registry 可达 + ≥2GB 空闲磁盘（本轮起始 $(( $(avail_kb) / 1024 ))MB）。复现命令：make docker-image && bash docs/scripts/stage5b.sh"
@@ -922,23 +963,23 @@ opt_notrun "amd64 交叉构建的镜像" "本机 linux/arm64 且无 amd64 验证
 opt_blocked "UID/GID 65534（镜像默认 USER）下的数据目录属主与 chown 动作" "需要 root：按 DEPLOYMENT §2/§5.5 执行后复测第 2 步"
 scope_note "题型的人工可读性盲测、抗 OCR/抗 AI 基线、生产默认档位" \
   "属产品效果验收，分别由 make blindtest 与 make ocr-baseline-real 判定；容器化与恢复演练通过**不**构成它们的结论"
-if [[ $DOCKER_OK -eq 1 ]]; then
-  # B 路径是**受支持路径**，所以它是必需项（不是"可选路径碰巧跑了"）：
-  # 证据就是第 2 步 make docker-image-local 的退出码 0 与 .prebuilt/out 里那两份产物。
-  pass "B 路径（宿主 CGO_ENABLED=0 静态编译 → .prebuilt/out → named build context 装配）本轮实际执行并通过"
+if [[ $BUILD_OK -eq 1 ]]; then
+  pass "B 路径本轮实际构建并验证通过（原始字节与镜像拷出字节相等、PT_INTERP 不存在、实际版本元组一致）"
 else
-  req_notrun "B 路径（受支持的构建路径）与镜像装配" "磁盘不足 ⇒ 这是必需项，不是可选项"
+  req_notrun "B 路径（受支持的构建路径）与镜像装配" "本轮构建未完成 ⇒ 这是必需项，不是可选项"
 fi
-cat "$LOGS/manifest.txt" | sed 's/^/[stage5b]   清单: /'
+if [[ -f "$LOGS/manifest.txt" ]]; then
+  while IFS= read -r line; do printf '[stage5b]   清单: %s\n' "$line"; done <"$LOGS/manifest.txt"
+fi
 
 # --- 第 4 步：约 5 分钟的节流持续演练 ---
 log "第 4 步：持续演练（1 CPU / 128MiB，节流约 1.5 闭环/秒，5 分钟硬上限）"
 # 磁盘余量在这里**再量一次**：前面几步已经用过一轮空间，而"5 分钟窗口跑到一半 ENOSPC"
 # 比"根本没开始"更难归因。不足 ⇒ BLOCKED（必需项）⇒ 退出码 3 ⇒ 不打完成标签。
 AVAIL_NOW="$(avail_kb)"
-if [[ $DOCKER_OK -eq 1 && -n "$CID" ]] && (( AVAIL_NOW >= 100 * 1024 )); then
-  go build -trimpath -o "$BIN/loadtest" ./cmd/loadtest
-  go build -trimpath -o "$BIN/devclient" ./cmd/devclient
+if [[ $BUILD_OK -eq 1 && -n "${CID:-}" ]] && (( AVAIL_NOW >= 100 * 1024 )); then
+  "$GO" build -trimpath -o "$BIN/loadtest" ./cmd/loadtest
+  "$GO" build -trimpath -o "$BIN/devclient" ./cmd/devclient
   compose down >/dev/null 2>&1 || true
   CID=""
   # 测量实例：资源限额与生产一致，只把**全局限流**抬高（默认 60 IP-RPM 会先于容量起作用）。
@@ -989,17 +1030,29 @@ if [[ $DOCKER_OK -eq 1 && -n "$CID" ]] && (( AVAIL_NOW >= 100 * 1024 )); then
     rc=0
     admin_in POST /api/admin/sites "$LOGS/site-img.json" \
       '{"name":"stage5b-img","verify_mode":"pow_question","generator_id":"text-image-v1","difficulty":5,"allow_missing_origin":true}' || rc=$?
+    IMAGE_SITE_OK=0
+    if node docs/scripts/soak-evidence.mjs image-site --rc "$rc" --file "$LOGS/site-img.json"; then IMAGE_SITE_OK=1; fi
     # 短 TTL 站点 + 只领题不作答：这是"过期清理是否真的触发"的唯一可观察形状。
     rc=0
     admin_in POST /api/admin/sites "$LOGS/site-exp.json" '{"name":"stage5b-expire","verify_mode":"pow_only","allow_missing_origin":true,"pow_bits":12,"challenge_ttl_sec":5,"rate_ip_rpm":600,"rate_site_rpm":600}' || rc=$?
     EXP_KEY="$(jq -r '.site.site_key // ""' "$LOGS/site-exp.json" 2>/dev/null || echo "")"
-    if [[ -z "$SOAK_POW" || -z "$SOAK_SECRET" || -z "$EXP_KEY" ]]; then
-      fail "持续演练需要的三个站点没建齐（pow=$SOAK_POW exp=$EXP_KEY）"
+    if [[ -z "$SOAK_POW" || -z "$SOAK_SECRET" || -z "$EXP_KEY" || $IMAGE_SITE_OK -ne 1 || $rc -ne 0 ]]; then
+      fail "持续演练需要的三个真实站点没建齐（pow=$SOAK_POW exp=$EXP_KEY image_ok=$IMAGE_SITE_OK）"
     else
-      pass "三个演练站点就绪：pow_only 流量站、text-image 补池站（高档 5）、challenge_ttl=5s 过期站"
-      POOL0="$(docker exec -i "$MEAS" "$OPS" admin GET /api/admin/pool </dev/null 2>/dev/null | sed -n '2,$p')"
-      READY0="$(printf '%s' "$POOL0" | jq -r '[.buckets[]?|.ready]|add//0')"
-      log "  起始题池 ready=$READY0"
+      pass "三个演练站点就绪：pow_only 流量站、实际 text-image 补池站（高档 5）、challenge_ttl=5s 过期站"
+      POOL_READY=0
+      POOL_DEADLINE=$((SECONDS + 45))
+      while [[ $SECONDS -lt $POOL_DEADLINE ]]; do
+        if admin_in GET /api/admin/pool "$LOGS/pool-before.json" && \
+           node docs/scripts/soak-evidence.mjs pool --file "$LOGS/pool-before.json" >/dev/null 2>&1; then
+          POOL_READY=1; break
+        fi
+        sleep 1
+      done
+      if [[ $POOL_READY -ne 1 ]]; then
+        fail "45s 内没有实际高档图片 ready>0 且 ready_asset_bytes/global asset_bytes>0；不把空池或别的桶计入"
+      fi
+      READY0="$(jq -r '[.buckets[]?|.ready]|add//0' "$LOGS/pool-before.json")"
 
       # 过期样本：领 20 道题后放着不管。
       for _ in $(seq 1 20); do
@@ -1010,33 +1063,48 @@ if [[ $DOCKER_OK -eq 1 && -n "$CID" ]] && (( AVAIL_NOW >= 100 * 1024 )); then
       DB0="$(stat -c '%s' "$D/data/epocha.db" 2>/dev/null || echo 0)"
       WAL0="$(stat -c '%s' "$D/data/epocha.db-wal" 2>/dev/null || echo 0)"
       SOAK_START=$SECONDS
-      # 450 次闭环 / 并发 1 / 每次之间睡 660ms ⇒ 约 5 分钟、约 1.5 闭环/秒。
-      # 总时长与请求数都有硬上限（cmd/loadtest 里 requests ≤5000）。
-      EPOCHA_SITE_SECRET="$SOAK_SECRET" "$BIN/loadtest" --base "$MU" --site-key "$SOAK_POW" \
-        --concurrency 1 --requests 450 --pace 660ms --timeout 10s >"$LOGS/soak.txt" 2>&1 &
+      # The Node watchdog owns the actual child and enforces 300s independent of HTTP/PoW timeouts.
+      EPOCHA_SITE_SECRET="$SOAK_SECRET" node docs/scripts/soak-evidence.mjs run --out "$LOGS/soak-run.json" --log "$LOGS/soak.txt" -- \
+        "$BIN/loadtest" --base "$MU" --site-key "$SOAK_POW" --concurrency 1 --requests 450 --pace 660ms --timeout 10s &
       SOAK_PID=$!
       SAMPLES="$LOGS/soak-samples.txt"
       : >"$SAMPLES"
+      SAMPLE_PID=""
+      SAMPLE_STARTED=-100
+      SAMPLE_FAILED=0
       while kill -0 "$SOAK_PID" 2>/dev/null; do
-        ST="$(docker stats --no-stream --format '{{.CPUPerc}}|{{.MemUsage}}' "$MEAS" 2>/dev/null || echo '?')"
-        printf 't=%ss stats=%s db=%s wal=%s readyz=%s\n' \
-          "$((SECONDS - SOAK_START))" "$ST" \
-          "$(stat -c '%s' "$D/data/epocha.db" 2>/dev/null || echo 0)" \
-          "$(stat -c '%s' "$D/data/epocha.db-wal" 2>/dev/null || echo 0)" \
-          "$(code "$MU/readyz" 5)" >>"$SAMPLES"
-        sleep 30
+        NOW=$((SECONDS - SOAK_START))
+        if [[ -n "$SAMPLE_PID" ]] && ! kill -0 "$SAMPLE_PID" 2>/dev/null; then
+          wait "$SAMPLE_PID" || SAMPLE_FAILED=1
+          SAMPLE_PID=""
+        fi
+        if [[ -z "$SAMPLE_PID" ]] && (( NOW - SAMPLE_STARTED >= 30 )); then
+          SAMPLE_STARTED=$NOW
+          node docs/scripts/soak-evidence.mjs sample --container "$MEAS" --base "$MU" --db "$D/data/epocha.db" --elapsed "$NOW" \
+            >>"$SAMPLES" 2>>"$LOGS/soak-sample-errors.log" &
+          SAMPLE_PID=$!
+        fi
+        sleep 1
       done
-      wait "$SOAK_PID" || true
-      SOAK_T=$((SECONDS - SOAK_START))
       SOAK_RC=0
-      grep -q "ok=450" "$LOGS/soak.txt" || SOAK_RC=1
-      if [[ $SOAK_RC -eq 0 ]]; then
-        pass "持续演练完成：450 次 pow_only 闭环全部成功，用时 ${SOAK_T}s（约 $(awk -v t="$SOAK_T" 'BEGIN{printf "%.2f", 450/t}') 闭环/秒）"
-      else
-        fail "持续演练里有失败闭环：$(tail -c 260 "$LOGS/soak.txt")"
+      wait "$SOAK_PID" || SOAK_RC=$?
+      SOAK_PID=""
+      if [[ -n "$SAMPLE_PID" ]]; then
+        wait "$SAMPLE_PID" || SAMPLE_FAILED=1
+        SAMPLE_PID=""
       fi
-      sed -n '1,3p' "$LOGS/soak.txt" | sed 's/^/[stage5b]   节流: /'
-      tail -n 3 "$SAMPLES" | sed 's/^/[stage5b]   采样: /'
+      SOAK_T=$((SECONDS - SOAK_START))
+      POOL_AFTER_OK=0
+      if admin_in GET /api/admin/pool "$LOGS/pool-after.json" && \
+         node docs/scripts/soak-evidence.mjs pool --file "$LOGS/pool-after.json" >/dev/null; then POOL_AFTER_OK=1; fi
+      VERIFY_RC=0
+      node docs/scripts/soak-evidence.mjs verify --run "$LOGS/soak-run.json" --log "$LOGS/soak.txt" --samples "$SAMPLES" \
+        --pool-before "$LOGS/pool-before.json" --pool-after "$LOGS/pool-after.json" --out "$LOGS/soak-summary.json" || VERIFY_RC=$?
+      if [[ $SOAK_RC -eq 0 && $SAMPLE_FAILED -eq 0 && $POOL_READY -eq 1 && $POOL_AFTER_OK -eq 1 && $VERIFY_RC -eq 0 ]]; then
+        pass "持续演练实际 450/450 闭环成功、无失败、300s 硬上限内结束；高档图片 ready/字节与连续可解析资源采样均有实证（${SOAK_T}s）"
+      else
+        fail "持续演练不满足完整证据（load_rc=$SOAK_RC sample_failed=$SAMPLE_FAILED pool_before=$POOL_READY pool_after=$POOL_AFTER_OK verify_rc=$VERIFY_RC）；缺失或未知数据不能视为通过"
+      fi
 
       # 过期清理有没有真的触发（不是"我们有个 purge 循环"，是日志里有没有非零计数）
       docker logs "$MEAS" 2>&1 | grep "清理" >"$LOGS/purge.log" || true
@@ -1047,6 +1115,8 @@ if [[ $DOCKER_OK -eq 1 && -n "$CID" ]] && (( AVAIL_NOW >= 100 * 1024 )); then
       fi
 
       POOL1="$(docker exec -i "$MEAS" "$OPS" admin GET /api/admin/pool </dev/null 2>/dev/null | sed -n '2,$p')"
+      printf '%s\n' "$POOL1" >"$LOGS/pool-after.json"
+      node docs/scripts/soak-evidence.mjs pool --file "$LOGS/pool-after.json" >/dev/null 2>&1 || true
       READY1="$(printf '%s' "$POOL1" | jq -r '[.buckets[]?|.ready]|add//0')"
       IMGB="$(printf '%s' "$POOL1" | jq -r '.image.asset_bytes // 0')"
       DB1="$(stat -c '%s' "$D/data/epocha.db" 2>/dev/null || echo 0)"

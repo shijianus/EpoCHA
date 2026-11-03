@@ -33,6 +33,16 @@ blocked() { STEP=$((STEP + 1)); N_BLOCKED=$((N_BLOCKED + 1)); printf '[adminui] 
 notrun()  { STEP=$((STEP + 1)); N_NOTRUN=$((N_NOTRUN + 1)); printf '[adminui] NOT_RUN %d: %s\n' "$STEP" "$*"; }
 abort()   { printf '[adminui] 中止: %s\n' "$*" >&2; exit 1; }
 
+manual_result() {
+  local check_id="$1" label="$2" rc=0
+  node "$ROOT/docs/scripts/manual-evidence.mjs" --root "$ROOT" --check "$check_id" || rc=$?
+  case "$rc" in
+    0) pass "$label（人工证据已核验：$check_id）" ;;
+    3) notrun "$label（缺少本源码快照的人工证据：$check_id）" ;;
+    *) fail "$label（人工证据无效，退出码 $rc：$check_id）" ;;
+  esac
+  return "$rc"
+}
 cleanup() {
   local rc=$?
   trap - EXIT INT TERM
@@ -280,8 +290,10 @@ else
     "http://127.0.0.1:$ADMIN_PORT/api/admin/sites/$SITE_ID/disable" 2>/dev/null || echo 000)"
   [[ "$dis" == "200" ]] || fail "停用应 200，实得 $dis"
   grep -q '"enabled":false' "$WORK/http/dis.json" || fail "停用响应未反映 enabled=false"
-  en="$(acode_of "http://127.0.0.1:$ADMIN_PORT/api/admin/sites/$SITE_ID/enable" /dev/null)"
-  [[ "$en" == "200" ]] || fail "启用应 200，实得 $en"
+  en="$(curl -s -o "$WORK/http/en.json" -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer $ADMIN_KEY_VAL" -H 'Content-Type: application/json' -d '{}' \
+    "http://127.0.0.1:$ADMIN_PORT/api/admin/sites/$SITE_ID/enable" 2>/dev/null || echo 000)"
+  [[ "$en" == "200" ]] || fail "启用应 200，实得 $en：$(cat "$WORK/http/en.json" 2>/dev/null)"
   if [[ "$dis" == "200" && "$en" == "200" ]] && grep -q '"enabled":false' "$WORK/http/dis.json"; then
     pass "停用/启用走真实端点且状态可见"
   fi
@@ -315,50 +327,26 @@ else
     ADMIN_KEY_FILE="$WORK/keys/admin" \
     BAD_ADMIN_KEY="$BAD_KEY_VAL" \
     ADMIN_SERVER_PID="$SERVER_PID" \
-      node --test docs/scripts/browser/adminui_browser.test.mjs 2>&1 | tee "$WORK/browser.log"
+      node --test --test-reporter=tap docs/scripts/browser/adminui_browser.test.mjs 2>&1 | tee "$WORK/browser.log"
     browser_rc=${PIPESTATUS[0]}
     set -e
     [[ $browser_rc -eq 0 ]] || { tail -n 60 "$WORK/browser.log"; fail "浏览器交互验收未通过（node --test 退出码 $browser_rc）"; }
 
-    # node:test 在非 TTY 下输出 TAP。skip 是"这条没执行"而不是"这条过了"；
-    # 只数条数发现不了"关键那条被换成一条更弱的断言"，所以**按标题逐个核对通过项**（4A 的教训）。
-    SKIP_COUNT="$(awk '/^# skipped /{print $3}' "$WORK/browser.log")" || SKIP_COUNT=0
-    PASS_COUNT="$(awk '/^# pass /{print $3}' "$WORK/browser.log")" || PASS_COUNT=0
-    SKIP_COUNT="${SKIP_COUNT:-0}"; PASS_COUNT="${PASS_COUNT:-0}"
-    case "$SKIP_COUNT$PASS_COUNT" in (*[!0-9]*|'') fail "读不到 node:test 的 pass/skipped 计数（报告格式变了？）";; esac
-    log "  node:test pass=$PASS_COUNT skipped=$SKIP_COUNT"
-    [[ $SKIP_COUNT -eq 0 ]] \
-      || fail "浏览器用例跳过 $SKIP_COUNT 项：本套件不该有 skip（缺条件应由脚本层标 BLOCKED，不是用例内 skip）"
-
-    OK_TITLES="$(grep -E '^ok [0-9]+ - ' "$WORK/browser.log" || true)"
-    REQUIRED_TESTS=(
-      "错误 key 登录失败：显示凭据无效、留在登录面、输入框不留原文"
-      "正确 key 登录：显示非敏感 key_id，凭据不进任何浏览器存储"
-      "创建站点：真实 201、一次性 secret 出现在结果面板、验证模式与题型按选择生效"
-      "进入详情不再取回 secret：页面与只读 API 两侧都扫过"
-      "修改策略与 Origin：保存、重新读取一致，越界值被服务端拒"
-      "停用与启用：确认框展示名称与 site_key，状态与版本是服务端事实"
-      "题型面板显示实验性与生产就绪的真实结论，页面不请求任何外部源"
-      "退出：页面回到登录面且无法再读管理数据（凭据是页面丢的，不是服务端失效）"
-      "375×667：视口真的设成 375，登录、创建与保存控件都能命中"
-      "连续错误 key 触发 429 时不说成密码错误；服务真不可达时说明是连接问题"
-    )
-    missing=0
-    for want in "${REQUIRED_TESTS[@]}"; do
-      if ! printf '%s\n' "$OK_TITLES" | grep -qF -- "$want"; then
-        fail "必需的浏览器交互用例未作为**通过项**出现：$want"
-        missing=1
-      fi
-    done
-    [[ $missing -eq 0 && $SKIP_COUNT -eq 0 && $N_FAIL -eq 0 ]] \
-      && pass "十项浏览器交互验收逐条按标题核对为通过（pass=$PASS_COUNT，skip=0）"
+    manifest_rc=0
+    node docs/scripts/release-check.mjs --check-browser-manifest docs/scripts/browser/cases.mjs docs/scripts/browser/adminui_browser.test.mjs "$WORK/browser.log" || manifest_rc=$?
+    case "$manifest_rc" in
+      0) [[ $browser_rc -eq 0 ]] && pass "管理台真实浏览器用例全部通过，TAP 与统一 manifest 逐项一致" ;;
+      3) blocked "管理台浏览器必需用例包含 SKIP/TODO/cancelled，本轮未完整执行" ;;
+      *) fail "管理台浏览器 manifest 对账失败（退出码 $manifest_rc）" ;;
+    esac
   fi
 fi
 
-log "第 10 步：本轮未执行项（如实登记，不混进 PASS）"
-notrun "403 与 5xx 两支错误文案：管理 API 当前不产生这两种响应，无法真实触发（见测试文件头部说明）"
-notrun "剪贴板写入：headless Firefox 不给权限，测到的是**回落路径**（选中 + 提示手动复制）"
-notrun "真机移动端：375×667 是 BiDi 设进去的真实视口，不是真实设备"
+log "第 10 步：人工验收证据（缺失时如实登记 NOT_RUN）"
+manual_rc=0
+manual_result "adminui.http-errors" "403 与 5xx 两支错误文案的人工交互检查" || manual_rc=$?
+manual_result "adminui.clipboard-write" "剪贴板真实写入（回落选中不等于写入成功）" || manual_rc=$?
+manual_result "adminui.real-mobile" "真机移动端（BiDi 窄视口不替代真实设备）" || manual_rc=$?
 
 log "结论"
 if [[ $N_FAIL -gt 0 ]]; then

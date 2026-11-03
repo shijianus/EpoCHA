@@ -273,16 +273,17 @@ if (typeof self !== "undefined") {
       submit: "提交答案",
       refresh: "换一张",
       retry: "重试",
-      solving: "正在本地计算（不会把答案或服务端数据送出）…",
+      solving: "正在本地计算 PoW，完成后会将答案提交给验证服务…",
       solvingProgress: "正在本地计算 PoW：已尝试 {tries} 次（{ms} ms）",
       submitting: "计算完成，正在提交答案…",
       ready: "请看清图片后输入字符，然后提交。",
       verified: "验证通过。",
       expired: "这张题已过期，token 已作废。请换一张重新验证。",
+      reset: "已重置。请换一张重新验证。",
       destroyed: "组件已销毁。",
       errNetwork: "无法连接验证服务，请检查网络后重试。",
       errRateLimited: "请求过于频繁，请稍后重试。",
-      errUnavailable: "验证服务暂时给不出题目，稍后会自动重试。",
+      errUnavailable: "验证服务暂时给不出题目，请稍后换一张重试。",
       errInvalidChallenge: "这张题已经不可用了（答错过期或被作废）。请换一张。",
       errInvalidRequest: "请求不被接受：站点标识或输入格式有问题。",
       errWorkerBlocked: "当前页面的 CSP 禁止创建计算线程，无法本地完成验证。"
@@ -310,10 +311,11 @@ if (typeof self !== "undefined") {
       ready: "Read the image, type the characters, then submit.",
       verified: "Verified.",
       expired: "This question expired and its token was discarded. Start a new one.",
+      reset: "Reset. Get a new image to verify again.",
       destroyed: "Widget destroyed.",
       errNetwork: "Cannot reach the verification service. Check the network and retry.",
       errRateLimited: "Too many requests. Please wait and retry.",
-      errUnavailable: "The verification service has no question available right now; retrying shortly.",
+      errUnavailable: "The verification service has no question available right now. Try a new image shortly.",
       errInvalidChallenge: "This question is no longer usable. Get a new one.",
       errInvalidRequest: "Request rejected: bad site key or input format.",
       errWorkerBlocked: "This page's Content-Security-Policy blocks worker creation, so local "
@@ -460,7 +462,12 @@ if (typeof self !== "undefined") {
       powTimeoutMs: Math.min(Math.max(Number(o.powTimeoutMs) || 20000, 1000), 120000),
       powMaxTries: Math.min(Number(o.powMaxTries) || 0 || 50000000, 1e12),
       fetchTimeoutMs: Math.min(Math.max(Number(o.fetchTimeoutMs) || 10000, 1000), 60000),
-      maxAutoRetry: Math.min(Number(o.maxAutoRetry) || 0 || 2, 5),
+      maxAutoRetry: (function () {
+        if (o.maxAutoRetry === undefined) return 2;
+        var n = Number(o.maxAutoRetry);
+        if (!Number.isFinite(n) || n < 0) return 2;
+        return Math.min(Math.floor(n), 5);
+      })(),
       showExperimentalNote: o.showExperimentalNote !== false,
       // form：<form> 元素或它的 id。容器不在目标 form 内时用它显式关联字段。
       // 刻意不做的事：不接受跨文档元素、不接受选择器字符串（querySelector 会把"随便挑一个 form"
@@ -518,7 +525,8 @@ if (typeof self !== "undefined") {
     this.jobSeq = 0;
     this.pending = {};       // jobId → {settle, cancel}；同一时刻最多一个在算
     this.inflightJob = 0;
-    this.inflight = null;    // 当前 fetch 的 AbortController
+    this.inflight = null;    // 当前 HTTP 请求的取消句柄（同时结算 Promise、清理超时）
+    this.retryTimer = 0;
     this.timer = 0;
     this.autoRetry = 0;
     this.destroyed = false;
@@ -552,7 +560,7 @@ if (typeof self !== "undefined") {
       (want.contains(this.container) ? this.container : want).appendChild(this.field);
     }
 
-    this.host = el("div", { "data-epocha-widget": this.id });
+    this.host = el("div", { "data-epocha-widget": this.id, lang: o.lang });
     this.container.appendChild(this.host);
     this.root = this.host.attachShadow({ mode: "open" });
     applyStyle(this.root);
@@ -561,13 +569,16 @@ if (typeof self !== "undefined") {
     var headingId = this.id + "-lbl";
     var statusId = this.id + "-st";
     var noteId = this.id + "-note";
-    this.heading = el("label", { class: "lbl", id: headingId }, tr(o.lang, "instruction", { length: 6 }));
+    this.heading = el("label", {
+      class: "lbl", id: headingId, "for": this.id + "-ans"
+    }, tr(o.lang, "instruction", { length: 6 }));
     this.imgWrap = el("div", { class: "img" });
     this.imgWrap.textContent = "…";
     this.answer = el("input", {
       class: "ans", type: "text", id: this.id + "-ans", autocomplete: "off",
       autocapitalize: "characters", spellcheck: "false", maxlength: "8",
-      "aria-required": "true", "aria-invalid": "false", "aria-describedby": noteId + " " + statusId
+      "aria-required": "true", "aria-invalid": "false", "aria-labelledby": headingId,
+      "aria-describedby": noteId + " " + statusId
     });
     this.answer.placeholder = tr(o.lang, "answerPlaceholder", { length: 6 });
     this.btnSubmit = el("button", { type: "button" }, tr(o.lang, "submit"));
@@ -602,8 +613,11 @@ if (typeof self !== "undefined") {
   };
 
   Widget.prototype._setState = function (next) {
+    var my = this.gen;
     this.state = next;
     if (this.o.onState) { try { this.o.onState(next, this.id); } catch (e) { /* 回调异常不影响组件 */ } }
+    // 宿主可能在 onState 中同步 reset/refresh/destroy，旧转换必须到此停止。
+    return !this.destroyed && my === this.gen && this.state === next;
   };
 
   Widget.prototype._say = function (text, kind) {
@@ -612,11 +626,14 @@ if (typeof self !== "undefined") {
   };
 
   Widget.prototype._fail = function (code, i18nKey, vars, retryable) {
+    this.gen++;
+    this._cancelRequest();
+    this._clearRetry();
     this._clearDeadline();
     this._terminateWorker();
     this.challenge = null;
     this._setToken("");
-    this._setState(STATES.ERROR);
+    if (!this._setState(STATES.ERROR)) return;
     this._say(tr(this.o.lang, i18nKey, vars), "err");
     this.btnSubmit.disabled = true;
     this.btnRefresh.disabled = false;
@@ -635,18 +652,33 @@ if (typeof self !== "undefined") {
 
   Widget.prototype._clearDeadline = function () {
     if (this.timer) { global.clearTimeout(this.timer); this.timer = 0; }
+    this.deadlineEpoch = 0;
+  };
+
+  Widget.prototype._cancelRequest = function () {
+    if (this.inflight) this.inflight.abort();
+  };
+
+  Widget.prototype._clearRetry = function () {
+    if (this.retryTimer) { global.clearTimeout(this.retryTimer); this.retryTimer = 0; }
   };
 
   // 客户端倒计时只为体验；服务端才是最终裁决（过期后库里一样拒绝）。
   // 服务端没给 expires_in 时**不猜**固定两分钟：不设倒计时，等服务端判定。
   Widget.prototype._armDeadline = function (deadlineEpoch, onExpire) {
-    var self = this;
+    var self = this, my = this.gen;
     this._clearDeadline();
     if (!deadlineEpoch) return;
     this.deadlineEpoch = deadlineEpoch;
     var ms = deadlineEpoch - Date.now();
-    if (ms <= 0) { onExpire(); return; }
-    this.timer = global.setTimeout(function () { self.deadlineEpoch = 0; onExpire(); }, ms);
+    if (ms <= 0) { this.deadlineEpoch = 0; onExpire(); return; }
+    var timer = global.setTimeout(function () {
+      if (self.destroyed || my !== self.gen || self.timer !== timer) return;
+      self.timer = 0;
+      self.deadlineEpoch = 0;
+      onExpire();
+    }, ms);
+    this.timer = timer;
   };
 
   Widget.prototype._recheckDeadline = function () {
@@ -663,7 +695,7 @@ if (typeof self !== "undefined") {
     this.challenge = null;
     this._clearDeadline();
     this._terminateWorker();
-    this._setState(STATES.EXPIRED);
+    if (!this._setState(STATES.EXPIRED)) return;
     this._say(tr(this.o.lang, "expired"), "err");
     this.btnSubmit.disabled = true;
     this.btnRefresh.disabled = false;
@@ -672,8 +704,9 @@ if (typeof self !== "undefined") {
   // 过期必须**清掉 token**，不能只改 UI：否则 getResponse() 还能拿到一个已作废的值。
   Widget.prototype._expireToken = function () {
     this._setToken("");
+    this.challenge = null;
     this._clearDeadline();
-    this._setState(STATES.EXPIRED);
+    if (!this._setState(STATES.EXPIRED)) return;
     this._say(tr(this.o.lang, "expired"), "err");
     this.btnRefresh.disabled = false;
     if (this.o.onExpired) { try { this.o.onExpired(this.id); } catch (e) { /* 同上 */ } }
@@ -689,6 +722,8 @@ if (typeof self !== "undefined") {
     var self = this, o = this.o;
     this.gen++;
     var my = this.gen;
+    this._cancelRequest();
+    this._clearRetry();
     this._clearDeadline();
     this._terminateWorker();
     this.challenge = null;
@@ -696,19 +731,16 @@ if (typeof self !== "undefined") {
     this.successFired = false;
     this.answer.value = "";
     this.answer.setAttribute("aria-invalid", "false");
-    this._setState(STATES.LOADING);
+    clear(this.imgWrap);
+    this.imgWrap.textContent = "…";
+    if (!this._setState(STATES.LOADING)) return;
     this._say("…", "busy");
     this._enable(false);
 
-    var controller = new AbortController();
-    this.inflight = controller;
-    var to = global.setTimeout(function () { controller.abort(); }, o.fetchTimeoutMs);
-
-    this._post("/api/challenge", { site_key: o.siteKey, lang: o.lang }, controller.signal)
+    var loadStartedAt = Date.now();
+    this._request("/api/challenge", { site_key: o.siteKey, lang: o.lang })
       .then(function (r) {
-        global.clearTimeout(to);
         if (self.destroyed || my !== self.gen) return;      // 晚到的响应不能覆盖新题
-        self.inflight = null;
         if (!r.ok) { self._handleHttpFailure(r); return; }
         var j = r.json;
         if (typeof j.token !== "string" || !j.pow || j.pow.algo !== POW_ALGO) {
@@ -731,6 +763,13 @@ if (typeof self !== "undefined") {
           token: j.token, pow: j.pow, question: q,
           expires: Number(j.expires_in) || 0
         };
+        if (self.challenge.expires > 0) {
+          self.deadlineEpoch = loadStartedAt + self.challenge.expires * 1000;
+          if (Date.now() >= self.deadlineEpoch) {
+            self._expireChallenge();
+            return;
+          }
+        }
         self._renderImage(q, iw, ih);
         self.heading.textContent = tr(o.lang, "instruction", { length: q.length });
         self.note.textContent = tr(o.lang, "charsetNote", { charset: q.charset || "—" });
@@ -741,19 +780,24 @@ if (typeof self !== "undefined") {
         // 每个实例最多一个 worker（this.worker 复用），不存在"并发多个无上限计算 worker"。
         if (!self._ensureWorker()) return;
         self._enable(true);
-        self._setState(STATES.READY);
+        if (!self._setState(STATES.READY)) return;
         self._say(tr(o.lang, "ready"), "idle");
         self.autoRetry = 0;
         if (self.challenge.expires > 0) {
-          self._armDeadline(Date.now() + self.challenge.expires * 1000, function () { self._expireChallenge(); });
+          self._armDeadline(self.deadlineEpoch, function () { self._expireChallenge(); });
         }
       })
       .catch(function (err) {
-        global.clearTimeout(to);
-        if (self.destroyed || my !== self.gen) return;
-        self.inflight = null;
-        self._fail(err && err.name === "AbortError" ? "timeout" : "network", "errNetwork", null, true);
+        if (self.destroyed || my !== self.gen || (err && err.code === "cancelled")) return;
+        self._fail(err && err.code === "timeout" ? "timeout" : "network", "errNetwork", null, true);
       });
+  };
+
+  Widget.prototype._imageFailed = function () {
+    if (this.destroyed) return;
+    clear(this.imgWrap);
+    this.imgWrap.textContent = tr(this.o.lang, "errImageUnusable");
+    this._fail("image-unusable", "errImageUnusable", null, true);
   };
 
   Widget.prototype._renderImage = function (q, iw, ih) {
@@ -763,11 +807,10 @@ if (typeof self !== "undefined") {
       alt: tr(this.o.lang, "imageAlt", { length: q.length }),
       width: String(iw), height: String(ih), decoding: "async"
     });
-    var self = this;
+    var self = this, my = this.gen;
     img.addEventListener("error", function () {
-      if (self.destroyed) return;
-      clear(self.imgWrap);
-      self.imgWrap.textContent = tr(self.o.lang, "errImageUnusable");
+      if (self.destroyed || my !== self.gen || img.parentNode !== self.imgWrap) return;
+      self._imageFailed();
     });
     this.imgWrap.appendChild(img);
   };
@@ -780,10 +823,17 @@ if (typeof self !== "undefined") {
     if (r.status === 503 && code === "challenge-unavailable") {
       if (this.autoRetry < o.maxAutoRetry) {
         this.autoRetry++;
-        this._setState(STATES.LOADING);
+        if (!this._setState(STATES.LOADING)) return;
         this._say(tr(o.lang, "errUnavailable") + " (" + this.autoRetry + "/" + o.maxAutoRetry + ")", "busy");
         var wait = Math.min(Math.max(Number(r.headers && r.headers.get("Retry-After")) || 2, 1), 30) * 1000;
-        global.setTimeout(function () { if (!self.destroyed) self.load(); }, wait);
+        var my = this.gen;
+        this._clearRetry();
+        var timer = global.setTimeout(function () {
+          if (self.destroyed || my !== self.gen || self.retryTimer !== timer) return;
+          self.retryTimer = 0;
+          self.load();
+        }, wait);
+        this.retryTimer = timer;
         return;
       }
       this._fail("challenge-unavailable", "errUnavailable", null, true);
@@ -798,6 +848,43 @@ if (typeof self !== "undefined") {
       return;
     }
     this._fail(code || ("http-" + r.status), "errInvalidRequest", null, false);
+  };
+
+  Widget.prototype._request = function (path, payload) {
+    var self = this, my = this.gen;
+    this._cancelRequest();
+    return new Promise(function (resolve, reject) {
+      var controller = new AbortController();
+      var settled = false, timer = 0;
+      var request = {
+        abort: function () {
+          if (!finish({ code: "cancelled" })) return;
+          try { controller.abort(); } catch (e) { /* noop */ }
+        }
+      };
+      function finish(err, response) {
+        if (settled) return false;
+        settled = true;
+        global.clearTimeout(timer);
+        if (self.inflight === request) self.inflight = null;
+        if (err) reject(err);
+        else resolve(response);
+        return true;
+      }
+      self.inflight = request;
+      timer = global.setTimeout(function () {
+        if (self.destroyed || my !== self.gen || self.inflight !== request) return;
+        // abort 不保证远端未消费；先结算超时，迟到的成功也不能重新兑现或自动重发。
+        if (!finish({ code: "timeout", key: "errNetwork" })) return;
+        try { controller.abort(); } catch (e) { /* noop */ }
+      }, self.o.fetchTimeoutMs);
+      function failed(err) {
+        finish({ code: err && err.name === "AbortError" ? "timeout" : "network", key: "errNetwork" });
+      }
+      try {
+        self._post(path, payload, controller.signal).then(function (r) { finish(null, r); }, failed);
+      } catch (e) { failed(e); }
+    });
   };
 
   Widget.prototype._post = function (path, payload, signal) {
@@ -853,10 +940,15 @@ if (typeof self !== "undefined") {
       this._fail("worker-blocked", "errWorkerBlocked", null, false);
       return null;
     }
-    var self = this;
-    this.worker.addEventListener("message", function (ev) { self._dispatch(ev.data); });
-    this.worker.addEventListener("error", function () {
-      if (!self.destroyed) self._fail("worker-blocked", "errWorkerBlocked", null, false);
+    var self = this, my = this.gen;
+    var worker = this.worker;
+    worker.addEventListener("message", function (ev) {
+      if (self.destroyed || my !== self.gen || self.worker !== worker) return;
+      self._dispatch(ev.data);
+    });
+    worker.addEventListener("error", function () {
+      if (self.destroyed || my !== self.gen || self.worker !== worker) return;
+      self._fail("worker-blocked", "errWorkerBlocked", null, false);
     });
     return this.worker;
   };
@@ -877,8 +969,8 @@ if (typeof self !== "undefined") {
     for (var k in this.pending) {
       if (Object.prototype.hasOwnProperty.call(this.pending, k)) {
         var s = this.pending[k];
-        delete this.pending[k];
         try { s.cancel(); } catch (e) { /* noop */ }
+        delete this.pending[k];
       }
     }
     if (this.worker) { try { this.worker.terminate(); } catch (e) { /* 已终止 */ } this.worker = null; }
@@ -977,8 +1069,9 @@ if (typeof self !== "undefined") {
     }
     var my = this.gen;
     var challenge = this.challenge;
+    var redeemStartedAt = 0;
     this._clearDeadline();
-    this._setState(STATES.SOLVING);
+    if (!this._setState(STATES.SOLVING)) return;
     this._enable(false);
     this._say(tr(o.lang, "solving"), "busy");
 
@@ -987,9 +1080,10 @@ if (typeof self !== "undefined") {
       self._say(tr(o.lang, "solvingProgress", { tries: m.tries, ms: m.ms }), "busy");
     }).then(function (nonce) {
       if (self.destroyed || my !== self.gen) return;        // 被取消/换代：丢弃这次结果
-      self._setState(STATES.SUBMITTING);
+      if (!self._setState(STATES.SUBMITTING)) return;
       self._say(tr(o.lang, "submitting"), "busy");
-      return self._post("/api/redeem", {
+      redeemStartedAt = Date.now();
+      return self._request("/api/redeem", {
         token: challenge.token, pow_nonce: nonce, answer: val
       }).then(function (r) {
         if (self.destroyed || my !== self.gen) return;
@@ -998,17 +1092,24 @@ if (typeof self !== "undefined") {
         if (typeof token !== "string" || token.length === 0 || token.length > 4096) {
           self._fail("bad-response", "errBadResponse", null, false); return;
         }
+        var ttl = Number(r.json.expires_in) || 0;
+        var tokenDeadline = ttl > 0 ? redeemStartedAt + ttl * 1000 : 0;
+        if (tokenDeadline > 0 && Date.now() >= tokenDeadline) {
+          self._expireToken();
+          return;
+        }
+        if (tokenDeadline > 0) {
+          self.tokenDeadline = tokenDeadline;
+          self._armDeadline(tokenDeadline, function () { self._expireToken(); });
+        }
         self._setToken(token);
         self.challenge = null;
-        self._setState(STATES.VERIFIED);
+        if (!self._setState(STATES.VERIFIED)) return;
+        self._recheckDeadline();
+        if (self.state !== STATES.VERIFIED) return;
         self._say(tr(o.lang, "verified"), "ok");
         self.btnSubmit.disabled = true;
         self.btnRefresh.disabled = false;
-        var ttl = Number(r.json.expires_in) || 0;
-        if (ttl > 0) {
-          self.tokenDeadline = Date.now() + ttl * 1000;
-          self._armDeadline(self.tokenDeadline, function () { self._expireToken(); });
-        }
         if (!self.successFired) {           // verified 之后重复路径不再触发回调
           self.successFired = true;
           if (o.onSuccess) { try { o.onSuccess(token, self.id); } catch (e) { /* 回调异常隔离 */ } }
@@ -1027,7 +1128,7 @@ if (typeof self !== "undefined") {
     if (code === "invalid-challenge") {
       // 答错或已被终结：这张题不可再用，且**必须**清空任何已存在的 token。
       this._setToken("");
-      this._setState(STATES.ERROR);
+      if (!this._setState(STATES.ERROR)) return;
       this._say(tr(this.o.lang, "errInvalidChallenge"), "err");
       this.answer.setAttribute("aria-invalid", "true");
       this.btnSubmit.disabled = true;
@@ -1047,33 +1148,38 @@ if (typeof self !== "undefined") {
 
   Widget.prototype.refresh = function () {
     if (this.destroyed) return;
-    this._terminateWorker();
-    this._setToken("");
-    this.successFired = false;
     this.autoRetry = 0;
     this.load();
   };
 
   Widget.prototype.reset = function () {
     if (this.destroyed) return;
-    if (this.inflight) { try { this.inflight.abort(); } catch (e) { /* noop */ } this.inflight = null; }
+    this.gen++;
+    this._cancelRequest();
+    this._clearRetry();
     this._terminateWorker();
     this._clearDeadline();
-    this.deadlineEpoch = 0;
     this.challenge = null;
     this._setToken("");
     this.successFired = false;
+    this.autoRetry = 0;
     this.answer.value = "";
     this.answer.setAttribute("aria-invalid", "false");
-    this._enable(true);
-    this._setState(STATES.IDLE);
-    this._say(tr(this.o.lang, "ready"), "idle");
+    clear(this.imgWrap);
+    this.imgWrap.textContent = tr(this.o.lang, "reset");
+    this.btnSubmit.disabled = true;
+    this.btnRefresh.disabled = false;
+    this.answer.disabled = true;
+    if (!this._setState(STATES.IDLE)) return;
+    this._say(tr(this.o.lang, "reset"), "idle");
   };
 
   Widget.prototype.destroy = function () {
     if (this.destroyed) return;
+    this.gen++;
     this.destroyed = true;
-    if (this.inflight) { try { this.inflight.abort(); } catch (e) { /* noop */ } this.inflight = null; }
+    this._cancelRequest();
+    this._clearRetry();
     this._terminateWorker();
     this._clearDeadline();
     for (var i = 0; i < this.listeners.length; i++) {
@@ -1106,7 +1212,9 @@ if (typeof self !== "undefined") {
     },
     getResponse: function (id) {
       var w = registry.get(id);
-      return w && w.state === STATES.VERIFIED ? w.token : "";
+      if (!w) return "";
+      w._recheckDeadline();
+      return w.state === STATES.VERIFIED ? w.token : "";
     },
     reset: function (id) { var w = registry.get(id); if (w) w.reset(); },
     refresh: function (id) { var w = registry.get(id); if (w) w.refresh(); },

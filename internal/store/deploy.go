@@ -86,33 +86,31 @@ func FingerprintMatches(fp string, pepper []byte) bool {
 	return subtle.ConstantTimeCompare([]byte(fp), []byte(PepperFingerprint(pepper))) == 1
 }
 
-// Ready 做一次有界的就绪自检：连得上、schema 版本就位且为本程序支持的版本、**写路径可用**。
-//
-// 三条检查各自对应一种真实故障：
-//   - 连不上：句柄已关闭或驱动异常；
-//   - schema 版本缺失/低于当前：迁移没跑完（半初始化实例不该接流量）；
-//     高于当前：程序比库旧，业务查询会大面积失败；
-//   - 写不可用：只读挂载、权限漂移、磁盘满。WAL 库读得动却提交不了事务，
-//     这时对外表现是"每次验证都失败"，比直接不就绪更糟。
-//
-// 它**不**做的事：不分配题目、不消费 token、不看题池水位（水位低不是"未就绪"，
-// 池空只会让业务侧得到 503 + 不降级，那是容量信号不是存活信号），
-// 也不用 BEGIN IMMEDIATE 抢写锁——连接池上限是 1（Open 里 SetMaxOpenConns(1)），
-// 探针占住那条连接会把正常流量排在后面，探针不该自己成为故障源。
-// 写可用性因此用两个零副作用的文件级检查表达，见 writeProbe。
+// Ready 检查连接、schema 版本及文件权限，不分配题目或消费 token。
+// 题池水位不参与就绪判定，写锁和业务事务也不作为探针负载。
+// 文件检查不等于一次 WAL 提交成功，磁盘余量与业务写入错误仍须独立监控。
 func (d *DB) Ready(ctx context.Context) error {
 	if d == nil || d.h == nil {
 		return fmt.Errorf("%w: 句柄缺失", ErrNotReady)
 	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: 请求已取消", ErrNotReady)
+	}
 	ctxv, cancel := context.WithTimeout(ctx, readyMaxWait)
 	defer cancel()
 
+	if err := ctxv.Err(); err != nil {
+		return fmt.Errorf("%w: 请求已取消", ErrNotReady)
+	}
 	if err := d.h.PingContext(ctxv); err != nil {
 		return fmt.Errorf("%w: 连接", ErrNotReady)
 	}
 	var v sql.NullString
 	if err := d.h.QueryRowContext(ctxv, `SELECT v FROM meta WHERE k='schema_version'`).Scan(&v); err != nil {
 		return fmt.Errorf("%w: 版本记录", ErrNotReady)
+	}
+	if err := ctxv.Err(); err != nil {
+		return fmt.Errorf("%w: 请求已取消", ErrNotReady)
 	}
 	n, err := strconv.Atoi(v.String)
 	if err != nil {
@@ -121,14 +119,20 @@ func (d *DB) Ready(ctx context.Context) error {
 	if n != schemaVersion {
 		return fmt.Errorf("%w: schema 版本不匹配", ErrNotReady)
 	}
-	if err := d.writeProbe(); err != nil {
+	if err := d.writeProbe(ctxv); err != nil {
 		return err
+	}
+	if err := ctxv.Err(); err != nil {
+		return fmt.Errorf("%w: 请求已取消", ErrNotReady)
 	}
 	return nil
 }
 
-// writeProbe 检查"这个库还能不能继续被写"，不写入任何内容、不创建任何持久文件。
-func (d *DB) writeProbe() error {
+// writeProbe 不写业务数据，只检查主文件可写和同目录文件创建能力。
+func (d *DB) writeProbe(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: 请求已取消", ErrNotReady)
+	}
 	if d.path == "" {
 		return fmt.Errorf("%w: 路径缺失", ErrNotReady)
 	}
@@ -137,6 +141,9 @@ func (d *DB) writeProbe() error {
 		return fmt.Errorf("%w: 主文件不可写", ErrNotReady)
 	}
 	_ = f.Close()
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: 请求已取消", ErrNotReady)
+	}
 	// WAL 需要能在同目录创建 -wal/-shm；目录不可写时上面那步可能仍然通过。
 	dir := filepath.Dir(d.path)
 	tmp, err := os.CreateTemp(dir, ".epocha-ready-*")
@@ -146,6 +153,9 @@ func (d *DB) writeProbe() error {
 	name := tmp.Name()
 	_ = tmp.Close()
 	_ = os.Remove(name)
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: 请求已取消", ErrNotReady)
+	}
 	return nil
 }
 
@@ -166,6 +176,7 @@ type Manifest struct {
 	SourceWALB    int64            `json:"source_wal_bytes"`
 	Integrity     string           `json:"integrity_check"`
 	Counts        map[string]int64 `json:"counts"`
+	Warning       string           `json:"-"`
 }
 
 // BackupOptions 是一次备份的输入。AppVersion/Commit 由调用方（cmd/ops）注入，
@@ -200,12 +211,9 @@ var countQuery = []struct {
 }
 
 // Backup 用 VACUUM INTO 生成一致性快照，并写出 manifest。
-//
-// 原子性与"半成品"的处理：快照先写成 `.partial`，通过完整性检查后才 rename 成最终名，
-// manifest 同样先 partial 再 rename。**任何一步失败都清掉自己刚创建的临时文件**，
-// 于是"目录里有一个 .db"这件事本身就等于"它是一次成功的备份"。
-// 目标名已存在时直接拒绝：不覆盖、不加后缀，让"覆盖上一份"永远是显式动作。
-func Backup(ctx context.Context, o BackupOptions) (*Manifest, error) {
+// 暂存目录为每次调用独占；两个最终文件都采用无覆盖发布，manifest 最后落位。
+// 数据库发布后不再回滚删除，失败响应必须说明已保留的产物与尚未完成的步骤。
+func Backup(ctx context.Context, o BackupOptions) (manifest *Manifest, result error) {
 	if len(o.Pepper) < 32 {
 		return nil, fmt.Errorf("%w: pepper 长度不足 32 字节", ErrBadConfig)
 	}
@@ -213,6 +221,9 @@ func Backup(ctx context.Context, o BackupOptions) (*Manifest, error) {
 		return nil, fmt.Errorf("%w: 缺少源路径或目标目录", ErrBadConfig)
 	}
 	if err := checkDSNPath(o.SrcPath); err != nil {
+		return nil, err
+	}
+	if err := checkDSNPath(o.DestDir); err != nil {
 		return nil, err
 	}
 	src, err := os.Stat(o.SrcPath)
@@ -231,8 +242,10 @@ func Backup(ctx context.Context, o BackupOptions) (*Manifest, error) {
 	destDB := filepath.Join(o.DestDir, name+".db")
 	destManifest := filepath.Join(o.DestDir, name+manifestSuffix)
 	for _, p := range []string{destDB, destManifest} {
-		if _, err := os.Stat(p); err == nil {
+		if _, err := os.Lstat(p); err == nil {
 			return nil, fmt.Errorf("store: 目标已存在，拒绝覆盖：%s", filepath.Base(p))
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("store: 无法确认备份目标是否存在")
 		}
 	}
 
@@ -253,12 +266,20 @@ func Backup(ctx context.Context, o BackupOptions) (*Manifest, error) {
 		return nil, fmt.Errorf("%w: 库为 v%d，程序支持 v%d", ErrSchemaConflict, cur, schemaVersion)
 	}
 
-	partial := filepath.Join(o.DestDir, "."+name+".db"+partialSuffix)
-	// 失败即清理：partial 是我们自己刚创建的文件，删除它不涉及任何用户数据。
+	staging, err := os.MkdirTemp(o.DestDir, "."+name+"-")
+	if err != nil {
+		return nil, fmt.Errorf("store: 无法创建备份暂存目录")
+	}
 	defer func() {
-		_ = os.Remove(partial)
-		_ = dropSidecarsSafe(partial)
+		if err := os.RemoveAll(staging); err != nil {
+			if manifest != nil && result == nil {
+				manifest.Warning += " 本次备份暂存目录清理失败；已发布文件保留。"
+			} else {
+				result = errors.Join(result, fmt.Errorf("store: 本次备份暂存目录清理失败"))
+			}
+		}
 	}()
+	partial := filepath.Join(staging, "snapshot.db")
 	if _, err := h.ExecContext(ctx, `VACUUM INTO ?`, partial); err != nil {
 		return nil, fmt.Errorf("store: 快照写入失败")
 	}
@@ -293,10 +314,6 @@ func Backup(ctx context.Context, o BackupOptions) (*Manifest, error) {
 	if err := os.Chmod(partial, 0o600); err != nil {
 		return nil, fmt.Errorf("store: 设置备份权限失败")
 	}
-	if err := os.Rename(partial, destDB); err != nil {
-		return nil, fmt.Errorf("store: 备份落位失败")
-	}
-	_ = syncDir(o.DestDir)
 
 	m := &Manifest{
 		Format: BackupFormat, Name: name, DBFile: filepath.Base(destDB),
@@ -310,24 +327,44 @@ func Backup(ctx context.Context, o BackupOptions) (*Manifest, error) {
 	}
 	body, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
-		_ = os.Remove(destDB)
 		return nil, err
 	}
-	mpartial := filepath.Join(o.DestDir, "."+name+manifestSuffix+partialSuffix)
+	mpartial := filepath.Join(staging, "manifest.json")
 	if err := os.WriteFile(mpartial, body, 0o600); err != nil {
-		_ = os.Remove(destDB)
 		return nil, fmt.Errorf("store: 写 manifest 失败")
 	}
-	if err := syncFile(mpartial); err != nil {
-		_ = os.Remove(destDB)
+	if err := syncFile(partial); err != nil {
 		return nil, err
 	}
-	if err := os.Rename(mpartial, destManifest); err != nil {
-		_ = os.Remove(destDB)
-		return nil, fmt.Errorf("store: manifest 落位失败")
+	if err := syncFile(mpartial); err != nil {
+		return nil, err
 	}
-	_ = syncDir(o.DestDir)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	warning, err := publishBackup(partial, mpartial, destDB, destManifest, syncDir)
+	if err != nil {
+		return nil, err
+	}
+	m.Warning = warning
 	return m, nil
+}
+
+// manifest 最后发布；中途失败保留已发布数据库，不能在错误清理中删除已交付路径。
+func publishBackup(db, manifest, destDB, destManifest string, syncDirectory func(string) error) (string, error) {
+	if err := os.Link(db, destDB); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return "", fmt.Errorf("store: 备份目标已存在，拒绝覆盖：%s", filepath.Base(destDB))
+		}
+		return "", fmt.Errorf("store: 备份数据库发布失败")
+	}
+	if err := os.Link(manifest, destManifest); err != nil {
+		return "", fmt.Errorf("store: 备份数据库 %s 已发布并保留，但 manifest 未发布；不是完整备份，请核查冲突，勿覆盖重跑", filepath.Base(destDB))
+	}
+	if err := syncDirectory(filepath.Dir(destDB)); err != nil {
+		return "备份数据库与 manifest 已发布并保留；目录同步失败，持久化尚未确认，请核验存储和备份，勿覆盖重跑。", nil
+	}
+	return "", nil
 }
 
 // IntegrityCheck 跑 PRAGMA integrity_check：只有返回单个 "ok" 才算通过。
@@ -506,6 +543,7 @@ type RestoreReport struct {
 	PepperRotated bool             `json:"pepper_rotated"`
 	CountsBefore  map[string]int64 `json:"counts_before"`
 	CountsAfter   map[string]int64 `json:"counts_after"`
+	Warning       string           `json:"warning,omitempty"`
 }
 
 // String 是给运维看的一行摘要；Manifest 之外单独实现，避免报告里带出指纹。
@@ -586,30 +624,32 @@ func Restore(ctx context.Context, o RestoreOptions) (*RestoreReport, error) {
 		now = time.Now().UTC()
 	}
 
-	partial := dest + partialSuffix
-	defer func() { _ = os.Remove(partial) }()
-	if err := copyFile(o.BackupPath, partial, 0o600); err != nil {
+	// Keep the copied snapshot hidden and uniquely named until every transform and
+	// verification step has succeeded. A pre-existing dest.partial belongs to the
+	// operator; never use or remove it as this operation's scratch file.
+	staging, err := copyFileToTemp(o.BackupPath, o.OutDir, "."+o.DestName+partialSuffix+"-")
+	if err != nil {
 		return nil, err
 	}
-	if err := syncFile(partial); err != nil {
+	defer func() {
+		// This path is owned by this invocation. In particular, do not derive the
+		// cleanup path from dest, because an older user-created .partial may exist.
+		_ = os.Remove(staging)
+		_ = dropSidecarsSafe(staging)
+	}()
+	if err := syncFile(staging); err != nil {
 		return nil, err
 	}
-	if err := os.Rename(partial, dest); err != nil {
-		return nil, fmt.Errorf("store: 恢复文件落位失败")
-	}
-	_ = syncDir(o.OutDir)
 
-	before, err := readCounts(ctx, dest)
+	before, err := readCounts(ctx, staging)
 	if err != nil {
 		return nil, err
 	}
-	if err := dropSidecars(dest); err != nil {
+	if err := dropSidecars(staging); err != nil {
 		return nil, err
 	}
-	d, err := Open(ctx, dest, o.Pepper)
+	d, err := Open(ctx, staging, o.Pepper)
 	if err != nil {
-		_ = os.Remove(dest)
-		_ = dropSidecarsSafe(dest)
 		return nil, fmt.Errorf("store: 打开恢复副本: %w", err)
 	}
 	// 失效动作必须在**一条事务**里：中途失败留下"站点已禁用但凭据还在"或反之的状态，
@@ -617,39 +657,55 @@ func Restore(ctx context.Context, o RestoreOptions) (*RestoreReport, error) {
 	err = d.transform(ctx, o.AdminKey, now)
 	cerr := d.Close()
 	if err != nil {
-		_ = os.Remove(dest)
-		_ = dropSidecarsSafe(dest)
 		return nil, err
 	}
 	if cerr != nil {
-		_ = os.Remove(dest)
-		_ = dropSidecarsSafe(dest)
 		return nil, fmt.Errorf("store: 关闭恢复副本: %w", cerr)
 	}
-	if err := IntegrityCheck(ctx, dest); err != nil {
+	if err := IntegrityCheck(ctx, staging); err != nil {
 		return nil, err
 	}
-	after, err := readCounts(ctx, dest)
+	after, err := readCounts(ctx, staging)
 	if err != nil {
 		return nil, err
 	}
-	schemaAfter, err := schemaVersionOfFile(ctx, dest)
+	schemaAfter, err := schemaVersionOfFile(ctx, staging)
 	if err != nil {
 		return nil, err
 	}
-	// 最后一步才收尾：上面的只读检查会再次留下 sidecar，收尾顺序反了就会把
-	// "带半边 WAL 的交付物"说成单文件。失败即整体作废，不留下可被误当成恢复完成的文件。
-	if err := finalizeSingleFile(ctx, dest); err != nil {
-		_ = os.Remove(dest)
-		_ = dropSidecarsSafe(dest)
+	// 只在临时副本上收尾：上面的只读检查会再次留下 sidecar，checkpoint
+	// 与干净关闭必须完成后，才能把它作为单文件交付。
+	if err := finalizeSingleFile(ctx, staging); err != nil {
 		return nil, err
+	}
+	if err := syncFile(staging); err != nil {
+		return nil, err
+	}
+
+	// os.Link is the no-overwrite publication point: creation is atomic and an
+	// existing destination is rejected by the filesystem. The staging file is
+	// removed only after the final name is known to reference the complete file.
+	if err := publishNoOverwrite(staging, dest); err != nil {
+		return nil, err
+	}
+	// Publication is already complete. A sync/cleanup failure must preserve the
+	// final inode and be reported separately; it is not a rollback.
+	var warning string
+	if err := syncDir(o.OutDir); err != nil {
+		warning = "恢复库已完成保守失效并交付；目录同步失败，持久化尚未确认。最终文件已保留，请勿删除或覆盖重跑，先检查存储并重新核验。"
+	}
+	if err := os.Remove(staging); err != nil {
+		warning += " 本次隐藏临时文件清理失败；最终文件已保留。"
+	}
+	if err := syncDir(o.OutDir); err != nil && warning == "" {
+		warning = "恢复库已完成保守失效并交付；临时文件清理后的目录同步失败，清理状态持久化尚未确认。最终文件已保留，请勿删除或覆盖重跑。"
 	}
 	return &RestoreReport{
 		DBPath: dest, SourceBackup: filepath.Base(o.BackupPath),
 		SchemaBefore: m.SchemaVersion, SchemaAfter: schemaAfter,
 		RestoredAt:    now.Format(time.RFC3339),
 		PepperRotated: rotated,
-		CountsBefore:  before, CountsAfter: after,
+		CountsBefore:  before, CountsAfter: after, Warning: warning,
 	}, nil
 }
 
@@ -795,7 +851,11 @@ func (d *DB) RecoverAdminKey(ctx context.Context, key string, now time.Time) (*R
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	res, err := tx.ExecContext(ctx, `UPDATE admin_keys SET revoked_at=? WHERE revoked_at IS NULL`, formatTime(now.UTC()))
+	// 只复制当前仍可接受的凭据：NULL 与未来截止时间都必须在恢复时立即失效。
+	// 已经到期的历史截止时间保持不变，便于审计还原原始生命周期。
+	res, err := tx.ExecContext(ctx, `UPDATE admin_keys SET revoked_at=?
+		WHERE revoked_at IS NULL OR revoked_at > ?`, formatTime(now.UTC()), formatTime(now.UTC()))
+
 	if err != nil {
 		return nil, fmt.Errorf("store: 撤销存量管理凭据: %w", err)
 	}
@@ -925,6 +985,45 @@ func sha256File(p string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+func copyFileToTemp(src, dir, pattern string) (string, error) {
+	in, err := os.Open(src)
+	if err != nil {
+		return "", fmt.Errorf("store: 打不开备份")
+	}
+	defer func() { _ = in.Close() }()
+
+	out, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return "", fmt.Errorf("store: 恢复目标不可写")
+	}
+	path := out.Name()
+	remove := true
+	defer func() {
+		_ = out.Close()
+		if remove {
+			_ = os.Remove(path)
+		}
+	}()
+	if _, err := io.Copy(out, in); err != nil {
+		return "", fmt.Errorf("store: 复制失败")
+	}
+	if err := out.Close(); err != nil {
+		return "", fmt.Errorf("store: 复制失败")
+	}
+	remove = false
+	return path, nil
+}
+
+func publishNoOverwrite(staging, dest string) error {
+	if err := os.Link(staging, dest); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("store: 恢复目标已存在，拒绝覆盖：%s", filepath.Base(dest))
+		}
+		return fmt.Errorf("store: 恢复文件落位失败")
+	}
+	return nil
+}
+
 func copyFile(src, dst string, mode os.FileMode) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -957,11 +1056,14 @@ func syncFile(p string) error {
 func syncDir(p string) error {
 	d, err := os.Open(p)
 	if err != nil {
-		return nil
+		return err
 	}
-	defer d.Close()
-	_ = d.Sync()
-	return nil
+	syncErr := d.Sync()
+	closeErr := d.Close()
+	if syncErr != nil {
+		return syncErr
+	}
+	return closeErr
 }
 
 // dropSidecars 收掉**只读**打开 WAL 头数据库时留下的 -wal/-shm。

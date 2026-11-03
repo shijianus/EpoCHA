@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -171,9 +172,23 @@ func (d *DB) CreateSite(ctx context.Context, name, siteKey string, p SitePolicy)
 	return d.createSite(ctx, name, siteKey, p, "")
 }
 
+// CreateSiteAudited 将站点、首把凭据、来源与成功审计同事务提交。
+// 提交后响应仍可能丢失；此接口只保证审计失败不会留下未返回的凭据（ADR-021）。
+func (d *DB) CreateSiteAudited(ctx context.Context, name, siteKey string, p SitePolicy, origins []string, actor string) (*Site, string, error) {
+	clean, err := normalizeOrigins(origins)
+	if err != nil {
+		return nil, "", err
+	}
+	return d.createSiteWithOrigins(ctx, name, siteKey, p, "", clean, &actor)
+}
+
 // createSite 落一行站点与一把凭据。secretOverride 非空时使用调用方给定的 secret
 // （配置一次性导入的路径），否则随机生成。返回的 secret 就是要一次性展示给运维的明文。
 func (d *DB) createSite(ctx context.Context, name, siteKey string, p SitePolicy, secretOverride string) (*Site, string, error) {
+	return d.createSiteWithOrigins(ctx, name, siteKey, p, secretOverride, nil, nil)
+}
+
+func (d *DB) createSiteWithOrigins(ctx context.Context, name, siteKey string, p SitePolicy, secretOverride string, origins []string, auditActor *string) (*Site, string, error) {
 	if err := validateNameSiteKey(name, siteKey); err != nil {
 		return nil, "", err
 	}
@@ -209,6 +224,11 @@ func (d *DB) createSite(ctx context.Context, name, siteKey string, p SitePolicy,
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if auditActor != nil {
+		if err := guardAuditedActor(ctx, tx, *auditActor); err != nil {
+			return nil, "", err
+		}
+	}
 	res, err := tx.ExecContext(ctx, `
 INSERT INTO sites(name, site_key, secret_mac, pow_bits, created_at, enabled, version,
                   challenge_ttl_sec, response_ttl_sec, rate_ip_rpm, rate_site_rpm, allow_missing_origin,
@@ -238,12 +258,21 @@ VALUES(?,?,?,?,?,?,1,?,?,?,?,?,?,?,?)`,
 		}
 		return nil, "", fmt.Errorf("store: 登记凭据: %w", err)
 	}
+	if err := insertOrigins(ctx, tx, siteID, origins, now); err != nil {
+		return nil, "", err
+	}
+	if auditActor != nil {
+		if err := appendAudit(ctx, tx, *auditActor, "site.create", "site:"+strconv.FormatInt(siteID, 10), true); err != nil {
+			return nil, "", err
+		}
+	}
+	// 所有可能失败的回读在提交前完成，避免已生效后因回读失败丢掉一次性明文。
+	site, err := scanSite(tx.QueryRowContext(ctx, `SELECT `+siteColumns+` FROM sites WHERE id=?`, siteID))
+	if err != nil {
+		return nil, "", fmt.Errorf("store: 回读新站点: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, "", fmt.Errorf("store: 提交建站点: %w", err)
-	}
-	site, err := d.SiteByID(ctx, siteID)
-	if err != nil {
-		return nil, "", err
 	}
 	return site, secret, nil
 }

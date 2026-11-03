@@ -557,7 +557,7 @@ func (a *app) callSiteVerify(ctx context.Context, response string) (bool, []stri
 	if err := json.Unmarshal(raw, &got); err != nil {
 		return false, nil, fmt.Errorf("siteverify 响应不可解析（status=%d）", res.StatusCode)
 	}
-	if res.StatusCode != http.StatusOK && !got.Success {
+	if res.StatusCode != http.StatusOK {
 		return false, got.ErrorCodes, nil
 	}
 	return got.Success, got.ErrorCodes, nil

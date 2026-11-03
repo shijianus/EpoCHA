@@ -154,6 +154,180 @@ func TestRefillBelowLowWatermark(t *testing.T) {
 	}
 }
 
+// TestRefillUsesLongestEnabledChallengeTTL 短寿命 ready 题不能掩盖同桶内
+// 长 TTL 站点的真实缺口。水位只统计 expires_at 严格晚于 now+maxTTL 的题。
+func TestRefillUsesLongestEnabledChallengeTTL(t *testing.T) {
+	h := newHarness(t, func(c *Config) {
+		c.LowWatermark = 2
+		c.HighWatermark = 4
+		c.BatchPerTick = 4
+	}, nil)
+	short := h.questionSite("short-ttl", 2)
+	_, _, err := h.db.CreateSite(t.Context(), "long-ttl", "sk-long-ttl", store.SitePolicy{
+		PowBits: 12, ChallengeTTL: time.Hour, VerifyMode: store.ModePowQuestion,
+		GeneratorID: generator.ArithID, Difficulty: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	h.w.now = func() time.Time { return base }
+	for i := 0; i < 4; i++ {
+		id, err := store.NewID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		q := &store.PoolQuestion{
+			ID: id, GeneratorID: generator.ArithID, Version: "v1", Difficulty: short.Policy.Difficulty,
+			Status: store.PoolReady, PayloadJSON: `{"task":"1 + 1","answer_type":"integer","max_answer_len":14}`,
+			Verifier: []byte("test-verifier"), CreatedAt: base, ExpiresAt: base.Add(30 * time.Minute),
+		}
+		if err := h.db.InsertQuestion(t.Context(), q, store.PoolLimits{MaxRows: 100, MaxImageBytes: 1 << 20}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if made, err := h.w.Tick(t.Context()); err != nil {
+		t.Fatal(err)
+	} else if made != 4 {
+		t.Fatalf("4 道寿命不足以覆盖最长 challenge TTL 的 ready 题应触发补足高水位，made=%d", made)
+	}
+	if got := h.w.Stats().Generated; got != 4 {
+		t.Fatalf("长 TTL 站点对应分桶应补 4 道真正可领题，got %d", got)
+	}
+}
+
+func TestRefillAgedReadyAfterDefaultTTLAdvance(t *testing.T) {
+	h := newHarness(t, func(c *Config) {
+		c.LowWatermark, c.HighWatermark = 2, 4
+		c.BatchPerTick = 4
+	}, nil)
+	site := h.questionSite("clock", 2)
+	base := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	clock := base
+	h.w.now = func() time.Time { return clock }
+	if h.cfg.QuestionTTL != 4200*time.Second {
+		t.Fatalf("回归须覆盖默认 4200s 题目寿命，got %v", h.cfg.QuestionTTL)
+	}
+	if made, err := h.w.Tick(t.Context()); err != nil || made != 4 {
+		t.Fatalf("初次预热：made=%d err=%v", made, err)
+	}
+	clock = base.Add(h.cfg.QuestionTTL - site.Policy.ChallengeTTL - time.Nanosecond)
+	if made, err := h.w.Tick(t.Context()); err != nil || made != 0 {
+		t.Fatalf("过期阈值前 1ns 仍可领，不应补题：made=%d err=%v", made, err)
+	}
+	clock = clock.Add(time.Nanosecond)
+	if made, err := h.w.Tick(t.Context()); err != nil || made != 4 {
+		t.Fatalf("老化到题目与 challenge 同时过期时必须补题：made=%d err=%v", made, err)
+	}
+}
+
+func TestRefillRejectsUnsatisfiableChallengeTTL(t *testing.T) {
+	for _, questionTTL := range []time.Duration{time.Hour - time.Second, time.Hour} {
+		t.Run(questionTTL.String(), func(t *testing.T) {
+			entropyCalls := 0
+			h := newHarness(t, func(c *Config) { c.QuestionTTL = questionTTL }, func() io.Reader {
+				entropyCalls++
+				return &randStream{}
+			})
+			if _, _, err := h.db.CreateSite(t.Context(), "impossible", "sk-impossible", store.SitePolicy{
+				PowBits: 12, ChallengeTTL: time.Hour, VerifyMode: store.ModePowQuestion,
+				GeneratorID: generator.ArithID, Difficulty: 2,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 3; i++ {
+				made, err := h.w.Tick(t.Context())
+				if !errors.Is(err, store.ErrBadConfig) || made != 0 {
+					t.Fatalf("不可满足 TTL 必须报可退避配置错误且不生成：made=%d err=%v", made, err)
+				}
+			}
+			if entropyCalls != 0 || h.w.Stats().LastErr != "bad-config" {
+				t.Fatalf("不可满足 TTL 不应消耗熵或渲染：entropy=%d stats=%+v", entropyCalls, h.w.Stats())
+			}
+			if n, err := h.db.PoolCount(t.Context()); err != nil || n != 0 {
+				t.Fatalf("不可领题不应进入池：rows=%d err=%v", n, err)
+			}
+		})
+	}
+}
+
+func TestRefillFullPoolStillReclaimsLaterBucket(t *testing.T) {
+	h := newHarness(t, func(c *Config) {
+		c.LowWatermark, c.HighWatermark = 1, 2
+		c.ImageLowWatermark, c.ImageHighWatermark = 1, 2
+		c.BatchPerTick, c.MaxRows = 2, 2
+	}, nil)
+	h.questionSite("first-bucket", 1)
+	site := h.questionSite("last-bucket", 2)
+	base := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	h.w.now = func() time.Time { return base }
+	for _, id := range []string{"aged-first", "aged-second"} {
+		if err := h.db.InsertQuestion(t.Context(), &store.PoolQuestion{
+			ID: id, GeneratorID: generator.ArithID, Version: "v1", Difficulty: 2,
+			PayloadJSON: `{}`, Verifier: []byte("test-verifier"), CreatedAt: base,
+			ExpiresAt: base.Add(site.Policy.ChallengeTTL),
+		}, store.PoolLimits{MaxRows: 2, MaxImageBytes: h.cfg.ImageMaxTotalBytes}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if made, err := h.w.Tick(t.Context()); err != nil || made != 2 {
+		t.Fatalf("earlier empty bucket must not prevent reclaim in later aged bucket: made=%d err=%v", made, err)
+	}
+}
+
+func TestRefillAgedReadyReleasesCapacity(t *testing.T) {
+	for _, image := range []bool{false, true} {
+		name := "rows"
+		if image {
+			name = "image-bytes"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newImageHarness(t, func(c *Config) {
+				c.LowWatermark, c.HighWatermark = 1, 2
+				c.ImageLowWatermark, c.ImageHighWatermark = 1, 2
+				c.BatchPerTick = 2
+				c.MaxRows = 2
+				c.ImageMaxTotalBytes = 2 * store.MaxAssetBytes
+			})
+			var site *store.Site
+			if image {
+				site = h.imageSite("aged", 2)
+			} else {
+				site = h.questionSite("aged", 2)
+			}
+			base := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+			h.w.now = func() time.Time { return base }
+			spec := store.PoolSpec{GeneratorID: site.Policy.GeneratorID, Version: "v1", Difficulty: 2}
+			for i := 0; i < 2; i++ {
+				id, err := store.NewID()
+				if err != nil {
+					t.Fatal(err)
+				}
+				q := &store.PoolQuestion{
+					ID: id, GeneratorID: spec.GeneratorID, Version: spec.Version, Difficulty: spec.Difficulty,
+					PayloadJSON: `{}`, Verifier: []byte("test-verifier"), CreatedAt: base.Add(-time.Hour),
+					ExpiresAt: base.Add(site.Policy.ChallengeTTL),
+				}
+				if image {
+					q.Asset, q.AssetMime = make([]byte, store.MaxAssetBytes), store.MimeTypePNG
+				}
+				if err := h.db.InsertQuestion(t.Context(), q, store.PoolLimits{MaxRows: 2, MaxImageBytes: h.cfg.ImageMaxTotalBytes}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if made, err := h.w.Tick(t.Context()); err != nil || made != 2 {
+				t.Fatalf("寿命恰好不足的 ready 占满容量后必须回收并补足：made=%d err=%v", made, err)
+			}
+			if n, err := h.db.ReadyCount(t.Context(), spec, base.Add(site.Policy.ChallengeTTL)); err != nil || n != 2 {
+				t.Fatalf("补题后应有两道覆盖完整 challenge TTL 的题：ready=%d err=%v", n, err)
+			}
+			if n, err := h.db.PoolCount(t.Context()); err != nil || n != 2 {
+				t.Fatalf("回收不应突破全局行数上限：rows=%d err=%v", n, err)
+			}
+		})
+	}
+}
+
 func TestRefillStopsAtMaxRows(t *testing.T) {
 	limit := 6
 	h := newHarness(t, func(c *Config) {

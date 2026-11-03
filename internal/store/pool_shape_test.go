@@ -2,9 +2,57 @@ package store
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestPoolLifecycleQueryPlans(t *testing.T) {
+	d := newDB(t)
+	for _, tc := range []struct {
+		name    string
+		query   string
+		args    []any
+		indexes []string
+	}{
+		{"ready-watermark", `SELECT count(*) FROM pool WHERE status=? AND generator_id=? AND version=? AND difficulty=? AND expires_at>?`,
+			[]any{PoolReady, testSpec.GeneratorID, testSpec.Version, testSpec.Difficulty, formatTime(time.Now().UTC())}, []string{"pool_claim"}},
+		{"discard-aged", `SELECT id FROM pool WHERE generator_id=? AND version=? AND difficulty=? AND status=? AND expires_at<=? AND challenge_id IS NULL ORDER BY expires_at LIMIT ?`,
+			[]any{testSpec.GeneratorID, testSpec.Version, testSpec.Difficulty, PoolReady, formatTime(time.Now().UTC()), purgeBatchRows}, []string{"pool_claim"}},
+		{"purge-pool", `SELECT id FROM pool WHERE status=? UNION ALL SELECT id FROM pool WHERE status=? AND expires_at<=? AND challenge_id IS NULL UNION ALL SELECT p.id FROM pool p JOIN challenges c ON c.id=p.challenge_id WHERE p.status=? AND (c.expires_at<=? OR c.status IN (?,?)) LIMIT ?`,
+			[]any{PoolTerminal, PoolReady, formatTime(time.Now().UTC()), PoolAssigned, formatTime(time.Now().UTC()), statusRedeemed, statusInvalid, purgeBatchRows}, []string{"pool_expire", "sqlite_autoindex_challenges_1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, err := d.h.QueryContext(t.Context(), "EXPLAIN QUERY PLAN "+tc.query, tc.args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rows.Close()
+			var plan []string
+			for rows.Next() {
+				var id, parent, unused int
+				var detail string
+				if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+					t.Fatal(err)
+				}
+				plan = append(plan, detail)
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
+			joined := strings.Join(plan, "\n")
+			if joined == "" {
+				t.Fatal("query plan must not be empty")
+			}
+			for _, index := range tc.indexes {
+				if !strings.Contains(joined, index) {
+					t.Fatalf("missing index %s in plan:\n%s", index, joined)
+				}
+			}
+			t.Log(joined)
+		})
+	}
+}
 
 // TestMigration0003Shape 钉住 0003 迁移落地后的实际约束（不是"看起来建了表"，而是逐条验证语义）：
 // partial UNIQUE 生效、NULL 不受该索引约束、外键挡悬挂绑定、旧站点默认 pow_only。

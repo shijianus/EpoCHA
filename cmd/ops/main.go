@@ -154,6 +154,9 @@ func backup(ctx context.Context, args []string, getenv func(string) string, stdo
 	if err != nil {
 		return err
 	}
+	if m.Warning != "" {
+		fmt.Fprintf(stdout, "警告: %s\n", m.Warning)
+	}
 	// 只打印自描述字段：不含指纹之外的任何密钥信息（PepperFP 是单向的，仍不打印，
 	// 因为它一旦进日志就成了"离线爆破摘要"的语料，而运维并不需要它）。
 	fmt.Fprintf(stdout, "备份完成 name=%s bytes=%d schema=%d app=%s commit=%s sha256=%s integrity=%s\n",
@@ -241,6 +244,9 @@ func restore(ctx context.Context, args []string, getenv func(string) string, std
 		return err
 	}
 	fmt.Fprintln(stdout, rep.String())
+	if rep.Warning != "" {
+		fmt.Fprintf(stdout, "警告: %s\n", rep.Warning)
+	}
 	fmt.Fprintln(stdout, "恢复产物处于**保守失效**状态：站点全部禁用、凭据全部撤销、题池与 response 已清空。")
 	fmt.Fprintln(stdout, "下一步：停服 → 把工作库路径指向该产物（或把它移到数据目录）→ 用新的 master key 启动 → 逐个确认站点后再启用。")
 	return nil

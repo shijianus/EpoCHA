@@ -41,6 +41,9 @@ D="$WORK/deploy"
 BIN="$WORK/bin"
 LOGS="$WORK/logs"
 mkdir -p "$BIN" "$LOGS" "$D/data" "$D/keys" "$D/backups" "$D/restore" "$D/keys-restore"
+BACKUP_ADMIN=""
+BACKUP_ADMIN_ID=""
+BACKUP_OLD_OK=0
 
 STEP=0
 N_PASS=0
@@ -65,7 +68,64 @@ blocked() {
 notrun() { STEP=$((STEP+1)); N_NOTRUN=$((N_NOTRUN+1)); printf '[stage5a] NOT_RUN %d: %s\n' "$STEP" "$*"; }
 abort()  { printf '[stage5a] 中止: %s\n' "$*" >&2; exit 1; }
 
-# 磁盘余量（KB）。所有 Docker 步骤都先问一次，不够就 BLOCKED 并说明缺口，而不是撞出去。
+# 负载工具默认输出只有 wall/flows/ok 与四段时延样本，没有 err= 字段；这里另行解析
+# 而不是把 loadtest 的“至少一次成功”退出码当作容量验收。每个计数都锚定整行，避免
+# flows=1500、n=1500 或 quiet 输出误被读成 150/150。
+check_load_evidence() {
+  local file="$1" plan summary stage n
+  [[ -s "$file" ]] || return 1
+  plan="$(grep -Ec '^负载形状 concurrency=4 requests=150 base=[^[:space:]]+（凭据不回显）$' "$file" || true)"
+  summary="$(grep -Ec '^wall=[^[:space:]]+ flows=150 ok=150 吞吐=[0-9]+(\.[0-9]+)? 闭环/秒$' "$file" || true)"
+  [[ "$plan" == 1 && "$summary" == 1 ]] || return 1
+  grep -q 'err=' "$file" && return 1
+  grep -q '^失败类别：' "$file" && return 1
+  for stage in challenge redeem siteverify pow-tool; do
+    n="$(grep -Ec "^${stage}[[:space:]]+n=150 p50=[^[:space:]]+ p95=[^[:space:]]+ max=[^[:space:]]+$" "$file" || true)"
+    [[ "$n" == 1 ]] || return 1
+  done
+  return 0
+}
+
+if [[ "${1:-}" == "--selftest-rules" ]]; then
+  good_load='负载形状 concurrency=4 requests=150 base=http://127.0.0.1:18083（凭据不回显）
+wall=2m0s flows=150 ok=150 吞吐=1.25 闭环/秒
+challenge  n=150 p50=1ms p95=2ms max=3ms
+redeem     n=150 p50=1ms p95=2ms max=3ms
+siteverify n=150 p50=1ms p95=2ms max=3ms
+pow-tool   n=150 p50=1ms p95=2ms max=3ms'
+  fixture="$(mktemp "${TMPDIR:-/tmp}/epocha-stage5a-rules.XXXXXX")"
+  printf '%s\n' "$good_load" >"$fixture"
+  if ! check_load_evidence "$fixture"; then
+    rm -f "$fixture"
+    printf '[stage5a] rules selftest FAIL: valid 150-flow fixture rejected\n' >&2
+    exit 1
+  fi
+  for bad_load in \
+    "${good_load/flows=150/flows=149}" \
+    "${good_load/challenge  n=150/challenge  n=149}"; do
+    printf '%s\n' "$bad_load" >"$fixture"
+    if check_load_evidence "$fixture"; then
+      rm -f "$fixture"
+      printf '[stage5a] rules selftest FAIL: invalid load fixture accepted\n' >&2
+      exit 1
+    fi
+  done
+  printf '%s\n失败类别：challenge=1\n' "$good_load" >"$fixture"
+  if check_load_evidence "$fixture"; then
+    rm -f "$fixture"
+    printf '[stage5a] rules selftest FAIL: failure-category fixture accepted\n' >&2
+    exit 1
+  fi
+  printf '%s\nerr=0\n' "$good_load" >"$fixture"
+  if check_load_evidence "$fixture"; then
+    rm -f "$fixture"
+    printf '[stage5a] rules selftest FAIL: err fixture accepted\n' >&2
+    exit 1
+  fi
+  rm -f "$fixture"
+  printf '[stage5a] rules selftest PASS（真实默认输出解析：150/150、四段 n=150、无 err/失败类别）\n'
+  exit 0
+fi
 avail_kb() { df -Pk "$WORK" | awk 'NR==2 {print $4}'; }
 
 cleanup() {
@@ -264,9 +324,13 @@ if [[ $DOCKER_OK -eq 1 ]]; then
       HASERVER="$(grep -c 'usr/local/bin/epocha$' "$LOGS/image-files.txt" || true)"
       HASOPS="$(grep -c 'usr/local/bin/epocha-ops$' "$LOGS/image-files.txt" || true)"
       NWAYSPUT="$(grep -c '^\(usr/bin/\|bin/\|sbin/\)' "$LOGS/image-files.txt" || true)"
-      if [[ -n "$BAD" ]]; then
-        fail "镜像里出现不该有的东西:$BAD"
-      elif [[ "$HASERVER" == "1" && "$HASOPS" == "1" && "$NWAYSPUT" == "0" ]]; then
+      EXPECTED_IMAGE_FILES='/usr/local/bin/epocha
+/usr/local/bin/epocha-ops'
+      EXTRA_IMAGE_FILES="$(grep -vFxf <(printf '%s\n' "$EXPECTED_IMAGE_FILES") "$LOGS/image-files.txt" || true)"
+      if [[ -n "$EXTRA_IMAGE_FILES" ]]; then
+        fail "镜像文件清单含白名单之外的路径: $(printf '%s' "$EXTRA_IMAGE_FILES" | tr '\n' ' ')"
+      fi
+      if [[ -z "$BAD" && "$HASERVER" == "1" && "$HASOPS" == "1" && "$NWAYSPUT" == "0" && -z "$EXTRA_IMAGE_FILES" ]]; then
         pass "镜像文件系统只有 /usr/local/bin 下的两把二进制（条目 $NFILES；无 shell/curl/sqlite3/OCR/评测样本/浏览器）"
       else
         fail "镜像文件清单不是预期的两把二进制（server=$HASERVER ops=$HASOPS 其它路径=$NWAYSPUT）"
@@ -572,6 +636,7 @@ if [[ $DOCKER_OK -eq 1 ]]; then
     else
       fail "容器内管理面不通（rc=$rc）：$(tail -c 200 "$LOGS/admin.err")"
     fi
+
     # 宿主直连容器内管理口这条路径必须**不存在**：经发布端口打管理路由 ⇒ 404。
     if [[ "$(code "http://127.0.0.1:$PUBLIC_PORT/api/admin/sites")" == "404" ]]; then
       pass "公共端口上没有管理路由（404，不是 401：路由根本不存在）"
@@ -823,10 +888,41 @@ fi
 log "第 7 步：备份 → 备份后变更 → 隔离恢复 → 恢复后语义"
 BK_NAME=""
 if [[ $DOCKER_OK -eq 1 && -n "$CID" ]]; then
+  # F08：不要把很早就撤销的 bootstrap key 当成“备份前仍有效”的旧凭据。
+  # 先在当前容器内用当前管理 key 创建一把专用 BACKUP_ADMIN，再用单一 env
+  # 入口（明确清空 *_FILE）真实 whoami=200；这把明文只在临时变量中保留到备份/恢复负测。
+  rc=0
+  admin_json POST /api/admin/admin-keys "$LOGS/backup-admin.json" '{"label":"stage5a-backup-old"}' || rc=$?
+  BACKUP_ADMIN="$(jq -r '.admin_key // ""' "$LOGS/backup-admin.json" 2>/dev/null || echo "")"
+  BACKUP_ADMIN_ID="$(jq -r '.key.key_id // ""' "$LOGS/backup-admin.json" 2>/dev/null || echo "")"
+  if [[ $rc -ne 0 || -z "$BACKUP_ADMIN" || -z "$BACKUP_ADMIN_ID" ]]; then
+    fail "无法在备份前创建专用管理凭据（rc=$rc key_id=${BACKUP_ADMIN_ID:-空}）"
+  else
+    BACKUP_OLD_OK=0
+    docker exec -i -e EPOCHA_ADMIN_KEY="$BACKUP_ADMIN" -e EPOCHA_ADMIN_KEY_FILE= \
+      "$CID" "$OPS" admin GET /api/admin/whoami </dev/null >"$LOGS/backup-admin-whoami.raw" 2>&1 || rc=$?
+    BACKUP_ADMIN_STATUS="$(awk -F= '/^status=/{print $2; exit}' "$LOGS/backup-admin-whoami.raw")"
+    if [[ $rc -eq 0 && "$BACKUP_ADMIN_STATUS" == "200" ]] && sed -n '2,$p' "$LOGS/backup-admin-whoami.raw" | jq -e '.key_id' >/dev/null 2>&1; then
+      BACKUP_OLD_OK=1
+      pass "备份前专用管理凭据由容器内 ops 以单一 env 入口真实 whoami=200（无公共端口探活）"
+    else
+      fail "备份前专用管理凭据未真实 whoami=200（rc=$rc status=${BACKUP_ADMIN_STATUS:-missing}）"
+    fi
+  fi
+
+  if [[ $BACKUP_OLD_OK -ne 1 ]]; then
+    fail "F08 前置未成立：备份前没有专用旧管理凭据的容器内 whoami=200"
+  fi
   # 备份时点：库里有真实消费与 WAL 未折回内容。
   EPOCHA_SITE_SECRET="$SECRET2" "$BIN/devclient" --base "http://127.0.0.1:$PUBLIC_PORT" --site-key "$SITE_KEY" --mode full >/dev/null 2>&1 || true
-  rc=0
-  cexec epocha "$OPS" backup --db "$C_DATA/epocha.db" --dest "$C_BACKUP" >"$LOGS/backup.txt" 2>&1 || rc=$?
+  # 备份只能在专用旧管理凭据已由容器内 HTTP 证明有效后继续。
+  if [[ $BACKUP_OLD_OK -eq 1 ]]; then
+    rc=0
+    cexec epocha "$OPS" backup --db "$C_DATA/epocha.db" --dest "$C_BACKUP" >"$LOGS/backup.txt" 2>&1 || rc=$?
+  else
+    rc=1
+    : >"$LOGS/backup.txt"
+  fi
   if [[ $rc -eq 0 ]]; then
     BK_NAME="$(awk '/^备份完成/ {sub(/^name=/,"",$2); print $2; exit}' "$LOGS/backup.txt")"
     pass "容器内备份成功（name=${BK_NAME##*/}）：$LOGS/backup.txt 里的计数行给出站点/凭据/消费/池水位"
@@ -959,21 +1055,26 @@ if [[ $DOCKER_OK -eq 1 && -n "$CID" ]]; then
       fail "恢复实例未拒绝业务（code=$CH）——保守恢复流程没有落地"
     fi
 
-    # 旧管理凭据不得复活；恢复时装入的新凭据可用。
+    # 管理面在恢复容器内绑定 127.0.0.1:8081；RESTORE_PORT 只映射公共 8080，不能从宿主 curl 管理 API。
+    # 新 key 用唯一 *_FILE 入口走容器内 ops；旧 key 用同一入口真实发 HTTP，首行 status=401。
     rc=0
-    docker exec -i epocha5a-restore "$OPS" admin GET /api/admin/whoami </dev/null >"$LOGS/rwhoami.raw" 2>&1 || rc=$?
+    docker exec -i -e EPOCHA_ADMIN_KEY_FILE="$C_KEYS/admin" -e EPOCHA_ADMIN_KEY= epocha5a-restore "$OPS" admin GET /api/admin/whoami </dev/null >"$LOGS/rwhoami.raw" 2>&1 || rc=$?
+    RWHO_STATUS="$(awk -F= '/^status=/{print $2; exit}' "$LOGS/rwhoami.raw")"
+    NEW_ADMIN_FIRST="$(sed -n '1p' "$LOGS/rwhoami.raw")"
     sed -n '2,$p' "$LOGS/rwhoami.raw" >"$LOGS/rwhoami.json"
-    if [[ $rc -eq 0 ]] && jq -e '.key_id' "$LOGS/rwhoami.json" >/dev/null 2>&1; then
-      pass "恢复实例的管理访问只认这次装入的新凭据（受控本地操作）"
+    if [[ $rc -eq 0 && "$RWHO_STATUS" == "200" && "$NEW_ADMIN_FIRST" == "status=200" ]] && jq -e '.key_id' "$LOGS/rwhoami.json" >/dev/null 2>&1; then
+      pass "恢复实例的新管理凭据通过容器内 HTTP whoami 200（单一 *_FILE 入口）"
     else
-      fail "恢复实例的新管理凭据不可用（rc=$rc）"
+      fail "恢复实例的新管理凭据不可用（rc=$rc status=${RWHO_STATUS:-missing}）"
     fi
     rc=0
-    docker exec -i -e EPOCHA_ADMIN_KEY="$ADMIN_OLD" epocha5a-restore "$OPS" admin GET /api/admin/whoami </dev/null >/dev/null 2>&1 || rc=$?
-    if [[ $rc -ne 0 ]]; then
-      pass "旧管理凭据在恢复实例上被拒（快照里“仍有效”的凭据不会复活）"
+    docker exec -i -e EPOCHA_ADMIN_KEY="$BACKUP_ADMIN" -e EPOCHA_ADMIN_KEY_FILE= epocha5a-restore "$OPS" admin GET /api/admin/whoami </dev/null >"$LOGS/old-admin.raw" 2>&1 || rc=$?
+    OLD_ADMIN_STATUS="$(awk -F= '/^status=/{print $2; exit}' "$LOGS/old-admin.raw")"
+    OLD_ADMIN_FIRST="$(sed -n '1p' "$LOGS/old-admin.raw")"
+    if [[ $rc -ne 0 && "$OLD_ADMIN_STATUS" == "401" && "$OLD_ADMIN_FIRST" == "status=401" ]]; then
+      pass "恢复后旧管理凭据由容器内 HTTP whoami 明确返回 401（不是公共端口 404）"
     else
-      fail "旧管理凭据在恢复实例上竟然可用"
+      fail "恢复后旧管理凭据应由容器内 HTTP whoami 返回 401，rc=$rc status=${OLD_ADMIN_STATUS:-missing}"
     fi
 
     # 启用一个站点，证明恢复后**新**流程可用（这才是“恢复完成”）。
@@ -1093,7 +1194,7 @@ log "第 9 步：容器日志的按值扫描"
 if [[ $DOCKER_OK -eq 1 && -n "$CID" ]]; then
   compose logs --no-color >"$LOGS/container.log" 2>&1 || true
   LEAK=""
-  for s in "$SECRET1" "$SECRET2" "$ADMIN_OLD" "$ADMIN_NEW" "$(cat "$D/keys/pepper")" "$(cat "$D/keys/master")"; do
+  for s in "$SECRET1" "$SECRET2" "$ADMIN_OLD" "$ADMIN_NEW" "$BACKUP_ADMIN" "$(cat "$D/keys/pepper")" "$(cat "$D/keys/master")"; do
     if leaks "$LOGS/container.log" "$s"; then LEAK="$LEAK ${s:0:6}…"; fi
   done
   if [[ -n "$LEAK" ]]; then
@@ -1190,8 +1291,10 @@ JSON
         sleep 2
       done
       POOL_IMG="$(jq -r '.image.asset_bytes // 0' "$LOGS/pool-probe.json" 2>/dev/null || echo 0)"
-      if (( POOL_READY > 0 )); then
+      if (( POOL_READY > 0 && POOL_IMG > 0 )); then
         pass "后台补池在 1 CPU / 128MiB 限额内确实工作：ready=$POOL_READY 行、图片字节=$POOL_IMG（分桶来自启用的 pow_question 站点）"
+      elif (( POOL_READY > 0 )); then
+        fail "图片补池 ready=$POOL_READY 但 asset_bytes=$POOL_IMG，不接受零图片字节证据"
       else
         fail "起了题目站点仍补不出题（ready=0）——第 10 步的“图片补池”项没测到东西"
       fi
@@ -1203,13 +1306,15 @@ JSON
     docker stats --no-stream --format 'CPU={{.CPUPerc}} MEM={{.MemUsage}}' "$LOADCID" >"$LOGS/stats-during.txt" 2>/dev/null &
     STATS_PID=$!
     rc=0
-    EPOCHA_SITE_SECRET="$LT_SECRET" "$BIN/loadtest" --base "$LOAD_URL" --site-key "$LT_KEY" \
+  EPOCHA_SITE_SECRET="$LT_SECRET" "$BIN/loadtest" --base "$LOAD_URL" --site-key "$LT_KEY" \
       --concurrency 4 --requests 150 --timeout 10s >"$LOGS/loadtest.txt" 2>&1 || rc=$?
     wait "$STATS_PID" 2>/dev/null || true
-    if [[ $rc -eq 0 ]]; then
-      pass "有界负载跑完：150 次闭环 / 并发 4（PoW 由工具代算，**不代表浏览器真人解题耗时**）"
+    if [[ $rc -eq 0 ]] && check_load_evidence "$LOGS/loadtest.txt"; then
+      pass "有界负载跑完且全成功：严格证明 concurrency=4 requests=150、flows=150 ok=150、四段 n=150 且无失败类别 / err 字段"
+    elif [[ $rc -eq 0 ]]; then
+      fail "负载工具退出 0 但默认输出未严格证明 150/150 与四段完整样本：$(tail -n 8 "$LOGS/loadtest.txt")"
     else
-      fail "有界负载没有任何成功闭环（rc=$rc）：$(tail -c 220 "$LOGS/loadtest.txt")"
+      fail "有界负载没有全成功闭环（rc=$rc）：$(tail -c 220 "$LOGS/loadtest.txt")"
     fi
     OOM="$(docker inspect -f '{{.State.OOMKilled}}' "$LOADCID" 2>/dev/null || echo '?')"
     RESTARTS="$(docker inspect -f '{{.RestartCount}}' "$LOADCID" 2>/dev/null || echo '?')"
@@ -1344,7 +1449,7 @@ if [[ $NGINX_OK -eq 1 ]]; then
     if [[ "$BIGCODE" == "413" ]]; then
       pass "超过 client_max_body_size 的体被反代直接拒（413）"
     else
-      log "注意：超大体得到 code=$BIGCODE（服务侧 MaxBytesReader 也会拒，但反代层没拦成 413）"
+      fail "超过 client_max_body_size 的体未被反代拒绝为 413（实得 $BIGCODE）"
     fi
 
     # 反代访问日志：只记路径，不记 query、不记体、不记凭据值。

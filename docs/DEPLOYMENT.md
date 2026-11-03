@@ -3,6 +3,10 @@
 目标形状：**1 vCPU / 1GB RAM / 50GB 磁盘的一台 VPS**，单个 Go 验证服务 + SQLite，单副本，
 反向代理负责 TLS，管理面不向公网发布。
 本文件不含公网部署授权，也不含多节点/CDN/自动扩缩容方案。
+2026-11-02 按 ADR-021 收敛既有功能，不等于完整产品已交付：风险评分、题型权重/选择、统计与分级淘汰、
+非视觉等价通道、完整管理页面、`fallback_base` 及 Cloudflare 仍以
+[`部署审计` §6](reviews/DEPLOYMENT-READINESS-AUDIT-2026-11-02.md) 的功能台账为准，不删除待办或冒充完成。
+历史 Linux 阶段记录保留原时间与工具链；当前 Windows 上的静态/桩测试不是 Linux、容器或目标 VPS 验收。
 
 > **一句话边界**：本文的容器化与运维验收通过 **不等于** CAPTCHA 的抗 AI/抗 OCR 验证通过。
 > 题型仍是 `experimental:true` + `production_ready:false`（DESIGN §8.4、红线 14）。
@@ -14,7 +18,8 @@
 
 | 项 | 要求 | 为什么 |
 |---|---|---|
-| 内核/OS | 任意支持 Docker Engine 的 64 位 Linux；或 systemd + 直接跑二进制 | 纯 Go 二进制，无 cgo（AGENTS 硬性约束） |
+| 内核/OS | 正式范围为 Linux/arm64 的 B 路径，实测身份 `1000:1000`；amd64 仅做工程测试 | `flock` 依赖 Linux；纯 Go/无 cgo 不等于 Windows 原生受支持 |
+| 构建工具 | Go **1.27.3**、`GOTOOLCHAIN=local`；工程检查使用 Node **24**、GNU Make、Bash、readelf | 显式工具链升级见 ADR-020；运行镜像仍只有两份静态 Go 二进制 |
 | SQLite | **不需要**安装 `sqlite3` | 备份/恢复走 `epocha-ops`（VACUUM INTO），驱动是纯 Go 的 `modernc.org/sqlite` |
 | 磁盘 | `/var/lib/docker`（或数据分区）≥2GB 空闲才可在容器内编译；仅装配运行时层 ≈50MB | 见 §3 的两条构建路径 |
 | swap | `[目标]` 512M + `vm.swappiness=10`（DESIGN §12） | 只用于吸收 OS 抖动；容器内**禁** swap（`memswap_limit == memory`），超额应当 OOM 而不是悄悄吃宿主 |
@@ -23,26 +28,19 @@
 
 ## 2. 一次性准备（数据目录、密钥目录、身份）
 
+下面用正式范围内的服务身份 `1000:1000` 示范。先确认该 UID/GID 已分配给预定的服务用户；示例假定其用户名为 `epocha`。若目标机使用别的身份，先为那个组合重新验收，不能把镜像默认 `65534:65534` 当成已有实测。目录已存在时先核对属主，以下管理命令由运维执行。
+
 ```bash
-# ① 目录：数据与密钥**分开**，备份目录单独一个（DESIGN §6：pepper 与 DB 同处一库则摘要保护失效）
-sudo install -d -o 65534 -g 65534 -m 700 /var/lib/epocha /var/backups/epocha
-sudo install -d -o 65534 -g 65534 -m 700 /etc/epocha/keys
-
-# ② 密钥：一次性生成，之后**不再重新生成**（重建容器不产生新密钥）
-#    主密钥与 pepper 各 32 字节随机数，内容是 base64；文件权限 0600，属主 = 容器运行 uid。
-#    没有内置默认密钥：缺文件就拒绝启动，这是设计而不是缺陷。
-head -c32 /dev/urandom | base64 | sudo tee /etc/epocha/keys/master >/dev/null
-head -c32 /dev/urandom | base64 | sudo tee /etc/epocha/keys/pepper >/dev/null
-sudo chmod 600 /etc/epocha/keys/master /etc/epocha/keys/pepper
-
-# ③（可选）管理凭据引导：只在"库里还没有任何管理凭据"时生效一次。
-#    值是运维实际发出的 Bearer 串本身（不做 base64 变换）。
-#    留空且库里无记录 = 管理面拒绝所有请求；缺凭据不等于放开管理功能。
-printf 'ak_%s' "$(head -c32 /dev/urandom | base64 | tr -d '/+=' | head -c48)" | sudo tee /etc/epocha/keys/admin >/dev/null
-sudo chmod 600 /etc/epocha/keys/admin
+# 数据、备份、密钥分目录；只准备目录，不用 root 创建密钥内容。
+sudo install -d -o 1000 -g 1000 -m 700 /var/lib/epocha /var/backups/epocha /etc/epocha/keys
+# 整个生成进程切到实际服务 UID/GID。脚本拒绝 root、宽权限和错误属主。
+# 预先存在的文件只检查；新文件用 noclobber 排他创建，0600；重跑不会替换已有内容。
+sudo -u epocha -g epocha -- bash deploy/prepare-keys.sh /etc/epocha/keys
 ```
 
-`deploy/docker/.env`（由 `.env.example` 复制）里把 `EPOCHA_UID/EPOCHA_GID` 设成上面目录的属主，
+`deploy/prepare-keys.sh` 在 Linux 下读取 `/dev/urandom`，不打印内容，不删除文件、不放宽已有权限、不覆盖 master/pepper/admin。目录和文件都必须由当前服务 UID/GID 持有，group/other 位为空。中途失败时保留已创建文件并报错，不能靠重跑偷偷轮换密钥。`admin` 只在数据库尚无任何管理凭据时作引导；已有数据库更换这个文件不会撤销或恢复已有管理密钥。
+
+`deploy/docker/.env`（由 `.env.example` 复制）里把 `EPOCHA_UID=1000`、`EPOCHA_GID=1000` 设成实际服务身份，
 `EPOCHA_DATA_DIR`/`EPOCHA_KEY_DIR`/`EPOCHA_BACKUP_DIR` 指向上面三个目录。
 
 **权限与"非 root 容器实际读得到什么"**：镜像的 `USER` 是数字 uid `65534:65534`（scratch 里没有
@@ -71,16 +69,9 @@ make docker-image
 `/usr/local/bin/epocha` 与 `/usr/local/bin/epocha-ops`，没有 shell、curl、sqlite3、OCR、
 评测样本、ground truth、node/firefox）。
 
-**为什么 B 是"受支持"而不是"临时替代"**：B 的编译输入是仓库源码 + 本机 Go 工具链，构建过程可以在
-无外网的机器上复现，产物 SHA-256 可与候选清单逐字节对上；A 的复现依赖 registry 可达性。
-**代价**也必须写清楚：B 把"工具链一致性"交给了执行者的本机 Go（`GOTOOLCHAIN=local` 锁住版本，
-但不同机器的 Go 补丁版可能不同）。所以候选清单里 `Go: go1.24.5 linux/arm64` 那一行是**复现条件**，
-不是装饰。
+**B 路径的复现条件**：本机显式安装 Go **1.27.3**，`GOTOOLCHAIN=local` 仅禁止自动切换，并不替操作者校验补丁版；`release-check.mjs` 会检查确切版本。离线构建还要求现有模块缓存齐备。清单须保存源码完整 OID、工作树状态、工具链、构建命令、版本注入值、构建时间和两份二进制 SHA-256；同源码不自动意味着同字节。历史 `go1.24.5 linux/arm64` 清单只描述当时产物，不可套用到本轮。
 
-**架构**：本轮只在 `linux/arm64` 上真实构建与运行过（宿主即 arm64）。配方本身不含架构假设
-（`CGO_ENABLED=0` 的静态二进制 + scratch），x86-64 支持是**意图**，未实测；
-本轮没有引入跨架构构建体系（无 buildx/QEMU 配置）。在 x86-64 上构建时请用该架构的构建机，
-并按 §10 重跑一次资源演练。
+**架构**：正式范围仍限 `linux/arm64`、B 路径。CI 的 `linux/amd64` 工程测试不自动扩展支持范围；跨架构编译也不等于在该架构实际运行、恢复或测量过。新的候选需在正式范围内重新跑完当前验收，历史阶段标签不能替代当次证据。
 
 **版本串会改变二进制**：`ldflags` 在构建时注入 `git describe` 与 `rev-parse` 的结果
 （`epocha --version` 与备份 manifest 的 `app_version`/`commit` 就来自这里）。因此
@@ -89,9 +80,7 @@ make docker-image
 候选的身份由"源码提交 + 实测记录"决定，标签名不参与。要带新标签版本串的镜像，
 就在标签存在后重新构建，并**把验收一起重跑**。
 
-**运行身份**：镜像 `USER` 是 `65534:65534`，但**实测过的组合是 `1000:1000`**（本机无 root，
-数据目录属主就是执行者）。换成 65534 的那次 `chown`/`install -o 65534` 没有验证过（BLOCKED），
-上线时按 §2 执行并把 §5.5 的 uid 规则复测一遍。
+**运行身份**：镜像 `USER` 是 `65534:65534`，历史实测组合是 `1000:1000`。65534 的路径仍未纳入正式范围。配置中的 UID/GID、密钥属主与数据目录属主必须一致；本轮 Linux 验收若受阻，就保留 BLOCKED。
 
 ## 4. 启动
 
@@ -244,9 +233,27 @@ sudo nginx -t && sudo nginx -s reload
 - widget 静态脚本**透传**后端自己的 `Cache-Control: public, max-age=3600`（`web/widget/widget.go:27`），
   不覆盖成 `immutable`：同一 URL 的内容在小版本里会变。
 - `client_max_body_size 8k`；超时 2s 连接 / 10s 读写。
-- 访问日志用自定义 `log_format`，只记 `$uri`，**不记 query、不记体**。
+- 80 与 443 两个 `server` 都显式选择 `epocha_access`，不继承宿主 `combined`；只记 `$uri`、方法、状态、
+  字节数、时间和来源地址，**不记 query、体或任意请求头**，也不记 User-Agent/Referer。
+- Nginx 原生 `error_log` 不能按 `log_format` 裁掉请求 URI，错误上下文可能带 query；模板两处均用
+  `error_log /dev/null crit` 丢弃，代价是缺少请求级错误详情。排障用状态/时延与后端白名单日志，
+  不能临时打开含凭据的 debug/error 日志；主配置、默认站点与额外载体仍需逐项核对。
 - `X-Forwarded-For` 由 nginx **覆写**为 `$remote_addr`（客户端自写的 XFF 丢弃）。
 - `CF-Connecting-IP` 默认**不转发**；Cloudflare 信任是一段注释掉的显式配置，需要三条前提同时成立才启用。
+
+### 6.2 日志验收覆盖两个入口和全部载体
+
+`node --test --test-reporter=tap docs/scripts/preflight_regression.test.mjs` 只验证模板的字段白名单与
+80/443 的显式配置，不启动 Nginx。本轮 Windows 的这项静态检查不等于 query 哨兵动态验收；后者 **NOT_RUN**。
+在获授权的隔离 Linux 环境中，还必须：
+
+1. 检查 `nginx -T` 的有效配置及所有 include，覆盖主级别、默认站点、两个 server 和 location，
+   不让宿主继承、额外 `access_log`、syslog 或容器 stderr 重新记录完整请求。
+2. 对 HTTP 跳转/ACME/404 与 HTTPS 正常/404/413/上游不可用分别发送**运行时随机的非凭据 query 哨兵**。
+   不用真实 secret、token 或答案；请求日志没有 query 也不代表可把凭据放进 URL。
+3. 按哨兵值检查当前与轮转的 access/error 文件、宿主 journal/syslog、容器 stdout/stderr 及配置了的采集端。
+   任一出现即 FAIL；没有权限读取、没有命中预定路径或清单为空都是 BLOCKED/FAIL，不能报 PASS。
+   保留配置身份、请求状态和载体清单作为证据，而不把真实凭据带入验收日志。
 
 ### 6.3 受信代理网段必须测，不要凭印象写
 
@@ -267,9 +274,9 @@ sudo nginx -t && sudo nginx -s reload
 4. 改了子网就要同步改 `EPOCHA_TRUSTED_PROXIES`。两条不一致的表现是限流与审计里所有用户共享一个地址，
    而不是报错——所以 `stage5a.sh` 的管理面/端口边界检查同时覆盖了"配置形状"。
 
-反代本身的路由语义（管理面 404、widget 缓存透传、动态端点 no-store、日志无 query 无凭据）在
-`docs/scripts/stage5a.sh` 第 11 步用真实 nginx 容器验证过；那一轮把上游改成服务名、用自签名测试证书，
-**这不等于**公网 TLS 证书签发已验收（见 §7）。
+历史 `docs/scripts/stage5a.sh` 第 11 步用真实 nginx 容器验证了当时的路由与响应头形状，
+使用服务名上游与自签名证书。那份记录不包含本次 80/443 全载体日志修订的动态验收，
+也**不等于**公网 TLS 证书签发已验收（见 §6.2、§7）。
 
 ## 7. TLS 的边界（本轮做到哪、没做到哪）
 
@@ -284,7 +291,7 @@ sudo nginx -t && sudo nginx -s reload
 | 端点 | 判据 | 用途 |
 |---|---|---|
 | `GET /healthz` | 只证明进程活着 | 存活探针（liveness）。**不要**用它做就绪判据 |
-| `GET /readyz` | 存储层有界自检：连得上、`schema_version` 就位且与本程序一致、**写路径可用**（主文件可写 + 数据目录可创建临时文件） | 就绪探针与容器 `HEALTHCHECK` |
+| `GET /readyz` | 有界检查连接、`schema_version`、主文件可写打开及目录可创建临时文件；**不保证 WAL/提交成功** | 就绪探针与容器 `HEALTHCHECK` |
 
 `/readyz` 的三条边界（`internal/api/handlers.go:642`、`internal/store/deploy.go:96`）：
 
@@ -293,9 +300,7 @@ sudo nginx -t && sudo nginx -s reload
 - **不外泄**：只回 `{"status":"ready"|"unavailable"}`，不含路径、SQL、驱动文本、站点数、失败原因。
   原因只进日志（`errKind` 给类别，红线 8）。
 
-题池水位低**不是**未就绪：那是容量信号（业务侧得到 503 + 不降级），把它当就绪判据会让编排
-在补池期间反复重启服务。数据库不可用 ⇒ 503 `unavailable`，并且因为写路径检查的存在，
-不会出现"每次验证都失败但探针说健康"。
+题池水位低**不是**未就绪：那是容量信号（业务侧得到 503 + 不降级）。探针可以发现连接、schema 和部分权限/目录创建问题，但没有实际写入并同步数据，也不提交 WAL 事务；不能保证识别全部 ENOSPC、WAL 追加或提交故障。探针返回 ready 仍可能与后续业务写入失败并存，业务事务失败时必须继续 fail closed。
 
 镜像里没有 shell/curl/wget，所以 `HEALTHCHECK` 用镜像内真实存在的命令：
 `epocha-ops check --path /readyz`（非 200 ⇒ 退出码 1，`stage5a.sh` 测过这个映射）。
@@ -306,7 +311,7 @@ sudo nginx -t && sudo nginx -s reload
 |---|---|---|
 | 进程退出/被 OOM kill | `restart: unless-stopped`（compose 里已有） | Docker 重启容器；`RestartCount` 增加，`docker inspect` 可查 |
 | 探针返回非 200（unhealthy） | **没有人**——plain Docker/Compose 里 unhealthy 本身**不会**重启容器 | 容器保持 running、状态标 unhealthy，事件写进 `docker events`；只有外部编排（Swarm/K8s）才会因此重建容器 |
-| 进程活着但写路径不可用 | `/readyz` 报 unavailable，公共端点 fail closed（503） | 业务侧看到 503；这恰恰是需要**告警**而不是自动 kill 的情形 |
+| 进程活着但文件权限/创建探针失败 | `/readyz` 报 unavailable；业务写入独立按事务结果 fail closed | 业务侧可能看到 503，应排查并告警 |
 
 所以本轮的口径是最小可操作的三条：
 
@@ -317,14 +322,20 @@ sudo nginx -t && sudo nginx -s reload
 2. **不要用健康检查无条件 kill 服务**，也不引入 autoheal 之类的旁路重启组件：它把"探针失败"与
    "进程故障"混成同一个动作，而这两者的处置完全不同。要自动处置就用编排系统自己的探针语义，
    并在 §12 清单里写明由谁负责。
-3. **就绪与存活分开看**：`/readyz` 回答"能不能接流量"（写路径可用），`/healthz` 只回答"进程在不在"。
-   题池水位低不是未就绪（那是容量信号，见上），否则编排会在补池期间反复重启服务。
+3. **就绪与存活分开看**：`/readyz` 提供连接/schema/文件权限与创建能力的就绪信号，`/healthz` 只回答进程在不在。
+   业务写入仍以事务结果为准；题池水位低不是未就绪（见上）。
 
 ## 9. 备份与恢复
 
 见 `docs/BACKUP-RESTORE.md`（主方案 VACUUM INTO、保守恢复流程、旧快照安全语义、演练步骤）。
 一句必须放在部署文档里的话：**恢复一份旧快照会丢失备份之后发生的消费、撤销与停用记录，
 它不天然保持全部防重放与撤销状态**；恢复流程必须先把站点全部禁用并换入新的管理凭据。
+
+接管按 `BACKUP-RESTORE` §5 **切换完整隔离数据目录与新密钥目录**，不是把新 `.db` 复制到旧 WAL/SHM
+现场。停服后保留旧目录与锁文件，离线恢复及新服务启动各自取目标目录运行锁；UID/GID 与权限须一致。
+使用新 master、禁用两个 previous 入口，`EPOCHA_ADMIN_KEY_FILE` 必须落到恢复时新装入的那把文件，
+先容器内 `whoami` 实际 200，再签发新 secret、更新业务端、逐站点启用并验证真实闭环/重放拒绝。
+新旧配置不交叉使用、不自动拉起旧实例；完整目录接管的本轮 Linux 实测仍 **NOT_RUN**。
 
 ## 10. 资源限额与"该看哪个数"
 
@@ -360,61 +371,53 @@ compose 里的硬限额：`cpus 1.0`、`memory 128m`、`memswap_limit 128m`（�
 3. 反代后面所有用户会共享同一个连接地址（如果 `EPOCHA_TRUST_PROXY` 没配对好），
    于是全站一起被 `ip` 维度限流。这正是 §6.3 那条"受信网段必须实测"的实际代价。
 
-## 11. 复制即可执行的最小启动（本机演练，非公网）
+## 11. 本机最小启动（Linux，非公网）
 
-**这一整段从仓库根执行**，只赋值一次 `EP`。它是 §2/§4 的合并版，形状与 `docs/scripts/stage5b.sh`
-的容器演练一致（那条路径在 `make stage5b-check` 里被真实跑过：启动 → 容器内管理命令 →
-站点闭环 → 重放拒绝 → 重建容器后状态仍在 → 停止后端口释放）。
+从仓库根、以服务身份执行。旧 `stage5b.sh` 保存了此前配方的容器闭环；本轮新的密钥准备入口由 `release-check.test.mjs` 在 Linux 非 root 下检查权限、属主与重跑字节保留。仅运行 Windows 的阻塞检测不能替代这项 Linux 实测。
 
 ```bash
-EP=deploy/docker                                  # 部署根（可以是仓库外的任何目录，见下面第 4 条注释）
-set -C                                            # noclobber：这几行的 `>` 永不覆盖已存在的文件
+set -euo pipefail
+umask 077
+EP=deploy/docker
 mkdir -p "$EP/data" "$EP/keys" "$EP/backups"
-chmod 700 "$EP/data" "$EP/keys" "$EP/backups"
-
-# ① 密钥：只在**不存在时**生成。重跑这段绝不能把 master/pepper 换掉——
-#    换了 master 就等于撤销所有已签发 token，换了 pepper 就等于让站点摘要与管理凭据全部失效。
-for k in master pepper; do
-  [[ -e "$EP/keys/$k" ]] || head -c32 /dev/urandom | base64 > "$EP/keys/$k"
-  chmod 600 "$EP/keys/$k"
-done
-# ② 管理凭据引导文件（可选）：只在"库里还没有任何管理凭据"的那一次启动生效。
-[[ -e "$EP/keys/admin" ]] || printf 'ak_%s' "$(head -c32 /dev/urandom | base64 | tr -d '/+=' | head -c48)" > "$EP/keys/admin"
-chmod 600 "$EP/keys/admin"
-set +C                                            # 保护只该管密钥那几行；留着会让后续 shell 里对已存在文件的 `>` 全部失败
-
-# ③ compose 变量：uid/gid 必须等于 data 与 keys 的**属主**，否则服务在取运行锁这一步
-#    直接返回 ErrLockAccess（§5.5），这是"身份不对"而不是"有人在用"。
-test -f "$EP/.env" || cp deploy/docker/.env.example "$EP/.env"
-sed -i "s|^EPOCHA_UID=.*|EPOCHA_UID=$(id -u)|;s|^EPOCHA_GID=.*|EPOCHA_GID=$(id -g)|" "$EP/.env"
-sed -i "s|^# EPOCHA_ADMIN_KEY_FILE=.*|EPOCHA_ADMIN_KEY_FILE=/etc/epocha/keys/admin|" "$EP/.env"
-chmod 600 "$EP/.env"
-
-# ④ 构建并启动。`make` 走仓库根的 Makefile（B 路径）；compose 走 $EP 里的文件与 .env。
+bash deploy/prepare-keys.sh "$EP/keys"
+# 已有 .env 保持原样。确认已有配置里的 UID/GID 与服务身份一致后才启动。
+if [[ ! -e "$EP/.env" ]]; then
+  (set -C
+   sed "s|^EPOCHA_UID=.*|EPOCHA_UID=$(id -u)|;s|^EPOCHA_GID=.*|EPOCHA_GID=$(id -g)|;s|^# EPOCHA_ADMIN_KEY_FILE=.*|EPOCHA_ADMIN_KEY_FILE=/etc/epocha/keys/admin|" \
+     deploy/docker/.env.example > "$EP/.env")
+fi
+# 正式试部署先遵守 TRIAL-DEPLOYMENT §0 的固定 OID/已验收产物规则。
 make docker-image-local
-COMPOSE="docker compose -f $EP/compose.yml --project-directory $EP --env-file $EP/.env"
-$COMPOSE up -d --wait
-curl -sS http://127.0.0.1:8080/readyz            # ready
-$COMPOSE exec epocha /usr/local/bin/epocha-ops admin GET /api/admin/whoami   # 管理面只在容器内可达
+COMPOSE=(docker compose -f "$EP/compose.yml" --project-directory "$EP" --env-file "$EP/.env")
+"${COMPOSE[@]}" up -d --wait
+curl -fsS http://127.0.0.1:8080/readyz     # {"status":"ready"}
+"${COMPOSE[@]}" exec epocha /usr/local/bin/epocha-ops admin GET /api/admin/whoami
 ```
 
-> 同一台机器上要并存**多套**部署时，给每套加一个不同的 `-p <项目名>`，并在 `.env` 里给不同的
-> `EPOCHA_NETWORK`/`EPOCHA_SUBNET`/`EPOCHA_PUBLIC_PORT`。`stage5b.sh` 第 2.5 步就是这么并起两套
-> （两套各有自己的数据目录 ⇒ 各自持一把锁，互不冲突），并验证"定点清理只带走自己那套"。
+- `EP` 在仓库外时，先把 `deploy/docker/compose.yml` 和 `.env.example` 复制到该部署根；源码构建仍在仓库根进行。
+- 多套部署使用不同的 compose 项目名、网络/子网与公共端口；不能让验收连接遗留进程。
+- `EPOCHA_PUBLIC_BIND=127.0.0.1` 保留；管理端口 8081 没有发布项。密钥目录只读挂载，数据目录属主须与服务 UID 一致。
+- 本地重建的镜像须重新验收；`git describe`、构建时间变化都会改变二进制哈希。不要把新构建套进旧清单。
+- 本配方不包含反代/TLS、备份定时任务、人工可读性或题型效果验收。
 
-读法与边界：
+## 11.5 可重复工程入口与发布阻断
 
-- **端口**：`.env` 里 `EPOCHA_PUBLIC_BIND=127.0.0.1` 不能省成 `8080:8080`（那会绑 0.0.0.0）；
-  管理端口 8081 在 compose 里**没有**发布项，`ss -ltn` 在宿主上查不到它。
-- **`EP` 在仓库外时**：`make docker-image-local` 仍然在仓库根跑（它编译源码并装配镜像），
-  只是 compose 与数据/密钥目录落在别处——这时把上面第 ③ 步的 `cp` 换成从仓库里拷
-  `deploy/docker/{compose.yml,.env.example}` 到 `$EP`。
-- **`set -C` 的作用域**：它让这一段里的 `>` 对已存在文件失败退出，正是"重跑不毁密钥"的机制。
-  它不影响 `cp -n`／`sed -i`／后续命令。
-- 密钥文件权限必须 0600/0400 且属主 = 容器 uid；`epocha --version` 与备份 manifest 里的
-  `app_version`/`commit` 应当对得上 `git describe`（§3 的 B 路径注入的就是这两个值）。
-- 这一段**不**做：反代与 TLS（§6/§7）、备份定时任务（§9）、题型难度选择（红线 14：
-  低档挡不住通用 OCR）、以及任何"把测试高限流写进部署配置"的事（测量用的大 RPM 只在 `stage5b.sh` 里出现）。
+构建机显式安装 Go **1.27.3**、Node **24**、GNU Make、Bash；Linux race 需要 GCC。生产构建仍使用 `CGO_ENABLED=0`。首次依赖准备为 `GOTOOLCHAIN=local go mod download`；冻结后按 `go.sum` 验证，不自动升级版本。没有工具或 Linux 环境时，完整命令必须记录 BLOCKED。
+
+```bash
+node --test --test-reporter=tap docs/scripts/release-check.test.mjs
+node docs/scripts/release-check.mjs --profile engineering
+node docs/scripts/release-check.mjs --profile full
+```
+
+每次执行在新的 `release-artifacts/<profile>-*/` 目录写日志与 `summary.json`，不覆盖或删除旧收据。JSON 包含源码完整 OID、dirty 状态、逐文件 SHA-256、命令、真实退出码、逐项分类与日志摘要。它是可追踪检查收据，没有签名，不构成来源真实性或上线证明。源码运行中改变会阻断结果。`engineering` 只覆盖工程子集，`release_ready` 永远为 false。
+
+`full` 保留 **stage4b / stage5a / stage5b / admin-ui** 四个既有最强入口，按原脚本的汇总和真实退出码共同判定：`0` 为请求范围通过、`1` 为失败、`3` 为 BLOCKED/NOT_RUN/未完成。特别是 stage4b 的旧脚本可能在 OCR 阻塞时退出 0，新入口会根据非空汇总保持未完成；admin-ui 的人工项退出 3 也不会被吞成 0。没有人工填值或环境 override 可以授予 PASS；`make` 仍把非零折叠为 2，机器应直接调用 Node 入口并读 JSON。
+
+完整部署脚本有固定名资源清理行为，因此新入口要求**本地、独占、实测为空的 Docker daemon**（无容器/镜像/卷，只有默认网络），以免碰已有资产。它不会清空 daemon 来满足条件。正式范围要求 Linux/arm64 与 UID/GID `1000:1000`；其余平台不会因为工程测试绿灯而自动获支持。还需 Firefox、Docker Compose、curl、jq、openssl、readelf、ss、python3 等既有验收工具。`stage5b` 要求干净提交；当前未授权 commit 时只能交付带 dirty 状态的源代码/二进制收据，不能冒充正式候选。
+
+版本化配置在 `.github/workflows/ci.yml`：托管 Linux arm64/amd64 执行工程子集，Windows 检查 LF 与 Node 回归。完整验收 job 仅手动选择，在预先配置的独占 Linux arm64 runner 上运行；该 runner **尚未由本轮配置或验证**。提交 CI 文件不表示远端跑过，任何远端结论都须附实际 run 记录。仓库 `.gitattributes` 固定文本 LF、二进制不做换行转换；不修改全局 Git 配置。
 
 ## 12. 上线前的人工确认清单（agent 无法替你完成）
 
@@ -426,6 +429,7 @@ $COMPOSE exec epocha /usr/local/bin/epocha-ops admin GET /api/admin/whoami   # �
 - [ ] 恢复演练后的站点逐个确认再启用；管理凭据用恢复时新装入的那把。
 - [ ] 反代日志的磁盘占用与轮转确认（`logrotate` 或服务自己的 json-file 上限）。
 - [ ] `make stage5a-check` 在本机退出码 0；若非 0，逐条读 RESULT 行而不是把文件写完当成验收通过。
-- [ ] 在**目标机**上跑一次 `bash deploy/preflight.sh --text`（只读），把它报的 warn 逐条处置完再部署：
+- [ ] 在**目标机**上获授权后跑一次 `bash deploy/preflight.sh --text`（只读），把它报的 warn 逐条处置完再部署：
       密钥权限位、数据目录属主与 uid、端口占用、可用内存/swap、docker 组可达性。
-      开发机的预检结果不算数，报告里的 warn 也不等于失败——它是给人判断的输入。
+      `ss`/其他探测失败必须是 `unknown`，不是 `free`；目录告警应同时出现在字段、warnings 与最终计数。
+      退出码 0 只表示报告已生成，不表示端口全空闲或获准部署。开发机的预检结果不算目标机事实。

@@ -14,16 +14,18 @@
 | 项 | 值 |
 |---|---|
 | Cloady 应用 | `jian-shi/jpn1` production，region `jpn1`，状态 `running` |
-| 公共基址 | `https://jpn1-rmw1vpfv-jian-shi.cloady.io` |
-| **浏览器测试页** | `https://jpn1-rmw1vpfv-jian-shi.cloady.io/demo?site_key=pk_jpn1_v2_20261105` |
+| 镜像版本 | `epocha cloady-2026-11-05 (commit 6db855675e7b6ccaca9e78a8719365ba598b9671, built 2026-11-05T00:00:00Z)` |
+| 公共基址 | `https://jpn1-ub5s1o5q-jian-shi.cloady.io` |
+| **浏览器测试页** | `https://jpn1-ub5s1o5q-jian-shi.cloady.io/demo?site_key=pk_jpn1_v2_20261105` |
 | API | `POST /api/challenge`、`POST /api/redeem`、`POST /siteverify` |
 | 测试 site_key（公开） | `pk_jpn1_v2_20261105` |
-| 测试 site secret | 本机 `tmp/cloady-site-v2-secret-final2.txt`（仅当前用户 NTFS ACL，gitignore；不要提交/贴聊天） |
+| 测试 site secret | 本机 `tmp/cloady-site-v2-secret-final3.txt`（仅当前用户 NTFS ACL，gitignore；不要提交/贴聊天） |
 | 题型 | `text-image-v2`，难度 1，8 字符，480×160 |
 | 管理面 | 不发布；公网 `/api/admin/*` 404 |
 | 持久化 | **无持久卷**；重建应用会丢 SQLite，站点需重新播种 |
 
-真实浏览器（VPS headless Chromium + CDP）已确认 `/demo` 标题/占位符都是 8 字符，widget 状态 `ready`。
+本机 headless Chrome 已渲染最终 `/demo`：标题/占位符都是 8 字符，widget 状态 `ready`，图片正常显示。
+VPS 出口到 Cloady 偶发 TLS EOF（平台边缘瞬断），本机与重试均返回 200；不能把一次 000/EOF 记成验证失败。
 页面只调用公开 challenge/redeem，不调用 `/siteverify`、不读 secret、不写业务数据。
 
 ## 3. 本轮实际完成
@@ -141,10 +143,10 @@ holdout 每档 **100 张**；工具失败、缺测与畸形输出都计不通过
 
 打开：
 
-`https://jpn1-rmw1vpfv-jian-shi.cloady.io/demo?site_key=pk_jpn1_v2_20261105`
+`https://jpn1-ub5s1o5q-jian-shi.cloady.io/demo?site_key=pk_jpn1_v2_20261105`
 
 步骤：看图输入 8 个字符 → 提交 → 等待 PoW → 看到 `verified`。这是只读测试页，不会写业务数据。
-如果你要测 API：用 §2 的 curl，secret 从本机 `tmp/cloady-site-v2-secret-final2.txt` 读取，
+如果你要测 API：用 §2 的 curl，secret 从本机 `tmp/cloady-site-v2-secret-final3.txt` 读取，
 不要贴到聊天或提交进仓库。
 
 请记录：浏览器/系统、时间、状态是否到 `verified`、错误文案、是否换题；你的本人操作是最后一段验收。

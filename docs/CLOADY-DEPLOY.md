@@ -9,16 +9,20 @@
 |---|---|
 | Cloady workspace | `jian-shi` |
 | App / env / region | `jpn1` / `production` / `jpn1` |
-| 公共 API / 页面基址 | `https://jpn1-rmw1vpfv-jian-shi.cloady.io` |
-| 只读测试页 | `https://jpn1-rmw1vpfv-jian-shi.cloady.io/demo?site_key=pk_jpn1_v2_20261105` |
+| 镜像版本 | `epocha cloady-2026-11-05 (commit 6db855675e7b6ccaca9e78a8719365ba598b9671, built 2026-11-05T00:00:00Z)` |
+| 公共 API / 页面基址 | `https://jpn1-ub5s1o5q-jian-shi.cloady.io` |
+| 只读测试页 | `https://jpn1-ub5s1o5q-jian-shi.cloady.io/demo?site_key=pk_jpn1_v2_20261105` |
 | 测试站点 site_key（公开） | `pk_jpn1_v2_20261105` |
-| 测试站点 secret | 本机 `tmp/cloady-site-v2-secret-final2.txt`（仅当前用户 NTFS ACL；`tmp/` 已 gitignore；**不要提交、不要贴聊天**） |
+| 测试站点 secret | 本机 `tmp/cloady-site-v2-secret-final3.txt`（仅当前用户 NTFS ACL；`tmp/` 已 gitignore；**不要提交、不要贴聊天**） |
 | 题型 / 难度 | `text-image-v2` / 1（8 字符，480×160） |
 | 健康检查 | `/healthz`、`/readyz`、`/widget/v1.js` 均为 200 |
 | 管理面 | 不发布；公网 `/api/admin/*` 为 404 |
 
 `/demo` 只在 `EPOCHA_DEMO_PAGE=1` 时挂载，只调用公开 challenge/redeem；它不读取 secret、
 不调用 `/siteverify`、不写业务数据。它**不是**业务接入示例，接入见 §3。
+
+Cloady 边缘偶发 TLS/连接重置（实测本机 `/demo` 200、VPS 出口偶发 EOF）；这是平台入口的
+瞬时故障，不是应用 5xx。遇到时重试即可，不能把一次 000/EOF 记成验证失败。
 
 ## 2. API 闭环
 
@@ -92,11 +96,11 @@ curl -sS -X POST "$BASE/siteverify" \
 
 ```html
 <div id="captcha"></div>
-<script src="https://jpn1-rmw1vpfv-jian-shi.cloady.io/widget/v1.js" defer></script>
+<script src="https://jpn1-ub5s1o5q-jian-shi.cloady.io/widget/v1.js" defer></script>
 <script>
   document.addEventListener("DOMContentLoaded", function () {
     EpoCHA.render(document.getElementById("captcha"), {
-      apiBase: "https://jpn1-rmw1vpfv-jian-shi.cloady.io",
+      apiBase: "https://jpn1-ub5s1o5q-jian-shi.cloady.io",
       siteKey: "pk_jpn1_v2_20261105",
       language: "zh-CN",
       fieldName: "epocha_response" // 或 "" + 自己读 getResponse

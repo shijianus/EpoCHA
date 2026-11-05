@@ -42,13 +42,23 @@ const (
 	TextImageID      = "text-image-v1"
 	textImageVersion = "v1"
 
+	// TextImageV2ID 是强形变版本。它不替换 v1：v1 仍是历史基线，v2 需要独立评测。
+	TextImageV2ID      = "text-image-v2"
+	textImageV2Version = "v2"
+
 	// TextImageLength 是**固定**答案长度。不做可变长度：长度本身会变成答案的一部分信息，
 	// 归一化也要多一条"4..7 都算合法"的分支，而代价是 M3 变差（短答案的猜中率更高）。
 	TextImageLength = 6
+	// TextImageV2Length 是 v2 的固定长度：8 个字符把 M1 从 32^6 提到 32^8，
+	// 同时给"字间重叠 + 旋转 + 剪切"留出更多可读空间（6 字符在强形变下太短，误读一个就整串错）。
+	TextImageV2Length = 8
 
 	// TextImageCharset 是公开常量：32 个字符，剔除肉眼易混的 I/1 与 O/0（本集合无小写，
 	// 所以也不再排除 l）。它是题面的一部分（进 payload），**不是秘密**。
 	TextImageCharset = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	// TextImageV2Charset 与 v1 相同；单独命名是为了让 v2 的公开题面与评测代码
+	// 明确引用 v2 契约，而不是"碰巧继承了 v1 的常量"。
+	TextImageV2Charset = TextImageCharset
 
 	// MimeTypePNG 必须与 store.MimeTypePNG 逐字节一致；交叉检查在 internal/pool 里有测试。
 	MimeTypePNG = "image/png"
@@ -89,6 +99,9 @@ const (
 
 	// 8 位灰度下的三种墨量：纸亮、字暗、线居中。
 	paperGray, inkGray, lineGray = uint8(240), uint8(28), uint8(120)
+	// lineCrossGray 是 v2 的"穿过字形"线颜色：比背景线更深，但仍明显浅于字墨，
+	// 用来切开 OCR 的连通域而不把字符涂掉。
+	lineCrossGray = uint8(70)
 	// noiseGraySpread：噪声点相对纸面向下的最大偏移（比纸暗一点，不伪装成字）。
 	noiseGraySpread = 60
 
@@ -121,6 +134,67 @@ type ImageParams struct {
 	Lines        int
 	LineSegments int
 	Noise        int
+
+	// style 只给 text-image-v2 使用。零值必须与 v1 的渲染路径完全一致：
+	// v1 的每个档位都不填它，于是 v1 的字节级形状不因这次扩展而改变。
+	style textImageStyle
+}
+
+// textImageStyle 是 v2 的附加形变参数。它们只改题面形状，不参与答案与判分。
+//
+// 为什么不复制一份渲染器：v1 与 v2 共用同一条"字形测量 → 布局 → 画布 → PNG"路径，
+// 私有 verifier 也共用 generator.go 的那一条。复制会让"加一个档位"变成两处同时改，
+// 而漏掉的往往是边界检查。
+type textImageStyle struct {
+	// RotationDeg > 0 时覆盖 ImageParams.MaxRotationDeg（v1 的上界仍是 15°）。
+	RotationDeg float64
+	// Shear 是水平剪切系数（x' = x + shear*y），负值表示反向。
+	Shear float64
+	// ScaleMin/ScaleMax 是单字缩放区间；1/1 表示不变。
+	ScaleMin, ScaleMax float64
+	// OverlapDivisor 越小，允许的字间重叠越大（v1 = 4）。
+	OverlapDivisor float64
+	// OverlapPx 是主动向左推的像素上界；0 = 不主动重叠。
+	OverlapPx int
+	// WaveAmplitude/WavePeriod 让基线按水平位置做正弦位移。
+	WaveAmplitude int
+	WavePeriod    float64
+	// CrossLines 是在字形画完之后再画几条穿过字形的干扰线。
+	CrossLines int
+	// InkSpread 让每个字的墨色在 inkGray..inkGray+InkSpread 间随机。
+	InkSpread int
+	// Stroke 是加粗半径（像素）；0 = 不加粗。
+	Stroke int
+}
+
+func (s textImageStyle) validate() error {
+	// v1 的五档全部使用零值 style；零值不是"缩放 0"，而是"不启用 v2 形变"。
+	if s == (textImageStyle{}) {
+		return nil
+	}
+	switch {
+	case s.RotationDeg < 0 || s.RotationDeg > 45:
+		return fmt.Errorf("%w: v2 旋转上界 %v° 越界（≤45）", ErrBadParams, s.RotationDeg)
+	case s.Shear < -0.6 || s.Shear > 0.6:
+		return fmt.Errorf("%w: v2 剪切 %v 越界（±0.6）", ErrBadParams, s.Shear)
+	case s.ScaleMin < 0.5 || s.ScaleMax > 1.6 || s.ScaleMin > s.ScaleMax:
+		return fmt.Errorf("%w: v2 缩放区间 %v..%v 越界", ErrBadParams, s.ScaleMin, s.ScaleMax)
+	case s.OverlapDivisor != 0 && (s.OverlapDivisor < 1 || s.OverlapDivisor > 8):
+		return fmt.Errorf("%w: v2 重叠除数 %v 越界（1..8）", ErrBadParams, s.OverlapDivisor)
+	case s.OverlapPx < 0 || s.OverlapPx > 24:
+		return fmt.Errorf("%w: v2 主动重叠 %d 越界（≤24）", ErrBadParams, s.OverlapPx)
+	case s.WaveAmplitude < 0 || s.WaveAmplitude > 12:
+		return fmt.Errorf("%w: v2 波浪幅度 %d 越界（≤12）", ErrBadParams, s.WaveAmplitude)
+	case s.WavePeriod != 0 && (s.WavePeriod < 16 || s.WavePeriod > 200):
+		return fmt.Errorf("%w: v2 波浪周期 %v 越界（16..200）", ErrBadParams, s.WavePeriod)
+	case s.CrossLines < 0 || s.CrossLines > 6:
+		return fmt.Errorf("%w: v2 穿越线 %d 越界（≤6）", ErrBadParams, s.CrossLines)
+	case s.InkSpread < 0 || s.InkSpread > 120:
+		return fmt.Errorf("%w: v2 墨色扩散 %d 越界（≤120）", ErrBadParams, s.InkSpread)
+	case s.Stroke < 0 || s.Stroke > 3:
+		return fmt.Errorf("%w: v2 加粗 %d 越界（≤3）", ErrBadParams, s.Stroke)
+	}
+	return nil
 }
 
 // textImageTiers 是**仅有的**五档。刻意不做参数笛卡尔积：几百个没测过的组合里，
@@ -143,6 +217,54 @@ func TextImageParams(difficulty int) (ImageParams, error) {
 		return ImageParams{}, fmt.Errorf("%w: 难度 %d 没有对应的视觉档位", ErrBadParams, difficulty)
 	}
 	return p, nil
+}
+
+// textImageV2Tiers 是 v2 的五档。与 v1 的关键差别：
+//   - 8 字符、480×160；
+//   - 单字旋转 10°..35°、剪切 0.15..0.55、缩放 0.90..1.30、主动重叠 4..12px；
+//   - 波浪基线 + 穿过字形的干扰线 + 每字随机墨色 + 1..3px 加粗。
+//
+// 这些参数是**题面形状**，不是安全证明；它们只改变 M1。M4 仍须由 OCR 基线测量。
+var textImageV2Tiers = map[int]ImageParams{
+	1: {Width: 480, Height: 160, FontSize: 46, DPI: 72, BaselineJitter: 4, SpacingJitter: 6, Lines: 2, LineSegments: 4, Noise: 600,
+		style: textImageStyle{RotationDeg: 10, Shear: 0.15, ScaleMin: 0.90, ScaleMax: 1.10, OverlapDivisor: 2.6, OverlapPx: 4, WaveAmplitude: 2, WavePeriod: 80, CrossLines: 1, InkSpread: 40, Stroke: 1}},
+	2: {Width: 480, Height: 160, FontSize: 46, DPI: 72, BaselineJitter: 5, SpacingJitter: 7, Lines: 3, LineSegments: 5, Noise: 900,
+		style: textImageStyle{RotationDeg: 18, Shear: 0.25, ScaleMin: 0.85, ScaleMax: 1.15, OverlapDivisor: 2.2, OverlapPx: 6, WaveAmplitude: 3, WavePeriod: 70, CrossLines: 2, InkSpread: 50, Stroke: 1}},
+	3: {Width: 480, Height: 160, FontSize: 46, DPI: 72, BaselineJitter: 5, SpacingJitter: 7, Lines: 3, LineSegments: 6, Noise: 1000,
+		style: textImageStyle{RotationDeg: 22, Shear: 0.30, ScaleMin: 0.85, ScaleMax: 1.15, OverlapDivisor: 2.8, OverlapPx: 3, WaveAmplitude: 3, WavePeriod: 65, CrossLines: 1, InkSpread: 50, Stroke: 1}},
+	4: {Width: 480, Height: 160, FontSize: 46, DPI: 72, BaselineJitter: 7, SpacingJitter: 9, Lines: 5, LineSegments: 7, Noise: 1500,
+		style: textImageStyle{RotationDeg: 30, Shear: 0.45, ScaleMin: 0.75, ScaleMax: 1.25, OverlapDivisor: 1.6, OverlapPx: 10, WaveAmplitude: 5, WavePeriod: 50, CrossLines: 3, InkSpread: 80, Stroke: 2}},
+	5: {Width: 480, Height: 160, FontSize: 46, DPI: 72, BaselineJitter: 8, SpacingJitter: 10, Lines: 6, LineSegments: 8, Noise: 1800,
+		style: textImageStyle{RotationDeg: 35, Shear: 0.55, ScaleMin: 0.70, ScaleMax: 1.30, OverlapDivisor: 1.4, OverlapPx: 12, WaveAmplitude: 6, WavePeriod: 40, CrossLines: 3, InkSpread: 100, Stroke: 3}},
+}
+
+// TextImageV2Params 返回 v2 某个难度档的渲染参数。
+func TextImageV2Params(difficulty int) (ImageParams, error) {
+	p, ok := textImageV2Tiers[difficulty]
+	if !ok {
+		return ImageParams{}, fmt.Errorf("%w: 难度 %d 没有对应的 v2 档位", ErrBadParams, difficulty)
+	}
+	return p, nil
+}
+
+// textImageProfile 是同一套渲染器上的一组"题型身份"：id/version、答案长度、字符集与档位表。
+// v1 与 v2 只在 profile 上不同，判分与正常化路径共用。
+type textImageProfile struct {
+	id      string
+	version string
+	length  int
+	charset string
+	tiers   map[int]ImageParams
+}
+
+var textImageV1Profile = textImageProfile{
+	id: TextImageID, version: textImageVersion,
+	length: TextImageLength, charset: TextImageCharset, tiers: textImageTiers,
+}
+
+var textImageV2Profile = textImageProfile{
+	id: TextImageV2ID, version: textImageV2Version,
+	length: TextImageV2Length, charset: TextImageCharset, tiers: textImageV2Tiers,
 }
 
 // validate 检查全部渲染边界。任何一项越界都拒绝，绝不"就地夹紧后继续画"：
@@ -172,6 +294,9 @@ func (p ImageParams) validate() error {
 	case p.Noise < 0 || p.Noise > p.Width*p.Height/maxNoiseDivisor:
 		return fmt.Errorf("%w: 噪声点数 %d 超过像素总数的 1/%d", ErrBadParams, p.Noise, maxNoiseDivisor)
 	}
+	if err := p.style.validate(); err != nil {
+		return err
+	}
 	// 字形必须放得下：字号 × 6 个字符至少要有可辨认的宽度，否则布局重试会变成忙循环。
 	if p.Width <= (glyphEdgeMargin+1)*2 {
 		return fmt.Errorf("%w: 宽 %d 放不下任何字形", ErrBadParams, p.Width)
@@ -195,9 +320,10 @@ type TextImagePublic struct {
 
 func (TextImagePublic) PublicKind() string { return "text-image" }
 
-// TextImage 实现 Generator。无可变字段，可并发调用（字体在包级缓存里且只读）。
+// TextImage 实现 Generator。不可变字段，可并发调用（字体在包级缓存里且只读）。
 type TextImage struct {
-	macKey []byte
+	macKey  []byte
+	profile textImageProfile
 }
 
 var _ Generator = TextImage{}
@@ -220,10 +346,20 @@ func loadGoRegular() (*opentype.Font, error) {
 	return textImageFont, textImageFontErr
 }
 
-// NewTextImage 构造视觉生成器，并在**登记阶段**就把两类事故挡在启动时：
+// NewTextImage 构造 v1 视觉生成器，并在**登记阶段**就把两类事故挡在启动时：
 //  1. 内嵌字体必须覆盖整个字符集（缺字形 ⇒ 题面永远答不对，而响应看起来一切正常）；
 //  2. 五档渲染参数必须全部通过边界自检（档位表写错 ⇒ 现在失败，而不是第一次补题时）。
 func NewTextImage(macKey []byte) (TextImage, error) {
+	return newTextImage(macKey, textImageV1Profile)
+}
+
+// NewTextImageV2 构造强形变 v2。它与 v1 共用判分路径，但独立档位、独立 ID，
+// 因此管理面与题池可以把"v2 是否可用"单独观测，不会把 v1 的历史结论带过去。
+func NewTextImageV2(macKey []byte) (TextImage, error) {
+	return newTextImage(macKey, textImageV2Profile)
+}
+
+func newTextImage(macKey []byte, profile textImageProfile) (TextImage, error) {
 	if len(macKey) < 32 {
 		return TextImage{}, fmt.Errorf("%w: verifier 密钥短于 32 字节", ErrBadParams)
 	}
@@ -238,27 +374,39 @@ func NewTextImage(macKey []byte) (TextImage, error) {
 		return TextImage{}, fmt.Errorf("generator: 内嵌字体 face: %w", err)
 	}
 	defer func() { _ = face.Close() }()
-	for _, r := range TextImageCharset {
+	for _, r := range profile.charset {
 		dr, _, _, _, ok := face.Glyph(fixed.P(0, 0), r)
 		if !ok || dr.Empty() {
 			return TextImage{}, fmt.Errorf("%w: %q", ErrFontGlyphMissing, r)
 		}
 	}
 	for d := 1; d <= MaxDifficulties; d++ {
-		p, err := TextImageParams(d)
-		if err != nil {
-			return TextImage{}, err
+		p, ok := profile.tiers[d]
+		if !ok {
+			return TextImage{}, fmt.Errorf("%w: %s 缺少难度 %d 的档位", ErrBadParams, profile.id, d)
 		}
 		if err := p.validate(); err != nil {
 			return TextImage{}, err
 		}
 	}
-	return TextImage{macKey: macKey}, nil
+	return TextImage{macKey: macKey, profile: profile}, nil
 }
 
-func (TextImage) ID() string      { return TextImageID }
-func (TextImage) Version() string { return textImageVersion }
-func (TextImage) Media() string   { return MediaImage }
+// effectiveProfile 让零值 TextImage 继续表现为 v1。
+//
+// 这不是"兼容垫片"：评测适配器与若干测试把 TextImage 当纯 NormalizeAnswer 用，
+// 零值没有 profile。把它解释成 v1 是唯一不改变既有判分口径的选择；新代码必须
+// 通过 NewTextImage / NewTextImageV2 明确选择 profile。
+func (g TextImage) effectiveProfile() textImageProfile {
+	if g.profile.id == "" {
+		return textImageV1Profile
+	}
+	return g.profile
+}
+
+func (g TextImage) ID() string      { return g.effectiveProfile().id }
+func (g TextImage) Version() string { return g.effectiveProfile().version }
+func (TextImage) Media() string     { return MediaImage }
 
 // TextImageAnswerFrom 从熵流里按**与生产 Generate 完全相同的抽样顺序**取出答案。
 //
@@ -267,13 +415,22 @@ func (TextImage) Media() string   { return MediaImage }
 // 生产路径的熵来自 crypto/rand，没有人能提前知道下一段流。
 // 一致性由 TestTextImageAnswerFromMatchesGenerate 钉住（同一流取出的答案 == Generate 判分用的答案）。
 func TextImageAnswerFrom(entropy io.Reader) (string, error) {
-	out := make([]byte, 0, TextImageLength)
-	for range TextImageLength {
-		i, err := drawInt(entropy, 0, int64(len(TextImageCharset))-1)
+	return textImageAnswerFrom(textImageV1Profile, entropy)
+}
+
+// TextImageV2AnswerFrom 是 v2 的离线评测入口；与生产 Generate 使用同一 profile 和抽样顺序。
+func TextImageV2AnswerFrom(entropy io.Reader) (string, error) {
+	return textImageAnswerFrom(textImageV2Profile, entropy)
+}
+
+func textImageAnswerFrom(profile textImageProfile, entropy io.Reader) (string, error) {
+	out := make([]byte, 0, profile.length)
+	for range profile.length {
+		i, err := drawInt(entropy, 0, int64(len(profile.charset))-1)
 		if err != nil {
 			return "", err
 		}
-		out = append(out, TextImageCharset[i])
+		out = append(out, profile.charset[i])
 	}
 	return string(out), nil
 }
@@ -286,12 +443,13 @@ func (g TextImage) Generate(ctx context.Context, p Params, entropy io.Reader) (Q
 }
 
 func (g TextImage) generateWithAnswer(ctx context.Context, p Params, entropy io.Reader) (string, Question, error) {
+	g.profile = g.effectiveProfile()
 	if p.Difficulty < 1 || p.Difficulty > MaxDifficulties {
 		return "", Question{}, fmt.Errorf("%w: difficulty=%d", ErrBadParams, p.Difficulty)
 	}
-	ip, err := TextImageParams(p.Difficulty)
-	if err != nil {
-		return "", Question{}, err
+	ip, ok := g.profile.tiers[p.Difficulty]
+	if !ok {
+		return "", Question{}, fmt.Errorf("%w: 难度 %d 没有对应的 %s 档位", ErrBadParams, p.Difficulty, g.profile.id)
 	}
 	if err := ip.validate(); err != nil {
 		return "", Question{}, err
@@ -300,7 +458,7 @@ func (g TextImage) generateWithAnswer(ctx context.Context, p Params, entropy io.
 		return "", Question{}, err
 	}
 
-	answer, err := TextImageAnswerFrom(entropy)
+	answer, err := textImageAnswerFrom(g.profile, entropy)
 	if err != nil {
 		return "", Question{}, err
 	}
@@ -352,10 +510,10 @@ func (g TextImage) generateWithAnswer(ctx context.Context, p Params, entropy io.
 		}
 		q := Question{
 			Payload: TextImagePublic{
-				Length:       TextImageLength,
-				Charset:      TextImageCharset,
+				Length:       g.profile.length,
+				Charset:      g.profile.charset,
 				AnswerType:   "text",
-				MaxAnswerLen: TextImageLength,
+				MaxAnswerLen: g.profile.length,
 				ImageWidth:   ip.Width,
 				ImageHeight:  ip.Height,
 			},
@@ -381,10 +539,14 @@ type placedGlyph struct {
 	ch    rune
 	dot   image.Point
 	angle float64 // 弧度
+	shear float64 // 水平剪切
+	sx    float64 // 水平缩放
+	sy    float64 // 垂直缩放
 	base  image.Rectangle
 	dr    image.Rectangle
 	tile  *image.RGBA
-	box   image.Rectangle // 旋转后在画布上的包围盒（用于不越界判定）
+	box   image.Rectangle // 变换后在画布上的包围盒（用于不越界判定）
+	ink   uint8
 }
 
 // layoutGlyphs 逐字定位。返回的每个 placed.box 一定满足：
@@ -396,11 +558,12 @@ type placedGlyph struct {
 // 旋转角在**测量时抽一次**并带到绘制阶段：布局保证是针对这个角算出来的，
 // 如果绘制时再抽一个角，"保证不裁切"就变成了"大概不裁切"。
 func layoutGlyphs(face xfont.Face, answer string, ip ImageParams, jitter *mrand.Rand) ([]placedGlyph, error) {
-	// 第一遍：以 dot=(0,0) 测量每个字形的旋转后包围盒与前进宽度（不取 mask）。
+	// 第一遍：以 dot=(0,0) 测量每个字形的变换后包围盒与前进宽度（不取 mask）。
 	type probe struct {
-		rel   image.Rectangle // 按本字旋转角算出的包围盒（相对 dot）
-		adv   int
-		angle float64
+		rel           image.Rectangle // 按本字变换算出的包围盒（相对 dot）
+		adv           int
+		angle         float64
+		shear, sx, sy float64
 	}
 	var probes []probe
 	for _, r := range answer {
@@ -408,8 +571,10 @@ func layoutGlyphs(face xfont.Face, answer string, ip ImageParams, jitter *mrand.
 		if !ok || dr.Empty() {
 			return nil, fmt.Errorf("%w: %q", ErrFontGlyphMissing, r)
 		}
-		angle := angleRad(ip, jitter)
-		probes = append(probes, probe{rel: rotateRect(dr, angle), adv: advance.Round(), angle: angle})
+		angle, shear, sx, sy := glyphTransform(ip, jitter)
+		rel := transformRect(dr, angle, shear, sx, sy)
+		adv := int(math.Round(float64(advance.Round()) * sx))
+		probes = append(probes, probe{rel: rel, adv: adv, angle: angle, shear: shear, sx: sx, sy: sy})
 	}
 
 	// 起点与基线**由测到的几何算出来**，而不是抄一个"看着居中"的公式：
@@ -439,20 +604,26 @@ func layoutGlyphs(face xfont.Face, answer string, ip ImageParams, jitter *mrand.
 		if ip.SpacingJitter > 0 {
 			dx = jitter.Intn(ip.SpacingJitter + 1)
 		}
+		// v2 主动向左推：字间重叠是"切不开"的来源，而不是靠随机间距碰运气。
+		if ip.style.OverlapPx > 0 {
+			dx -= jitter.Intn(ip.style.OverlapPx + 1)
+		}
 		dy := 0
 		if ip.BaselineJitter > 0 {
 			dy = jitter.Intn(2*ip.BaselineJitter+1) - ip.BaselineJitter
 		}
 		x := pen + dx
-		box := p.rel.Add(image.Pt(x, baseline+dy))
+		wave := waveOffset(ip.style, x)
+		box := p.rel.Add(image.Pt(x, baseline+dy+wave))
 		if len(out) > 0 {
 			prev := out[len(out)-1].box
-			// 允许的重叠量：较窄字形宽度的 1/4，向下取整。
+			// 允许的重叠量由档位决定：v1 是较窄字形宽度的 1/4，v2 可以到 1/1.4。
 			narrow := min(prev.Dx(), box.Dx())
-			allowed := narrow / 4
+			allowed := overlapAllowed(narrow, ip.style.OverlapDivisor)
 			if need := prev.Max.X - allowed - box.Min.X; need > 0 {
 				x += need
-				box = p.rel.Add(image.Pt(x, baseline+dy))
+				wave = waveOffset(ip.style, x)
+				box = p.rel.Add(image.Pt(x, baseline+dy+wave))
 			}
 		}
 		if box.Min.X < glyphEdgeMargin || box.Max.X > ip.Width-glyphEdgeMargin ||
@@ -460,7 +631,8 @@ func layoutGlyphs(face xfont.Face, answer string, ip ImageParams, jitter *mrand.
 			return nil, fmt.Errorf("generator: 字形 %q 放不进 %dx%d（box=%v）", r, ip.Width, ip.Height, box)
 		}
 		out = append(out, placedGlyph{
-			ch: r, dot: image.Pt(x, baseline+dy), angle: p.angle, base: p.rel, box: box,
+			ch: r, dot: image.Pt(x, baseline+dy+wave), angle: p.angle,
+			shear: p.shear, sx: p.sx, sy: p.sy, base: p.rel, box: box,
 		})
 		pen = x + p.adv
 	}
@@ -475,35 +647,74 @@ func layoutGlyphs(face xfont.Face, answer string, ip ImageParams, jitter *mrand.
 		// 绘制必须与测量一致：把测量得到的相对包围盒平移到最终 dot，应当等于这次算出的包围盒。
 		// 不相等说明 face 的行为与这里的假设不同 —— 那时"不越界/不重叠"的保证已经失效，
 		// 宁可整次布局失败（外层有界重试，最终 ErrGenerateExhausted），也不发一张可能被裁切的图。
-		got := rotateRect(dr, g.angle)
+		got := transformRect(dr, g.angle, g.shear, g.sx, g.sy)
 		if got != g.base.Add(g.dot) || got != g.box {
 			return nil, fmt.Errorf("generator: 字形 %q 绘制包围盒 %v 与测量 %v 不一致", g.ch, got, g.box)
 		}
 		g.dr = dr
+		g.ink = inkGray
+		if ip.style.InkSpread > 0 {
+			g.ink = uint8(clampInt(int(inkGray)+jitter.Intn(ip.style.InkSpread+1), 0, 255))
+		}
 		// tile 以**原点**建图：实测 golang.org/x/image/draw 的 Transform 只按 sr 的
 		// 尺寸取源、不采纳 sr.Min（identity 矩阵下会把 (10,20) 的块画到 (10,10)）。
 		// 因此平移量必须显式写进矩阵，源矩形一律从 (0,0) 开始。
 		g.tile = image.NewRGBA(image.Rectangle{Max: dr.Size()})
-		xdraw.DrawMask(g.tile, g.tile.Bounds(), image.NewUniform(color.Gray{Y: inkGray}),
+		xdraw.DrawMask(g.tile, g.tile.Bounds(), image.NewUniform(color.Gray{Y: g.ink}),
 			image.Point{}, mask, maskp, xdraw.Over)
 	}
 	return out, nil
 }
 
-// angleRad 在档位的上界内取一个旋转角（弧度）。上界为 0 时恒等。
-func angleRad(ip ImageParams, jitter *mrand.Rand) float64 {
-	if ip.MaxRotationDeg <= 0 {
+// glyphTransform 在档位/风格的上界内抽一次单字变换。
+// v1 的 style 是零值，因此这里只消费一次 Float64（与旧 angleRad 完全一致），
+// 不改变 v1 的确定性熵流顺序。
+func glyphTransform(ip ImageParams, jitter *mrand.Rand) (angle, shear, sx, sy float64) {
+	maxDeg := ip.MaxRotationDeg
+	if ip.style.RotationDeg > 0 {
+		maxDeg = ip.style.RotationDeg
+	}
+	angle = angleRadDeg(maxDeg, jitter)
+	if ip.style.Shear != 0 {
+		shear = (jitter.Float64()*2 - 1) * ip.style.Shear
+	}
+	sx, sy = 1, 1
+	if ip.style.ScaleMax > 0 {
+		lo, hi := ip.style.ScaleMin, ip.style.ScaleMax
+		sx = lo + jitter.Float64()*(hi-lo)
+		sy = lo + jitter.Float64()*(hi-lo)
+	}
+	return angle, shear, sx, sy
+}
+
+func angleRadDeg(maxDeg float64, jitter *mrand.Rand) float64 {
+	if maxDeg <= 0 {
 		return 0
 	}
-	deg := (jitter.Float64()*2 - 1) * ip.MaxRotationDeg
+	deg := (jitter.Float64()*2 - 1) * maxDeg
 	return deg * math.Pi / 180
 }
 
-// rotateRect 返回矩形绕自身中心旋转后的**整数**包围盒（向外取整，宁可保守）。
-func rotateRect(r image.Rectangle, angle float64) image.Rectangle {
+func waveOffset(style textImageStyle, x int) int {
+	if style.WaveAmplitude <= 0 || style.WavePeriod <= 0 {
+		return 0
+	}
+	return int(math.Round(math.Sin(float64(x)/style.WavePeriod*2*math.Pi) * float64(style.WaveAmplitude)))
+}
+
+func overlapAllowed(narrow int, divisor float64) int {
+	if divisor <= 0 {
+		divisor = 4
+	}
+	return int(float64(narrow) / divisor)
+}
+
+// transformRect 返回矩形绕自身中心做"缩放 → 剪切 → 旋转"后的整数包围盒。
+// v1 的 scale=1、shear=0 时与旧的 rotateRect 逐位一致。
+func transformRect(r image.Rectangle, angle, shear, sx, sy float64) image.Rectangle {
 	cx := float64(r.Min.X) + float64(r.Dx())/2
 	cy := float64(r.Min.Y) + float64(r.Dy())/2
-	m := rotationAbout(cx, cy, angle, image.Pt(0, 0))
+	m := glyphAbout(cx, cy, angle, shear, sx, sy, image.Pt(0, 0))
 	corners := []image.Point{r.Min, image.Pt(r.Max.X, r.Min.Y), r.Max, image.Pt(r.Min.X, r.Max.Y)}
 	minX, minY := math.Inf(1), math.Inf(1)
 	maxX, maxY := math.Inf(-1), math.Inf(-1)
@@ -518,22 +729,31 @@ func rotateRect(r image.Rectangle, angle float64) image.Rectangle {
 		int(math.Ceil(maxX))+1, int(math.Ceil(maxY))+1)
 }
 
-// rotationAbout 构造 src→dst 仿射矩阵：先把源点平移 t，再绕 (cx,cy) 旋转 angle。
+// glyphAbout 构造 src→dst 仿射矩阵：先把源点相对 tile 中心缩放/剪切，再平移 t，
+// 最后绕 (cx,cy) 旋转。
 //
-// golang.org/x/image/draw 的 Transformer 明确 m 把**源坐标**映到**目标坐标**
-// （"(sx,sy) → (m00*sx + m01*sy + m02, m10*sx + m11*sy + m12)"）。字形 tile 从原点建图，
-// 所以"tile 在画布上的未旋转位置"必须作为 t 传进来：
-//
-//	dst = c + R*(src + t − c)
-//
-// angle=0 时退化为纯平移 (t)，有测试钉住。
-func rotationAbout(cx, cy, angle float64, t image.Point) f64.Aff3 {
+// 与旧 rotationAbout 的关系：scale=1、shear=0 时逐位相等（有 v1 测试钉住）。
+// golang.org/x/image/draw 的 Transformer 明确 m 把**源坐标**映到**目标坐标**。
+func glyphAbout(cx, cy, angle, shear, sx, sy float64, t image.Point) f64.Aff3 {
 	sin, cos := math.Sincos(angle)
-	dx, dy := float64(t.X), float64(t.Y)
+	tx, ty := float64(t.X), float64(t.Y)
 	return f64.Aff3{
-		cos, -sin, cx + cos*(dx-cx) - sin*(dy-cy),
-		sin, cos, cy + sin*(dx-cx) + cos*(dy-cy),
+		cos * sx,
+		cos*shear*sy - sin*sy,
+		cx + cos*tx - sin*ty - cos*sx*cx - (cos*shear-sin)*sy*cy,
+		sin * sx,
+		sin*shear*sy + cos*sy,
+		cy + sin*tx + cos*ty - sin*sx*cx - (sin*shear+cos)*sy*cy,
 	}
+}
+
+// rotateRect / rotationAbout 保留为 v1 的兼容包装；新代码用 transformRect / glyphAbout。
+func rotateRect(r image.Rectangle, angle float64) image.Rectangle {
+	return transformRect(r, angle, 0, 1, 1)
+}
+
+func rotationAbout(cx, cy, angle float64, t image.Point) f64.Aff3 {
+	return glyphAbout(cx, cy, angle, 0, 1, 1, t)
 }
 
 func applyAff3(m f64.Aff3, x, y float64) (float64, float64) {
@@ -554,27 +774,29 @@ func renderCanvas(ip ImageParams, glyphs []placedGlyph, jitter *mrand.Rand) ([]b
 		// 旋转中心取 tile 自身的中心（源从原点建图），平移量就是字形在画布上的位置。
 		cx := float64(g.tile.Bounds().Dx()) / 2
 		cy := float64(g.tile.Bounds().Dy()) / 2
-		m := rotationAbout(cx, cy, g.angle, g.dr.Min)
-		// ApproxBiLinear：升采样用双线性、降采样用 4 邻域混合。旋转以升采样为主，
-		// 可读性优先的质量足够，而 CatmullRom 慢一档；单字 tile 只有几十乘几十像素。
-		xdraw.ApproxBiLinear.Transform(img, m, g.tile, g.tile.Bounds(), xdraw.Over, nil)
+		drawGlyph := func(offset image.Point) {
+			m := glyphAbout(cx, cy, g.angle, g.shear, g.sx, g.sy, g.dr.Min.Add(offset))
+			// ApproxBiLinear：升采样用双线性、降采样用 4 邻域混合。旋转以升采样为主，
+			// 可读性优先的质量足够，而 CatmullRom 慢一档；单字 tile 只有几十乘几十像素。
+			xdraw.ApproxBiLinear.Transform(img, m, g.tile, g.tile.Bounds(), xdraw.Over, nil)
+		}
+		if ip.style.Stroke <= 0 {
+			drawGlyph(image.Pt(0, 0))
+			continue
+		}
+		// 加粗用 5 个方向的叠加，而不是逐像素膨胀：像素量与边缘质量都可控。
+		drawGlyph(image.Pt(0, 0))
+		for _, o := range []image.Point{
+			{X: -ip.style.Stroke}, {X: ip.style.Stroke},
+			{Y: -ip.style.Stroke}, {Y: ip.style.Stroke},
+		} {
+			drawGlyph(o)
+		}
 	}
 
-	for range ip.Lines {
-		pts := make([]image.Point, 0, ip.LineSegments+1)
-		x, y := jitter.Intn(ip.Width), jitter.Intn(ip.Height)
-		pts = append(pts, image.Pt(x, y))
-		for range ip.LineSegments {
-			// 每段位移有界（±1/3 画布），保证折线整体还落在图内、且不会退化成一个点
-			dx := jitter.Intn(ip.Width/3) - ip.Width/6
-			dy := jitter.Intn(ip.Height/3) - ip.Height/6
-			x, y = clampInt(x+dx, 0, ip.Width-1), clampInt(y+dy, 0, ip.Height-1)
-			pts = append(pts, image.Pt(x, y))
-		}
-		for i := 0; i+1 < len(pts); i++ {
-			drawSegment(img, pts[i], pts[i+1], lineGray)
-		}
-	}
+	drawRandomLines(img, ip, jitter, ip.Lines, lineGray)
+	// v2 的穿越线画在字形之后：它确实切断字符连通域，而不是只做背景纹理。
+	drawRandomLines(img, ip, jitter, ip.style.CrossLines, lineCrossGray)
 
 	for range ip.Noise {
 		x, y := jitter.Intn(ip.Width), jitter.Intn(ip.Height)
@@ -592,6 +814,26 @@ func renderCanvas(ip ImageParams, glyphs []placedGlyph, jitter *mrand.Rand) ([]b
 		return nil, fmt.Errorf("%w: %d 字节（上限 %d）", ErrRenderTooLarge, len(out), MaxImageAssetBytes)
 	}
 	return out, nil
+}
+
+// drawRandomLines 画 count 条有界折线。v1 的 count=ip.Lines、颜色 lineGray，
+// 调用顺序与旧代码相同；v2 用同一个函数画穿越线，避免两份容易漂移的折线生成器。
+func drawRandomLines(img *image.Gray, ip ImageParams, jitter *mrand.Rand, count int, v uint8) {
+	for range count {
+		pts := make([]image.Point, 0, ip.LineSegments+1)
+		x, y := jitter.Intn(ip.Width), jitter.Intn(ip.Height)
+		pts = append(pts, image.Pt(x, y))
+		for range ip.LineSegments {
+			// 每段位移有界（±1/3 画布），保证折线整体还落在图内、且不会退化成一个点
+			dx := jitter.Intn(ip.Width/3) - ip.Width/6
+			dy := jitter.Intn(ip.Height/3) - ip.Height/6
+			x, y = clampInt(x+dx, 0, ip.Width-1), clampInt(y+dy, 0, ip.Height-1)
+			pts = append(pts, image.Pt(x, y))
+		}
+		for i := 0; i+1 < len(pts); i++ {
+			drawSegment(img, pts[i], pts[i+1], v)
+		}
+	}
 }
 
 // drawSegment 画一条粗细 lineThickness 的线段。
@@ -654,18 +896,19 @@ func absInt(v int) int {
 //
 // "畸形"与"答错"是两种结论（ADR-011 #3）：前者不终态化（400 invalid-request），
 // 后者终结该 challenge。字符集是公开常量，所以"你输入的 O 不在字符集里"不泄露任何答案信息。
-func (TextImage) NormalizeAnswer(input string) (string, bool) {
+func (g TextImage) NormalizeAnswer(input string) (string, bool) {
+	g.profile = g.effectiveProfile()
 	s := trimASCII(input)
-	if len(s) != TextImageLength {
+	if len(s) != g.profile.length {
 		return "", false
 	}
-	out := make([]byte, 0, TextImageLength)
+	out := make([]byte, 0, g.profile.length)
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if c >= 'a' && c <= 'z' {
 			c -= 'a' - 'A'
 		}
-		if strings.IndexByte(TextImageCharset, c) < 0 {
+		if strings.IndexByte(g.profile.charset, c) < 0 {
 			return "", false
 		}
 		out = append(out, c)
@@ -686,7 +929,8 @@ func (g TextImage) Verify(v PrivateVerifier, input string) bool {
 // SanitizePublic 是题面出网的唯一通道：白名单之外**任何**键都让整次调用失败。
 // 这里刻意不回显长度之外的任何东西：图片本身走 pool.asset_blob，不在 payload 里
 // （一条 4KB 的 CHECK 装不下图，也不该装）。
-func (TextImage) SanitizePublic(raw []byte) (map[string]any, error) {
+func (g TextImage) SanitizePublic(raw []byte) (map[string]any, error) {
+	g.profile = g.effectiveProfile()
 	var p TextImagePublic
 	var generic map[string]any
 	if err := json.Unmarshal(raw, &generic); err != nil {
@@ -696,9 +940,9 @@ func (TextImage) SanitizePublic(raw []byte) (map[string]any, error) {
 		return nil, err
 	}
 	switch {
-	case p.Length != TextImageLength:
-		return nil, fmt.Errorf("generator: 题面 length=%d 与固定长度 %d 不符", p.Length, TextImageLength)
-	case p.Charset != TextImageCharset:
+	case p.Length != g.profile.length:
+		return nil, fmt.Errorf("generator: 题面 length=%d 与固定长度 %d 不符", p.Length, g.profile.length)
+	case p.Charset != g.profile.charset:
 		return nil, errors.New("generator: 题面 charset 与公开字符集不符")
 	case p.AnswerType != "text":
 		return nil, fmt.Errorf("generator: 题面 answer_type=%q 不合法", p.AnswerType)

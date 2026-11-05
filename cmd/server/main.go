@@ -467,6 +467,11 @@ func knownGenerators(qKey []byte) ([]generator.Generator, error) {
 		return nil, fmt.Errorf("视觉题型: %w", err)
 	}
 	out = append(out, img)
+	imgV2, err := generator.NewTextImageV2(qKey)
+	if err != nil {
+		return nil, fmt.Errorf("视觉题型 v2: %w", err)
+	}
+	out = append(out, imgV2)
 	return out, nil
 }
 

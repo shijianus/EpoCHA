@@ -609,3 +609,14 @@ test(caseTitle("lifecycle.success-clears-timeout"), async (t) => {
   assert.equal(h.expired.length, 1);
   assert.equal(h.time.timers.size, 0);
 });
+
+test("zh-CN answer placeholder follows the question length", async (t) => {
+  const h = harness(t, { options: { language: "zh-CN" } });
+  const ch = challenge();
+  ch.question.length = 8;
+  h.requests[0].respond(ch);
+  await flush();
+  assert.equal(h.api.state(h.id), "ready");
+  assert.match(h.answer.placeholder, /8/, "placeholder must use the actual v2 length");
+  assert.doesNotMatch(h.answer.placeholder, /6/, "placeholder must not keep the v1 hard-coded 6");
+});

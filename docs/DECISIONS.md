@@ -976,3 +976,24 @@ written = true          // ← 保留判定在这里，已经在 cerr 分支之�
 ### 验收与交付
 
 备份冲突/并发/失败、积压与准入/恢复、在途撤销、token 变异、实际 challenge 闭环分别留原始日志、命令、源码和工装指纹。Linux 权限、flock、目录同步、完整 race、真实容器与人工项目未执行就保留 BLOCKED/NOT_RUN。源码冻结不是正式发布候选，不自动 commit/push/tag，不部署或修改系统虚拟化配置。
+
+## ADR-023 2026-11-05：text-image-v2、Cloady 测试部署与 API 接入面
+
+### 背景与授权
+
+用户明确要求：现有题库过于简单（通用 OCR 可读）、需要重做；确保后续可通过 API 接入；把完整 Docker 部署到 Cloady 的 `jian-shi/jpn1/production` 进行实际测试；并且先保证链路完整，再发展题库。本轮因此先完成 Cloady 部署与 API 闭环，再实现独立的 v2 题型和 OCR 基线。
+
+### 决策
+
+1. 新增 `text-image-v2`，不替换 `text-image-v1`。v2 固定 8 字符、32 字符集、480×160 灰度 PNG；在 v1 渲染路径上增加单字旋转（10°..35°）、剪切（0.15..0.55）、缩放（0.90..1.30）、主动重叠（4..12px）、波浪基线、穿字干扰线、随机墨色与 1..3px 加粗。v1 的档位全部使用零值 style，渲染路径与历史行为保持一致。
+2. 两个题型共用同一条私有 verifier / HMAC 判分路径；v2 的 ID 与版本独立，管理面、题池和 API DTO 可分别观测。v2 仍为 `experimental:true` / `production_ready:false`；不加任何“已抗 OCR/抗 AI”的文案。
+3. v2 的安全论证按 M1–M4 分列：M1 = 32^8（约 1.1e12 个题面）；M2 = 唯一规范化答案（大小写折叠、首尾 ASCII 空白裁剪，内部空白/字符集外/长度不为 8 判畸形）；M3 = 单次随机猜中率 32^-8 ≈ 4.4e-13，3 次累计约 1.3e-12；M4 只有在固定工具/样本集/机器上的 OCR 测量，不是目标机攻击成本。任何“随机实例多/加了噪声”都不作为安全性论据。
+4. 2026-11-05 的 OCR 基线（Ubuntu 24.04 + tesseract 5.3.4 / eng 4.1.0，psm=6、oem=3、字符集白名单，holdout 每档 100 张，工具失败与畸形都计不通过）：v1 d1/d3/d5 = 95% / 31% / 3%；v2 d1/d2/d3/d5 = 0% / 0% / 0% / 0%。这是**该固定工具与样本集**的严格整串通过率，不证明抗多模态、打码服务、人工可读性或目标机攻击成本；人工可读性与辅助技术仍为 NOT_RUN。
+5. Cloady 部署使用独立的 `deploy/cloady/Dockerfile` 与 `entrypoint.sh`：多阶段 Go 1.27.3 构建、alpine 运行时、数字 uid、`/readyz` 健康检查、环境密钥（Cloady `secretKeys`）。这是**平台部署适配层**，不是 `deploy/docker/Dockerfile` 的生产 VPS 配方；生产仍使用文件密钥、scratch 与 compose 边界。
+6. Cloady 的 upload 应用 source 不可原地修改（`PATCH` 返回 400，只有 git 应用可改仓库/branch/root）。测试环境更换代码需删除并重建同名应用；这会丢失容器内 SQLite 数据，因此当前部署的站点/凭据在重建后重新播种，且没有持久卷。正式部署必须另做卷/备份/恢复设计，不能把本测试部署当作持久化认证。
+7. 公共监听器新增 `GET /demo` 只读测试页，仅在 `EPOCHA_DEMO_PAGE=1` 时挂载。页面只调用公开 `/api/challenge`、`/api/redeem`，不读取 secret、不调用 `/siteverify`、不写业务数据；生产默认关闭。API 接入仍以服务端 `/siteverify` 为唯一授权点，浏览器 `onSuccess` 不是授权。
+8. 交付边界：当前 Cloady 应用是 amd64 测试部署，不是 arm64 正式支持范围；正式候选仍需干净 OID/manifest、arm64 full 门禁、F-01/B-03 决策、项目自有 TLS/DNS、人工与效果验收。`production_ready:false` 保持不变。
+
+### 影响
+
+`internal/generator`（v2 与测试）、`internal/config`（demo 开关）、`internal/api`（demo 路由与测试）、`internal/admin`（v2 生命周期文案）、`cmd/server`（v2 登记）、`cmd/evalgen`/`cmd/evalocr`/OCR 脚本（v2 样本与归一化）、`deploy/cloady` 与部署/接入文档。不新增运行时依赖；不改变 v1 的历史结果；不把 Cloady 测试部署写成正式发布或生产持久化认证。

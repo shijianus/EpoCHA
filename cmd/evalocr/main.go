@@ -225,10 +225,16 @@ func normalizer(kind string) (eval.Normalizer, error) {
 	case "", "textimage":
 		var g generator.TextImage
 		return g.NormalizeAnswer, nil
+	case "textimage-v2":
+		g, err := generator.NewTextImageV2(bytes.Repeat([]byte{0x11}, 32))
+		if err != nil {
+			return nil, fmt.Errorf("构造 v2 归一化器: %w", err)
+		}
+		return g.NormalizeAnswer, nil
 	case "none":
 		return nil, nil // 逐字节比较（eval.Score 的 nil 分支）
 	default:
-		return nil, fmt.Errorf("--normalize 只支持 textimage | none，实得 %q", kind)
+		return nil, fmt.Errorf("--normalize 只支持 textimage | textimage-v2 | none，实得 %q", kind)
 	}
 }
 

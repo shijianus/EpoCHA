@@ -17,6 +17,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -31,9 +32,11 @@ const (
 	maxSamples = 300
 	// holdoutSeed 是固定验收集的种子。**不许改**：改了它就不是同一集，
 	// 之前看过的结果也就不能拿来对照了。
-	holdoutSeed = "epocha-3b-holdout-v1-do-not-retune"
+	holdoutSeed   = "epocha-3b-holdout-v1-do-not-retune"
+	holdoutSeedV2 = "epocha-3b-holdout-v2-do-not-retune"
 	// devSeedHint 只是默认值；dev 集鼓励换 seed（换 seed = 换一批新样本）。
-	devSeedHint = "epocha-3b-dev-v1"
+	devSeedHint   = "epocha-3b-dev-v1"
+	devSeedHintV2 = "epocha-3b-dev-v2"
 )
 
 func main() {
@@ -48,6 +51,7 @@ type options struct {
 	set        string
 	count      int
 	difficulty int
+	generator  string
 	seed       string
 	now        func() time.Time
 }
@@ -59,6 +63,7 @@ func run(args []string) error {
 	fs.StringVar(&o.set, "set", "", "样本集：dev（调参集）或 holdout（固定验收集）")
 	fs.IntVar(&o.count, "count", 40, "样本数量（1..300）")
 	fs.IntVar(&o.difficulty, "difficulty", 3, "难度档 1..5")
+	fs.StringVar(&o.generator, "generator", generator.TextImageID, "题型：text-image-v1 或 text-image-v2")
 	fs.StringVar(&o.seed, "seed", "", "运行种子；留空则 dev 用默认值、holdout 用固定值")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("命令行参数: %w", err)
@@ -82,26 +87,51 @@ func generate(o *options) error {
 		return fmt.Errorf("难度档须在 1..%d", generator.MaxDifficulties)
 	}
 	seed := o.seed
+	baseHoldout, baseDev := holdoutSeed, devSeedHint
+	switch o.generator {
+	case generator.TextImageID:
+	case generator.TextImageV2ID:
+		baseHoldout, baseDev = holdoutSeedV2, devSeedHintV2
+	default:
+		return fmt.Errorf("未知题型 %q（只支持 %s / %s）", o.generator, generator.TextImageID, generator.TextImageV2ID)
+	}
 	switch o.set {
 	case "holdout":
 		// holdout 的 seed 不接受覆盖：否则"同一固定集"这句话就没有意义了
-		if seed != "" && seed != holdoutSeed {
+		if seed != "" && seed != baseHoldout {
 			return errors.New("holdout 集必须用固定 seed（调参请回 dev 集，否则验收集不再独立）")
 		}
-		seed = holdoutSeed
+		seed = baseHoldout
 	case "dev":
 		if seed == "" {
-			seed = devSeedHint
+			seed = baseDev
 		}
 	}
 
-	g, err := generator.NewTextImage(devKey())
-	if err != nil {
-		return fmt.Errorf("构造生成器: %w", err)
-	}
-	params, err := generator.TextImageParams(o.difficulty)
-	if err != nil {
-		return err
+	var g generator.Generator
+	var answerFrom func(io.Reader) (string, error)
+	var params generator.ImageParams
+	switch o.generator {
+	case generator.TextImageID:
+		img, err := generator.NewTextImage(devKey())
+		if err != nil {
+			return fmt.Errorf("构造生成器: %w", err)
+		}
+		g, answerFrom = img, generator.TextImageAnswerFrom
+		params, err = generator.TextImageParams(o.difficulty)
+		if err != nil {
+			return err
+		}
+	case generator.TextImageV2ID:
+		img, err := generator.NewTextImageV2(devKey())
+		if err != nil {
+			return fmt.Errorf("构造生成器: %w", err)
+		}
+		g, answerFrom = img, generator.TextImageV2AnswerFrom
+		params, err = generator.TextImageV2Params(o.difficulty)
+		if err != nil {
+			return err
+		}
 	}
 	dir := filepath.Join(o.outDir, fmt.Sprintf("%s-d%d-n%d-%s", o.set, o.difficulty, o.count,
 		o.now().UTC().Format("20060102T150405Z")))
@@ -146,7 +176,7 @@ func generate(o *options) error {
 		if err != nil {
 			return err
 		}
-		answer, err := generator.TextImageAnswerFrom(stream)
+		answer, err := answerFrom(stream)
 		if err != nil {
 			return fmt.Errorf("取答案: %w", err)
 		}

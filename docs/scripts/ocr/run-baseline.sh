@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# 离线 OCR 基线（阶段 4B）：在**隔离容器**里用 Tesseract 测 text-image-v1 的机器通过率。
+# 离线 OCR 基线（阶段 4B）：在**隔离容器**里用 Tesseract 测 text-image-v1 / v2 的机器通过率。
 #
 # 用法：
 #   docs/scripts/ocr/run-baseline.sh tune     # 只在 dev 集上比候选参数
 #   docs/scripts/ocr/run-baseline.sh final    # 用固定参数跑 dev + holdout（holdout 只看一次）
 #   docs/scripts/ocr/run-baseline.sh all      # tune 然后 final
+#
+# 默认题型是 v1（保持阶段 4B 的历史口径）。测 v2：
+#   EPOCHA_OCR_GENERATOR=text-image-v2 EPOCHA_OCR_NORMALIZE=textimage-v2 \
+#     docs/scripts/ocr/run-baseline.sh final
 #
 # 四条口径纪律（违反任何一条，测出来的数字就没有意思）：
 #  1. **调参只看 dev**。holdout 的答案表在 final 之前连看都不看，固定参数写死在下面的常量里。
@@ -18,7 +22,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-OUT="${EPOCHA_OCR_OUT:-$ROOT/eval-out/ocr-$(date -u +%Y%m%dT%H%M%SZ)}"
+GENERATOR="${EPOCHA_OCR_GENERATOR:-text-image-v1}"
+NORMALIZE="${EPOCHA_OCR_NORMALIZE:-textimage}"
+if [[ "$GENERATOR" == "text-image-v2" && "$NORMALIZE" == "textimage" ]]; then
+  NORMALIZE="textimage-v2"
+fi
+OUT="${EPOCHA_OCR_OUT:-$ROOT/eval-out/ocr-${GENERATOR}-$(date -u +%Y%m%dT%H%M%SZ)}"
 MODE="${1:-all}"
 IMAGE="epocha-ocr-eval:stage4b"
 CHARSET="ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # 与 generator.TextImageCharset 同一套字符
@@ -47,13 +56,13 @@ log "  工具指纹：$(head -n 4 "$OUT/tool-fingerprint.txt" | tr '\n' ' ' | cu
 
 # ---- 构建评测二进制（先 build 再跑：包装层会折叠退出码，见 docs/scripts/ocr-baseline.sh）----
 (cd "$ROOT" && go build -trimpath -o "$BIN/evalgen" ./cmd/evalgen && go build -trimpath -o "$BIN/evalocr" ./cmd/evalocr)
-log "  已构建 evalgen / evalocr"
+log "  已构建 evalgen / evalocr（generator=$GENERATOR normalize=$NORMALIZE）"
 
 # gen <set> <difficulty> <n> → 把图片复制进只含图片的暂存目录，返回两行（GT 路径 / 暂存目录）
 declare -A GT STAGE
 gen_set() {
   local set="$1" diff="$2" n="$3" dir
-  "$BIN/evalgen" --out "$OUT/sets" --set "$set" --difficulty "$diff" --count "$n" >"$OUT/evalgen-$set-d$diff.log" 2>&1 \
+  "$BIN/evalgen" --out "$OUT/sets" --set "$set" --difficulty "$diff" --count "$n" --generator "$GENERATOR" >"$OUT/evalgen-$set-d$diff.log" 2>&1 \
     || fail "evalgen($set d$diff) 失败：$(cat "$OUT/evalgen-$set-d$diff.log")"
   # evalgen 的目录名带时间戳，按 set+difficulty+count 精确找回唯一目录
   local -a cands
@@ -91,7 +100,7 @@ run_eval() {
       --ocr-cmd "$ROOT/docs/scripts/ocr/ocr1.sh" \
       --ocr-arg '{image}' \
       --timeout-sec 30 \
-      --normalize textimage \
+      --normalize "$NORMALIZE" \
       --out "$OUT/preds-$label-$key.jsonl" \
       >"$OUT/report-$label-$key.txt" 2>&1 || rc=$?
   # 0=跑完，1=出错，3=未执行（工具缺失）。这里 3 不可能出现（挂载已验证），其它非 0 都要炸。

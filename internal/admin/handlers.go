@@ -782,7 +782,7 @@ func (s *Server) handleGenerators(w http.ResponseWriter, r *http.Request) {
 // "未经评测不得改成 true"——评测通过也只证明"测过"，不等同于生产安全认证（ADR-002）。
 func generatorLifecycle(id string) (experimental, productionReady bool) {
 	switch id {
-	case generator.ArithID, generator.TextImageID:
+	case generator.ArithID, generator.TextImageID, generator.TextImageV2ID:
 		return true, false
 	default:
 		// 没登记结论的题型：按最保守的一档报，绝不让"忘了写"变成"看起来可用"
@@ -799,6 +799,11 @@ func noteForGenerator(id string) string {
 			"已有固定工具的历史 OCR 基线：低/中/高档整串通过率约 96%/31%/3%，" +
 			"这些历史数字不代表当前候选、跨工具、多模态或真人验证已完成；" +
 			"仅用于验证图片资产的生成-存储-下发-判分链路"
+	case generator.TextImageV2ID:
+		return "强形变视觉题型 v2（8 字符，旋转/剪切/缩放/重叠/穿字线）：与 v1 共用判分路径；" +
+			"图片中可见字符本来就要给答题者看，不具备密码学保密性；" +
+			"当前候选的 OCR 基线结果以评测收据为准，历史 v1 数字不能外推；" +
+			"跨工具、多模态、真人可读性与抗 AI 仍未验收，production_ready 保持 false"
 
 	default:
 		return ""

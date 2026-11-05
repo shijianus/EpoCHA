@@ -71,6 +71,7 @@ type Server struct {
 	log       *slog.Logger
 	now       func() time.Time
 	caps      store.Caps
+	demoPage  bool
 }
 
 // New 组装服务。限流器与代理裁决来自配置。
@@ -97,7 +98,7 @@ func New(cfg *config.Config, db *store.DB, signer *token.Signer, gens *generator
 	}
 	return &Server{
 		db: db, signer: signer, gens: gens, src: src, ipLimit: ipLimit, siteLimit: siteLimit,
-		log: log, now: time.Now,
+		log: log, now: time.Now, demoPage: cfg.DemoPage,
 		caps: store.Caps{MaxTotal: cfg.MaxLedgerRows, MaxActive: cfg.MaxActiveChallenges, MaxActivePerSite: cfg.MaxActivePerSite},
 	}, nil
 }
@@ -123,6 +124,11 @@ func (s *Server) Handler() http.Handler {
 	widgetAssets := widget.Handler()
 	mux.Handle("GET "+widget.URLJS, widgetAssets)
 	mux.Handle("GET "+widget.URLWorker, widgetAssets)
+	// 只读测试页：默认关闭，测试部署用 EPOCHA_DEMO_PAGE=1 打开。
+	// 它只调用公开 challenge/redeem，不读 secret、不碰管理面、不写业务数据。
+	if s.demoPage {
+		mux.HandleFunc("GET /demo", s.handleDemo)
+	}
 	return s.recoverMiddleware(s.headerMiddleware(s.accessLogMiddleware(mux)))
 }
 

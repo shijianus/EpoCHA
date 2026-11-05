@@ -221,7 +221,8 @@ g = ti[0]
 assert g["media"] == "image" and g["version"] == "v1", g
 assert g["experimental"] is True, "视觉题型必须标 experimental"
 assert g["production_ready"] is False, "未经评测不得 production_ready=true"
-assert "未经" in g["note"] and "OCR" in g["note"], g
+note = g["note"]
+assert "OCR" in note and ("不代表" in note or "未完成" in note or "未经" in note), note
 ar = [g for g in gs if g["id"] == "arithmetic-baseline-v1"][0]
 assert ar["production_ready"] is False and ar["experimental"] is True, ar
 ' || fail "生成器登记信息没有如实标明 experimental / production_ready=false / 风险说明"

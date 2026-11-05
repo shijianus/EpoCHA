@@ -294,9 +294,9 @@ if (typeof self !== "undefined") {
       errImageUnusable: "题目图片无法显示。请换一张。",
       errBadResponse: "验证服务返回了无法识别的响应。",
       errExpiredSend: "题目已过期，请换一张后提交。",
-      experimental: "实验性视觉题型：未经 OCR 与人工可读性评测，不代表抗机器能力。",
+      experimental: "实验性视觉题型：已有固定工具的 OCR 基线，但不代表抗多模态/抗机器能力；人工可读性尚未验收。",
       a11yGap: "本题型只有视觉通道：无法看清图片的用户目前无法完成验证（非视觉等价通道尚未实现）。",
-      answerPlaceholder: "6 个字符"
+      answerPlaceholder: "{length} 个字符"
     },
     "en": {
       instruction: "Type the {length} characters shown in the image",
@@ -327,8 +327,8 @@ if (typeof self !== "undefined") {
       errImageUnusable: "The question image could not be displayed. Get a new one.",
       errBadResponse: "The verification service returned an unrecognized response.",
       errExpiredSend: "The question expired before submit. Get a new one.",
-      experimental: "Experimental visual question type: not evaluated against OCR or human-readability "
-        + "benchmarks, so it does not claim machine resistance.",
+      experimental: "Experimental visual question type: a fixed-tool OCR baseline exists, but this "
+        + "does not claim resistance to multimodal or automated solving; human readability is not yet accepted.",
       a11yGap: "Visual channel only: users who cannot see the image cannot complete this check "
         + "(a non-visual equivalent is not implemented yet).",
       answerPlaceholder: "{length} characters"

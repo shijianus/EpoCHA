@@ -63,6 +63,7 @@ const (
 	envPoolImageBytes = "EPOCHA_POOL_IMAGE_MAX_TOTAL_BYTES"
 	envPoolImageYield = "EPOCHA_POOL_IMAGE_YIELD_MS"
 	envGenerators     = "EPOCHA_GENERATORS"
+	envDemoPage       = "EPOCHA_DEMO_PAGE"
 )
 
 // TTL 上下界。上界不是形式主义：challenge/response 的有效期直接决定防重放账本里
@@ -174,6 +175,10 @@ type Config struct {
 	// 白名单里的名字必须可登记，写错一个字符就拒绝启动，绝不静默忽略（否则"以为关了"
 	// 比"没关"更危险）。
 	Generators []string
+
+	// DemoPage 打开公共监听器上的只读测试页 /demo。它只调用公开 challenge/redeem，
+	// 不接触 secret、管理面或业务写操作；默认关闭，测试部署显式开启。
+	DemoPage bool
 }
 
 // Load 解析命令行参数与环境变量。getenv 为 os.Getenv，测试里可注入。
@@ -264,6 +269,13 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 		c.TrustProxy = true
 	default:
 		return nil, fmt.Errorf("%w: %s 必须是 true/false", ErrInvalid, envTrustProxy)
+	}
+	switch strings.ToLower(getenv(envDemoPage)) {
+	case "", "false", "0":
+	case "true", "1":
+		c.DemoPage = true
+	default:
+		return nil, fmt.Errorf("%w: %s 必须是 true/false", ErrInvalid, envDemoPage)
 	}
 	for _, net := range strings.Split(getenv(envTrustedNets), ",") {
 		if net = strings.TrimSpace(net); net != "" {

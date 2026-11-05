@@ -12,7 +12,7 @@
 | 公共 API / 页面基址 | `https://jpn1-rmw1vpfv-jian-shi.cloady.io` |
 | 只读测试页 | `https://jpn1-rmw1vpfv-jian-shi.cloady.io/demo?site_key=pk_jpn1_v2_20261105` |
 | 测试站点 site_key（公开） | `pk_jpn1_v2_20261105` |
-| 测试站点 secret | 本机 `tmp/cloady-site-v2-secret-final2.txt`（0600，`tmp/` 已 gitignore；**不要提交、不要贴聊天**） |
+| 测试站点 secret | 本机 `tmp/cloady-site-v2-secret-final2.txt`（仅当前用户 NTFS ACL；`tmp/` 已 gitignore；**不要提交、不要贴聊天**） |
 | 题型 / 难度 | `text-image-v2` / 1（8 字符，480×160） |
 | 健康检查 | `/healthz`、`/readyz`、`/widget/v1.js` 均为 200 |
 | 管理面 | 不发布；公网 `/api/admin/*` 为 404 |

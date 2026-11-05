@@ -18,7 +18,7 @@
 | **浏览器测试页** | `https://jpn1-rmw1vpfv-jian-shi.cloady.io/demo?site_key=pk_jpn1_v2_20261105` |
 | API | `POST /api/challenge`、`POST /api/redeem`、`POST /siteverify` |
 | 测试 site_key（公开） | `pk_jpn1_v2_20261105` |
-| 测试 site secret | 本机 `tmp/cloady-site-v2-secret-final2.txt`（0600，gitignore；不要提交/贴聊天） |
+| 测试 site secret | 本机 `tmp/cloady-site-v2-secret-final2.txt`（仅当前用户 NTFS ACL，gitignore；不要提交/贴聊天） |
 | 题型 | `text-image-v2`，难度 1，8 字符，480×160 |
 | 管理面 | 不发布；公网 `/api/admin/*` 404 |
 | 持久化 | **无持久卷**；重建应用会丢 SQLite，站点需重新播种 |

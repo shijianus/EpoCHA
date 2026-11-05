@@ -23,9 +23,9 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 
-ARG VERSION=cloady-trial
-ARG COMMIT=none
-ARG BUILD_DATE=unknown
+ARG VERSION=cloady-2026-11-05
+ARG COMMIT=6db855675e7b6ccaca9e78a8719365ba598b9671
+ARG BUILD_DATE=2026-11-05T00:00:00Z
 RUN mkdir -p /out && \
     LDFLAGS="-s -w -X github.com/shijianus/EpoCHA/internal/version.Version=${VERSION} \
       -X github.com/shijianus/EpoCHA/internal/version.Commit=${COMMIT} \

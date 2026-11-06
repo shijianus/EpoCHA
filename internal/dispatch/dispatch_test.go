@@ -39,6 +39,21 @@ func TestWeightFilters(t *testing.T) {
 	if Weight(c, Request{Band: BandLow, Device: DeviceDesktop, NoMotion: true}) != 0 {
 		t.Fatal("NoMotion 应排除运动题")
 	}
+	energy := Catalog()[generator.EnergyWindowID]
+	if Weight(energy, Request{Band: BandMedium, Device: DeviceDesktop, NoMotion: true}) != 0 {
+		t.Fatal("reduced_motion 应排除 energy-window")
+	}
+	pipe := Catalog()[generator.PipeConnectID]
+	if Weight(pipe, Request{Band: BandMedium, Device: DeviceDesktop}) == 0 {
+		t.Fatal("pipe-connect 应有正权重")
+	}
+	intersection := Catalog()[generator.IntersectionPointID]
+	if Weight(intersection, Request{Band: BandMedium, Device: DeviceDesktop}) == 0 {
+		t.Fatal("intersection-point 应有正权重")
+	}
+	if Weight(intersection, Request{Band: BandMedium, Device: DeviceKeyboard}) == 0 {
+		t.Fatal("intersection-point 的键盘输入应可用（方向键微调）")
+	}
 	bad := testCandidate("b", 0, false, false)
 	if Weight(bad, Request{Band: BandLow, Device: DeviceDesktop}) != 0 {
 		t.Fatal("零基础权重应排除")
@@ -102,7 +117,8 @@ func TestCatalogAndFallback(t *testing.T) {
 	for _, id := range []string{
 		generator.ArithID, generator.TextImageID, generator.TextImageV2ID, generator.TextImageV3ID,
 		generator.ShapeGridID, generator.ShapeCountID, generator.ParallaxID, generator.BankShotID,
-		generator.AccessibleChoiceID,
+		generator.AccessibleChoiceID, generator.EnergyWindowID, generator.PipeConnectID,
+		generator.IntersectionPointID,
 	} {
 		if _, ok := cat[id]; !ok {
 			t.Fatalf("Catalog 缺 %s", id)

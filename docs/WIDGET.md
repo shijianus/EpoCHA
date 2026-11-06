@@ -146,6 +146,10 @@ widget 按服务端 `question.answer_type` 选择控件；接入方不需要、�
 Widget 会上报只含 `total_ms/first_input_ms/event_count/pointer_events/key_events/focus_blur` 的摘要；
 不采集原始坐标/按键内容。服务端只把它当弱证据，不改变显式判定。
 
+Phase 4 的 `energy-window-v1` 复用 `timing` + `sprite_sheet`，`pipe-connect-v1` 复用 `cells`；两者都不新增前端输入模式。
+Phase 4.5 的 `intersection-point-v1` 复用 `point`：点击层写入 `x,y`，方向键每次 10、Shift+方向键每次 1，
+选中点有可视标记与 `aria-label` 播报；同样不新增输入模式。
+
 当前 Phase 2 的 `parallax-code-v1` 使用 `text` + `render_mode:"sprite_sheet"`，并由播放条提供暂停/继续/重播；
 `bank-shot-v1` 使用 `angle` + `cue_x/cue_y/aim_len`，图片上的拖拽层与滑块共享同一个角度值。
 

@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"io"
 	mrand "math/rand"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -376,45 +375,7 @@ func (g ShapeGrid) Generate(ctx context.Context, p Params, entropy io.Reader) (Q
 // NormalizeAnswer：逗号分隔的 1-based 格子序号；排序、去重，不扩大接受域。
 // 空串/0/越界/非十进制一律**畸形**（不消耗作答机会）。
 func (ShapeGrid) NormalizeAnswer(input string) (string, bool) {
-	s := trimASCII(input)
-	if s == "" || len(s) > shapeGridMaxAnswerLen {
-		return "", false
-	}
-	parts := strings.Split(s, ",")
-	if len(parts) == 0 || len(parts) > ShapeGridCells {
-		return "", false
-	}
-	seen := make([]bool, ShapeGridCells+1)
-	nums := make([]int, 0, len(parts))
-	for _, raw := range parts {
-		p := trimASCII(raw)
-		if p == "" || len(p) > 2 {
-			return "", false
-		}
-		n := 0
-		for i := 0; i < len(p); i++ {
-			if p[i] < '0' || p[i] > '9' {
-				return "", false
-			}
-			n = n*10 + int(p[i]-'0')
-		}
-		if n < 1 || n > ShapeGridCells {
-			return "", false
-		}
-		if !seen[n] {
-			seen[n] = true
-			nums = append(nums, n)
-		}
-	}
-	if len(nums) == 0 {
-		return "", false
-	}
-	sort.Ints(nums)
-	out := make([]string, len(nums))
-	for i, n := range nums {
-		out[i] = strconv.Itoa(n)
-	}
-	return strings.Join(out, ","), true
+	return NormalizeCellSet(input, ShapeGridCells, shapeGridMaxAnswerLen)
 }
 
 func (g ShapeGrid) Verify(v PrivateVerifier, input string) bool {

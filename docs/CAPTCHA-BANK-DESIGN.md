@@ -7,7 +7,7 @@
 >
 > **2026-11-05 Phase 1 更新**：ADR-025/028 已批准并落地底座——`angle`/`point`/`timing` 编码、
 > TSV verifier、`MaxVerifierBytes=4096`、`MaxPayloadBytes=8192`、`0005` 迁移与 widget 输入。
-> Phase 2 已落地 `parallax-code-v1` 与 `bank-shot-v1`；Phase 3 已落地风险带/池内调度、刷新惩罚、量化遥测摘要与 `accessible-choice-v1` 无障碍通道。M4、人工可读性、真机辅助技术仍未验收。
+> Phase 2 已落地 `parallax-code-v1` 与 `bank-shot-v1`；Phase 3 已落地风险带/池内调度、刷新惩罚、量化遥测摘要与 `accessible-choice-v1` 无障碍通道；Phase 3.5 完成升档预热与 Widget 瘦身；Phase 4 新增 `energy-window-v1` 与 `pipe-connect-v1`（复用 timing/cells）；Phase 4.5 补齐跨周期/早点击防护与难度梯度，并新增 `intersection-point-v1`（复用 point）。M4、人工可读性、真机辅助技术仍未验收。
 >
 > 本文所有阈值均为 `[目标]` 或 `[估算]`，除明确引用既有 `[实测]` 外没有在本机测量。
 > 与现有 ADR 冲突或需要新增决策的地方集中在 §7.2；**未批准前不得据此改代码**。

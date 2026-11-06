@@ -243,6 +243,21 @@ func Catalog() map[string]Candidate {
 			RiskFit:   fit(BandLow, 0.4, BandMedium, 1.2, BandHigh, 1.5, BandCritical, 1.2),
 			DeviceFit: dev(DeviceDesktop, 1.2, DeviceTouch, 1, DeviceKeyboard, 0.5),
 		},
+		generator.EnergyWindowID: {
+			ID: generator.EnergyWindowID, Family: "timing", BaseWeight: 0.9, Motion: true,
+			RiskFit:   fit(BandLow, 0.6, BandMedium, 1.2, BandHigh, 1.4, BandCritical, 1),
+			DeviceFit: dev(DeviceDesktop, 1.2, DeviceTouch, 0.9, DeviceKeyboard, 0.2),
+		},
+		generator.PipeConnectID: {
+			ID: generator.PipeConnectID, Family: "spatial-topology", BaseWeight: 1.1,
+			RiskFit:   fit(BandLow, 1.2, BandMedium, 1.1, BandHigh, 0.7, BandCritical, 0.2),
+			DeviceFit: dev(DeviceDesktop, 1.1, DeviceTouch, 1.1, DeviceKeyboard, 0.6),
+		},
+		generator.IntersectionPointID: {
+			ID: generator.IntersectionPointID, Family: "geometry", BaseWeight: 1,
+			RiskFit:   fit(BandLow, 1.1, BandMedium, 1.2, BandHigh, 0.9, BandCritical, 0.3),
+			DeviceFit: dev(DeviceDesktop, 1.2, DeviceTouch, 0.9, DeviceKeyboard, 0.6),
+		},
 		generator.AccessibleChoiceID: {
 			ID: generator.AccessibleChoiceID, Family: "accessible", BaseWeight: 1, Accessible: true,
 			RiskFit:   fit(BandLow, 1, BandMedium, 0.6, BandHigh, 0, BandCritical, 0),

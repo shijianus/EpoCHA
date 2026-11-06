@@ -1,4 +1,4 @@
-# 题型目录与操作边界（2026-11-05，ADR-024）
+# 题型目录与操作边界（2026-11-06，ADR-024）
 
 本文说明当前登记了哪些题型、怎么选、怎么本地预览、答案怎么编码，以及**哪些结论还没测**。
 它不是效果评测报告：除特别标注的历史数字外，本文的 M4、人工可读性、抗 AI/抗 OCR 都是
@@ -17,6 +17,9 @@
 | `parallax-code-v1` | image | `text` | 4 位数字分散在 8–12 帧视差动画中；单帧只有部分笔画 | 否（M4/人工可读性 NOT_RUN） |
 | `bank-shot-v1` | image | `angle` | 一次反弹物理题；0.1° 角度 + TSV 容差 | 否（M4 NOT_RUN） |
 | `accessible-choice-v1` | text | `text` | 无障碍通道：12 选 1 纯文本单选；显式申请 + 24h 一次 | 否（M4/辅助技术 NOT_RUN） |
+| `energy-window-v1` | image | `timing` | 36 帧能量游标，进入标记窗口时记录时机；TSV 时间桶 | 否（M4/人工可读性 NOT_RUN） |
+| `pipe-connect-v1` | image | `cells` | 4×4 拓扑网格，点选主路径 2 个断点 | 否（M4 NOT_RUN） |
+| `intersection-point-v1` | image | `point` | 两条虚线在随机位置相交，点击延长线交点；网格量化 + 3×3 邻格 TSV | 否（M4/人工可读性 NOT_RUN） |
 
 所有题型在管理面 `/api/admin/generators` 里都返回 `experimental:true` / `production_ready:false`。
 **没有**任何题型被证明抗 AI、抗 OCR、抗多模态或已完成人工可读性验收。
@@ -38,7 +41,7 @@ curl -sS -X POST "$ADMIN_BASE/api/admin/sites" \
 ```
 
 管理控制台的创建/详情页会从 `/api/admin/generators` 动态列出全部题型；
-选择 `shape-grid-v1` / `shape-count-v1` 后，widget 会按 `answer_type` 自动换成点选/双数字控件。
+widget 按题面的 `answer_type` 自动切换控件（`text/cells/pairs/angle/point/timing` 六种）。
 `EPOCHA_GENERATORS` 是**进程级白名单**：留空 = 全部启用；填了列表就只有列表里的题型能领题。
 关掉一个题型不会让已签发但未作答的 challenge 静默降级——它会得到 503 可重试（见 DESIGN §8.4）。
 
@@ -49,15 +52,19 @@ curl -sS -X POST "$ADMIN_BASE/api/admin/sites" \
 | `text` | 6/8 个大写字符 | 裁首尾 ASCII 空白、小写折大写、长度必须恰好等于题面 `length` | 内部空白、全角、字符集外（含 `I/O/0/1`）、长度不符 |
 | `cells` | `3,7` | 每个序号 1..9、逗号分隔、排序、去重；`3, 7` 与 `7,3` 等价 | 空、0、越界、非十进制、空字段 |
 | `pairs` | `4,2` | 恰好两个 ASCII 十进制数（各 1..2 位）、剥前导零 | 少/多字段、负数、小数、空字段 |
+| `angle` | `1234` | 0..3599 的 0.1° 量化；只接受 ASCII 数字、≤4 位 | 符号、小数、>3599 |
+| `point` | `512,340` | 两个 0..999 的 ASCII 十进制数（各 1..3 位）；逗号两侧可裁 ASCII 空格 | 缺/多字段、>999、负数、小数、空字段 |
+| `timing` | `1234` | 0..60000 的毫秒整数；`energy-window-v1` 额外拒绝 <200ms（零思考抢答） | 非数字、>60000、energy-window 的 <200 |
 
-Phase 1（ADR-025）另定义了 `angle`（0.1° 整数）、`point`（`x,y` 千分位）与 `timing`（毫秒）三种**契约类型**；
-它们已有服务端规范化与 widget 输入，但**没有注册生产题型**，当前 6 个题型都不使用它们。
+Phase 1（ADR-025）定义的 `angle`（0.1° 整数）、`point`（`x,y` 千分位）与 `timing`（毫秒）三种契约类型
+已在 Phase 2–4.5 被实际题型使用：`bank-shot-v1`（`angle`）、`intersection-point-v1`（`point`）、
+`energy-window-v1`（`timing`）。`parallax-code-v1` 仍用 `text` + 雪碧图。
 
 `question.max_answer_len` 只是输入提示，不是服务端判定依据；传输层另有 `len ≤64` 上限。
 `cells` 的规范化只把"同一集合的另一种写法"折叠掉，**不扩大接受域**：一个 challenge 只接受
 唯一一个规范化集合。
 
-## 4. widget 的输入（现有三种 + Phase 1 契约三种）
+## 4. widget 的六种输入
 
 - `text`：文本输入（v1/v2/v3）。v3 的题面带 `"tolerant":1`，widget 会追加一行
   "本题最多允许 1 个字符认错"的说明。
@@ -70,8 +77,7 @@ Phase 1（ADR-025）另定义了 `angle`（0.1° 整数）、`point`（`x,y` 千
 - `point`：图片点击/键盘移动，提交 `x,y`（各 0..999）。
 - `timing`：雪碧图动画 + “记录时机”，提交毫秒；必须 `render_mode:"sprite_sheet"`，减少动态时 fail closed。
 
-后三种是 ADR-025 的契约输入，当前没有生产生成器登记，不属于上面的 6 个题型。
-widget 不解释答案、不做判定；隐藏字段仍然只承载一次性 response token（验证通过后），
+六种输入都已有登记题型使用；widget 不解释答案、不做判定；隐藏字段仍然只承载一次性 response token（验证通过后），
 答案只通过 `/api/redeem` 发给服务端。服务端文本只进 `textContent`，没有 HTML 拼接。
 
 ## 5. 本地预览
@@ -90,8 +96,9 @@ go run ./cmd/preview \
   --generator shape-grid-v1 --difficulty 3
 ```
 
-`--generator` 支持 `text-image-v1/v2/v3`、`shape-grid-v1`、`shape-count-v1`、
-`arithmetic-baseline-v1`。预览只允许 loopback，不接受非回环监听地址。
+`--generator` 支持全部已登记题型：`text-image-v1/v2/v3`、`shape-grid-v1`、`shape-count-v1`、
+`parallax-code-v1`、`bank-shot-v1`、`accessible-choice-v1`、`energy-window-v1`、`pipe-connect-v1`、
+`intersection-point-v1`、`arithmetic-baseline-v1`。预览只允许 loopback，不接受非回环监听地址。
 
 ## 6. 离线样本与 OCR 基线
 
@@ -111,8 +118,8 @@ manifest 的 `render_params` 只序列化 `ImageParams` 的导出字段；v3 的
 评分器（目前没有），不要用严格数字反推"人能过/不能过"。
 
 v3 的 OCR 基线（M4）**尚未执行**；不得把 v2 的 0% 结果外推到 v3。
-`shape-grid-v1` / `shape-count-v1` 也没有 OCR 基线：OCR 不是它们的威胁模型，
-它们对机器视觉本来就容易（见 §7）。
+`shape-grid-v1` / `shape-count-v1` / `pipe-connect-v1` / `intersection-point-v1` 也没有 OCR 基线：
+OCR 不是它们的威胁模型，它们对机器视觉本来就容易（见 §7）。`energy-window-v1` 的 M4 同样未测。
 
 ## 7. M1–M4（诚实口径）
 
@@ -124,12 +131,29 @@ v3 的 OCR 基线（M4）**尚未执行**；不得把 v2 的 0% 结果外推到 
 | `parallax-code-v1` | `10^4` 代码 × 帧数/背景/分层速度 | 精确 4 位数字；接受域 1 | `1e-4`；3 次 ≈`3e-4` | **未测** |
 | `bank-shot-v1` | 母球/目标袋/障碍/视觉种子组合 | 3600 个 0.1° 桶；接受域 `2×tolerance+1`，d1 最大 41 个桶 | 最坏 `41/3600 ≈ 1.14%`；3 次 ≈3.4%；API 仍只给 1 次有效尝试 | **未测** |
 | `accessible-choice-v1` | 12 个数值选项 × 判据 | 精确选项；12 选 1 | `1/12 ≈ 8.3%` 单次；仅 1 次 + 24h 限额 | **未测** |
+| `energy-window-v1` | 36 帧 × 游标相位 × 视觉种子 | 480 个 6ms 桶；目标只在 40..439 桶（400 个可行桶），接受域 13 个桶 | `13/400 = 3.25%`；3 次 ≈9.44% | **未测** |
+| `pipe-connect-v1` | 主路径行位 × 死路位置 × 视觉种子 | 断点与死路都显示为空候选格；d1 最少 `E=9`、d5 最少 `E=13` 个候选 | d1 `1/C(9,2)=1/36 ≈ 2.78%`；3 次 ≈8.1%；d5 `1/C(13,2)=1/78 ≈ 1.28%` | **未测** |
+| `intersection-point-v1` | 两条线斜率组合 × 目标格（`cols×rows`）× 视觉种子 | 目标格 + 3×3 邻格；d1 32×18 网格（目标可行 351 格），d5 64×36（1404 格） | 最坏 `9/351 = 2.56%`；3 次 ≈7.50%；d5 `0.64%` / 3 次 ≈1.91% | **未测** |
 
 `shape-grid` / `shape-count` 的 M3 计算假设攻击者在**正确的 k/正确数量范围**内均匀猜；
 如果它连 k 都不知道，接受域更小。两者都在 3 次尝试的 10% 红线以内，但这只是"随机猜不通"，
 不是"机器解不了"——图形对机器视觉很容易，M4 未测，不能声称抗 AI。
 `parallax-code` / `bank-shot` 的 M3 同样只是随机猜测上界；两者的 M4（VLM/OCR/脚本/人工）
 均为 **NOT_RUN**，不得把"单帧不完整"或"角度容差小"写成抗 AI 证明。
+`energy-window` 在 `reduced_motion` 下由调度器排除（运动题），`pipe-connect` 复用 `cells`，
+`intersection-point` 复用 `point`（键盘方向键可微调）。`energy-window` 的 M3 分母是 400 个可行目标桶
+（目标只在 40..439 抽样），d1 三次随机猜测上界 9.44%，三次点击各覆盖 13 桶的覆盖上界 39/400=9.75%
+（仍 <10%，没有余量，任何放宽 d1 容差的改动都必须重算）。`pipe-connect` 的断点与死路**外观完全相同**，
+盲猜者能把答案缩到 `E=死路数+2` 个空候选格，所以 M3 按 `C(E,2)` 算而不是 `C(16,2)`；
+d1 至少 7 个死路（`E=9`）保证 3 次上界 8.1% 仍在 10% 内。能顺着主路径排除死路属于 M4，未测。`energy-window` 的 M3 是 3 次上界 ≈9.44%，
+仍在 10% 内；但 M4 未测，不得写成抗 AI。
+`intersection-point` 的接受域是**量化后的 3×3 邻格**，难度越高网格越细、同样的像素误差更容易落到
+接受域之外；这是容差梯度，不是"像素级精确点击"。画面**不画交点、也不放遮挡块**：目标格的格中心
+距画布边缘至少 50px，可行范围只有整张网格的约 54%，所以 M3 按可行格数算（d1 `9/351`）。
+3 次点击各覆盖一个 3×3 接受域的上界是 `27/351 ≈ 7.69%`（d5 `27/1404 ≈ 1.92%`），仍在 10% 内。
+如果交点被某个可见标记（例如遮挡块）指出，"点标记中心"就会成为 100% 通过的捷径，M3 的随机猜测模型
+也就不成立——所以这个题型刻意没有遮挡块。它仍需要人工确认"交点看得见、点得准"（NOT_RUN），
+也不得把 M3 小写成抗 AI 证明。
 `accessible-choice` 是**弱安全**的无障碍通道：1/12 随机猜中率远高于普通题，
 只靠显式 accessibility 请求、站点池显式包含、24h 一次和一次性 challenge 限制；
 它不进入普通用户的题池，也不得被写成生产可用或抗 AI。
@@ -157,8 +181,10 @@ v1/v2 仍是 48B 的精确 HMAC，路径与长度不变。
 
 - **按权重混合多题型**：未实现。站点仍只选一个 `generator_id`；"多样性"指可选题型增加，
   不是同一站点自动轮换。
-- **单选/单点点击**：答案空间只有 N（4..12），3 次尝试通过率超过 10% 红线，没有实现。
-- **拖拽/滑块/旋转/区域容差**：未实现；会放大接受域，需要另一套判分构造。
+- **从 N 个图形里点一个的单选题**：N 只有 4..12，3 次尝试通过率超过 10% 红线，没有实现。
+  `intersection-point-v1` 是连续坐标点选（网格量化 + 3×3 容差），不是这一形态，不能拿它的 M3 为 N 选 1 背书。
+- **自由拖拽/旋转拼图/大面积区域容差**：未实现；会放大接受域，需要另一套判分构造。
+  已实现的是受限形态：`bank-shot-v1` 的角度滑块（0.1° + TSV）与 `intersection-point-v1` 的点击点（9 格上限）。
 - **非视觉等价通道（音频等）**：未实现；PoW-only 降级不是等效替代。
 - **人工可读性、辅助技术、真机移动端、M4、抗 AI/抗 OCR**：全部 NOT_RUN。
   人工可读性必须在目标设备上按 `docs/MANUAL-ACCEPTANCE.md` 的方式另行验收；

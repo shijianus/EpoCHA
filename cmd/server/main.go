@@ -502,6 +502,21 @@ func knownGenerators(qKey []byte) ([]generator.Generator, error) {
 		return nil, fmt.Errorf("无障碍文本题型: %w", err)
 	}
 	out = append(out, accessible)
+	energy, err := generator.NewEnergyWindow(qKey)
+	if err != nil {
+		return nil, fmt.Errorf("瞬态时机题型: %w", err)
+	}
+	out = append(out, energy)
+	pipe, err := generator.NewPipeConnect(qKey)
+	if err != nil {
+		return nil, fmt.Errorf("拓扑连通题型: %w", err)
+	}
+	out = append(out, pipe)
+	intersection, err := generator.NewIntersectionPoint(qKey)
+	if err != nil {
+		return nil, fmt.Errorf("交点外推题型: %w", err)
+	}
+	out = append(out, intersection)
 	return out, nil
 }
 

@@ -13,6 +13,8 @@ func TestExtensionGeneratorsStayExperimental(t *testing.T) {
 	for _, id := range []string{
 		generator.TextImageV3ID, generator.ShapeGridID, generator.ShapeCountID,
 		generator.ParallaxID, generator.BankShotID, generator.AccessibleChoiceID,
+		generator.EnergyWindowID, generator.PipeConnectID,
+		generator.IntersectionPointID,
 	} {
 		exp, ready := generatorLifecycle(id)
 		if !exp || ready {

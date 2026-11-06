@@ -2,6 +2,7 @@ package generator
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -95,6 +96,53 @@ func NormalizeTiming(input string) (string, bool) {
 		return "", false
 	}
 	return strconv.Itoa(n), true
+}
+
+// NormalizeCellSet 是 cells 答案的通用规范化：1-based 序号、逗号分隔、排序去重。
+// 只把"同一集合的另一种写法"折叠掉，不扩大接受域；空/越界/非十进制是畸形。
+func NormalizeCellSet(input string, maxCells, maxLen int) (string, bool) {
+	if maxCells < 1 || maxLen < 1 {
+		return "", false
+	}
+	s := trimASCII(input)
+	if s == "" || len(s) > maxLen {
+		return "", false
+	}
+	parts := strings.Split(s, ",")
+	if len(parts) == 0 || len(parts) > maxCells {
+		return "", false
+	}
+	seen := make([]bool, maxCells+1)
+	nums := make([]int, 0, len(parts))
+	for _, raw := range parts {
+		p := trimASCII(raw)
+		if p == "" || len(p) > 2 {
+			return "", false
+		}
+		n := 0
+		for i := 0; i < len(p); i++ {
+			if p[i] < '0' || p[i] > '9' {
+				return "", false
+			}
+			n = n*10 + int(p[i]-'0')
+		}
+		if n < 1 || n > maxCells {
+			return "", false
+		}
+		if !seen[n] {
+			seen[n] = true
+			nums = append(nums, n)
+		}
+	}
+	if len(nums) == 0 {
+		return "", false
+	}
+	sort.Ints(nums)
+	out := make([]string, len(nums))
+	for i, n := range nums {
+		out[i] = strconv.Itoa(n)
+	}
+	return strings.Join(out, ","), true
 }
 
 // NormalizePrimitiveAnswer 按通用原语类型分派；未知类型返回 false。

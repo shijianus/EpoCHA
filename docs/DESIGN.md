@@ -1458,6 +1458,10 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
 
 ## 19. 变更日志
 
+- 2026-11-06 **Phase 4.5**：`energy-window-v1` 增加跨周期相位取模（`ms % 2880`）与 <200ms 零思考拒绝，d1–d5 容差 6→2 桶（36 帧/2880ms 周期，M3 分母按 400 个可行桶算）；`pipe-connect-v1` 死路数 d1–d5 为 7→12，并把 M3 口径修正为按空候选格 `C(E,2)`（断点与死路外观相同，d1 3 次≈8.1%）；新增 `intersection-point-v1`（两条虚线延长线交点，`point` 量化 + 3×3 邻格 TSV；目标格有 50px 边距，M3 最坏 9/351≈2.56%，3 次≈7.5%，d5 9/1404≈0.64%）。三者 `experimental:true` / `production_ready:false`；M4、人工可读性、辅助技术仍 NOT_RUN。
+
+- 2026-11-05 **第二批题型 Phase 4**：新增 `energy-window-v1`（36 帧游标 + TSV 时间桶，目标只在 400 个可行桶内抽样，M3 13/400≈3.25%）与 `pipe-connect-v1`（4×4 拓扑断点，M3 1/C(16,2)≈0.83%）。两者复用 `timing`/`cells`，Widget 无新增输入模式；`energy-window` 在 reduced-motion 下由调度器排除。M4/人工可读性/辅助技术仍 NOT_RUN。
+
 - 2026-11-05 **风险调度/弱遥测/无障碍（ADR-026/027/029）**：`sites` 增加 `generator_pool`（0006），签发按风险带/设备/刷新惩罚在池内加权选型，pool worker 为 `d_base+1..+3` 维护轻量预热水位；Widget 只上报量化遥测摘要，服务端仅作风险修正，不改变显式判定；新增 `accessible-choice-v1` 纯文本无障碍通道（显式请求、池内显式包含、24h 一次）。调度、遥测与无障碍的 M4/真机辅助技术仍为 NOT_RUN。
 
 - 2026-11-05 **首批标杆题型 Phase 2（parallax-code / bank-shot）**：新增 `parallax-code-v1`（4 位数字分帧视差，单帧只有部分笔画）与 `bank-shot-v1`（一次反弹，0.1° 量化 + TSV 41 桶容差）。两者 `experimental:true` / `production_ready:false`；M1–M3 已计算，M4/人工可读性/辅助技术/真机移动端均 NOT_RUN。Widget 增加雪碧图播放/暂停/重播与角度拖拽辅助线，主文件 gzip 仍 <30KB。

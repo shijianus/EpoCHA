@@ -794,7 +794,8 @@ func generatorLifecycle(id string) (experimental, productionReady bool) {
 	switch id {
 	case generator.ArithID, generator.TextImageID, generator.TextImageV2ID, generator.TextImageV3ID,
 		generator.ShapeGridID, generator.ShapeCountID, generator.ParallaxID, generator.BankShotID,
-		generator.AccessibleChoiceID:
+		generator.AccessibleChoiceID, generator.EnergyWindowID, generator.PipeConnectID,
+		generator.IntersectionPointID:
 		return true, false
 	default:
 		// 没登记结论的题型：按最保守的一档报，绝不让"忘了写"变成"看起来可用"
@@ -841,6 +842,18 @@ func noteForGenerator(id string) string {
 		return "无障碍等价通道的纯文本单选题（12 选 1，唯一偶数）：" +
 			"只允许 accessibility:true + 站点池显式包含 + 24h 1 次；" +
 			"M4/人工可读性/辅助技术实测均 NOT_RUN，不声称抗 AI；production_ready 保持 false"
+	case generator.EnergyWindowID:
+		return "瞬态时机题（36 帧雪碧图，TSV 时间桶容差；目标只在 400 个可行桶内）：" +
+			"单次接受域 13/400≈3.25%，3 次上界≈9.4%；M4/人工可读性/辅助技术 NOT_RUN，" +
+			"不声称抗 AI；reduced_motion 下自动排除；production_ready 保持 false"
+	case generator.PipeConnectID:
+		return "拓扑连通题（4×4 网格，点选主路径 2 个断点；断点与死路外观相同）：" +
+			"M3 按空候选格 C(E,2) 算，d1 最少 E=9 → 1/36≈2.78%、3 次≈8.1%，d5 最少 E=13 → 1/78≈1.28%；" +
+			"M4/人工可读性/辅助技术 NOT_RUN，不声称抗 AI；production_ready 保持 false"
+	case generator.IntersectionPointID:
+		return "交点外推题（两条虚线，点击延长线交点；point 量化 + 3×3 邻格 TSV，交点不画标记）：" +
+			"M3 单次 d1 9/351≈2.56%、3 次≈7.5%，d5 9/1404≈0.64%；" +
+			"M4/人工可读性/辅助技术 NOT_RUN，不声称抗 AI；production_ready 保持 false"
 
 	default:
 		return ""

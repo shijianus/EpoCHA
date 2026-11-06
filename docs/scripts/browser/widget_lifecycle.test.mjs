@@ -42,6 +42,7 @@ class Element extends Events {
     this.value = "";
     this.disabled = false;
     this.text = "";
+    this.style = {};
   }
   setAttribute(name, value) { this.attributes.set(name, String(value)); }
   getAttribute(name) { return this.attributes.get(name) ?? null; }
@@ -138,6 +139,8 @@ function harness(t, { honorAbort = false, options = {} } = {}) {
   const document = new Events();
   document.visibilityState = "visible";
   document.createElement = (tag) => new Element(tag, document);
+  // Phase 2 起 widget 会用 SVG 画角度辅助线；Node 工装只需要同样的元素外壳。
+  document.createElementNS = (_ns, tag) => new Element(tag, document);
   const form = document.createElement("form");
   const container = form.appendChild(document.createElement("div"));
   class BrowserURL extends URL {

@@ -94,6 +94,8 @@ func TestParseFlags(t *testing.T) {
 	for _, gen := range []string{
 		generator.TextImageV2ID, generator.TextImageV3ID,
 		generator.ShapeGridID, generator.ShapeCountID,
+		generator.ParallaxID, generator.BankShotID, generator.AccessibleChoiceID,
+		generator.EnergyWindowID, generator.PipeConnectID, generator.IntersectionPointID,
 	} {
 		opt, err := parseFlags([]string{"--api", "http://h:1", "--site-key", "sk", "--site-secret", demoSecret,
 			"--generator", gen}, env)

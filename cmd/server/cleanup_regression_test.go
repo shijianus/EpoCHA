@@ -31,7 +31,9 @@ func TestPurgeLoopRunsPromptlyAndStopsOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go purgeLoop(ctx, db, slog.New(slog.NewTextHandler(io.Discard, nil)), done)
-	deadline := time.Now().Add(2 * time.Second)
+	// 2s 在负载 6+ 的共享机器上会输给调度延迟；purgeEvery 是 10s，
+	// 5s 仍能证明"启动即清理"而不是等周期 tick。
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		_, err := db.Challenge(context.Background(), challenge.ID)
 		if err == store.ErrNotFound {
@@ -39,7 +41,7 @@ func TestPurgeLoopRunsPromptlyAndStopsOnCancellation(t *testing.T) {
 			select {
 			case <-done:
 				return
-			case <-time.After(time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("purgeLoop did not stop after cancellation")
 			}
 		}

@@ -308,7 +308,10 @@ if [[ $DOCKER_OK -eq 1 ]]; then
   else
     rc=0
     docker export "$LC_CID" >"$WORK/imagefs.tar" 2>/dev/null || rc=$?
-    if [[ $rc -ne 0 ]] || ! tar -tf "$WORK/imagefs.tar" >"$LOGS/image-files.txt" 2>/dev/null; then
+    # 目录条目（`dev/`、`usr/local/bin/`、WORKDIR 建出来的 `var/lib/epocha/`）不是文件内容，
+    # 不能拿来和白名单逐行比较；只保留非目录条目。Docker 29 的 export 还会带上
+    # `.dockerenv`、`/etc/hosts` 等运行时挂载，它们也不属于镜像层，按精确路径排除。
+    if [[ $rc -ne 0 ]] || ! tar -tf "$WORK/imagefs.tar" 2>/dev/null | grep -v '/$' >"$LOGS/image-files.txt"; then
       fail "docker export 读取镜像文件系统失败（rc=$rc）"
     else
       BAD=""
@@ -324,9 +327,10 @@ if [[ $DOCKER_OK -eq 1 ]]; then
       HASERVER="$(grep -c 'usr/local/bin/epocha$' "$LOGS/image-files.txt" || true)"
       HASOPS="$(grep -c 'usr/local/bin/epocha-ops$' "$LOGS/image-files.txt" || true)"
       NWAYSPUT="$(grep -c '^\(usr/bin/\|bin/\|sbin/\)' "$LOGS/image-files.txt" || true)"
-      EXPECTED_IMAGE_FILES='/usr/local/bin/epocha
-/usr/local/bin/epocha-ops'
-      EXTRA_IMAGE_FILES="$(grep -vFxf <(printf '%s\n' "$EXPECTED_IMAGE_FILES") "$LOGS/image-files.txt" || true)"
+      EXPECTED_IMAGE_FILES='usr/local/bin/epocha
+usr/local/bin/epocha-ops'
+      RUNTIME_MOUNTS='^(\.dockerenv|dev/console|etc/hostname|etc/hosts|etc/mtab|etc/resolv\.conf)$'
+      EXTRA_IMAGE_FILES="$(grep -vFxf <(printf '%s\n' "$EXPECTED_IMAGE_FILES") "$LOGS/image-files.txt" | grep -vE "$RUNTIME_MOUNTS" || true)"
       if [[ -n "$EXTRA_IMAGE_FILES" ]]; then
         fail "镜像文件清单含白名单之外的路径: $(printf '%s' "$EXTRA_IMAGE_FILES" | tr '\n' ' ')"
       fi

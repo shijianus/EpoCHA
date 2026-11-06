@@ -275,7 +275,10 @@ printf '%s' "$csp1" | grep -q "worker-src blob:" || fail "app1 CSP 缺 worker-sr
 printf '%s' "$csp1" | grep -q "unsafe-eval" && fail "CSP 不该要求 unsafe-eval"
 curl -sSI http://127.0.0.1:8392/ | grep -qi "worker-src 'none'" || fail "app2 CSP 应是 worker-src 'none'"
 curl -sSI http://127.0.0.1:8393/ | grep -q "worker-src 'self'" || fail "app3 CSP 应是 worker-src 'self'"
-curl -sS http://127.0.0.1:8393/widget/v1.worker.js | grep -q 'epocha widget PoW worker' || fail "app3 应同源提供 worker 文件（方案 B）"
+# 不能写 `curl ... | grep -q`：grep 命中即退出，curl 收到 SIGPIPE（23），
+# 在 `set -o pipefail` 下整条流水线会被判失败。先落盘再 grep。
+curl -sS http://127.0.0.1:8393/widget/v1.worker.js -o "$WORK/app3-worker.js"
+grep -q 'epocha widget PoW worker' "$WORK/app3-worker.js" || fail "app3 应同源提供 worker 文件（方案 B）"
 pass "示例应用起来且 CSP 档位正确（blob / none），两档都不要 unsafe-eval 或 unsafe-inline"
 
 log "第九步：业务侧反例（curl 层，不经浏览器）"

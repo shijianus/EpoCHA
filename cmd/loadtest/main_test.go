@@ -267,6 +267,16 @@ func TestPaceThrottlesWorkers(t *testing.T) {
 	srv := stubVerifyServer(t, &[4]int32{}, pow.MinBits)
 	defer srv.Close()
 
+	// 直接观察节流等待的调用次数，而不是拿墙钟做阈值：-race 或并发构建
+	// 会把 4/8 次真实闭环的耗时推过任何固定毫秒数（本轮在 stage5b 上实测撞过）。
+	var waits atomic.Int32
+	oldWait := paceWait
+	paceWait = func(context.Context, time.Duration) bool {
+		waits.Add(1)
+		return true
+	}
+	defer func() { paceWait = oldWait }()
+
 	o := &options{base: srv.URL, siteKey: "s", secret: "sk_" + strings.Repeat("e", 64),
 		concurrency: 1, requests: 4, timeout: 5 * time.Second, pace: 120 * time.Millisecond}
 	c := &client{base: o.base, http: &http.Client{Timeout: o.timeout}}
@@ -274,23 +284,20 @@ func TestPaceThrottlesWorkers(t *testing.T) {
 	if s.OK != 4 {
 		t.Fatalf("ok = %d，期望 4（错误：%s）", s.OK, s.errClasses())
 	}
-	// 4 次闭环、每次之后睡 120ms ⇒ 至少 3×120ms。
-	// 用"至少"而不是"约等于"：睡眠只会因调度变长，不会变短。
-	if s.wall < 3*120*time.Millisecond {
-		t.Errorf("wall = %s，比节拍下限 360ms 还短——节流没生效", s.wall)
-	}
-	if s.wall > 3*120*time.Millisecond+2*time.Second {
-		t.Errorf("wall = %s，远超预期，节流像是变成了等待", s.wall)
+	// 4 次闭环、每次之后睡 120ms ⇒ 4 次等待（最后一次在结果交付之后，仍会调用节流）。
+	if got := waits.Load(); got != 4 {
+		t.Fatalf("节流等待次数 = %d，期望 4", got)
 	}
 
 	// pace=0 必须仍然是"尽可能快"（5A 的容量测量依赖这个行为）。
-	// 判据用**相对**值：同样形状的负载去掉节流后必须明显快于节流的下限（3×120ms）。
-	// 写绝对毫秒数是错的——8 次带 PoW 与 HTTP 往返的闭环在 -race 下本来就要一百多毫秒，
-	// 那不是"仍在睡"，是真实工作（本轮实测把这条误判成回归）。
+	waits.Store(0)
 	o2 := &options{base: srv.URL, siteKey: "s", secret: o.secret, concurrency: 2, requests: 8, timeout: 5 * time.Second}
 	s2 := drive(context.Background(), c, o2, time.Now)
-	if s2.wall >= 3*120*time.Millisecond {
-		t.Errorf("pace=0 时 wall = %s，已达到节流 3×120ms 的下限，看起来仍在睡", s2.wall)
+	if s2.OK != 8 {
+		t.Fatalf("pace=0 时 ok = %d，期望 8（错误：%s）", s2.OK, s2.errClasses())
+	}
+	if got := waits.Load(); got != 0 {
+		t.Fatalf("pace=0 仍发生了 %d 次节流等待", got)
 	}
 }
 

@@ -1063,7 +1063,7 @@ if [[ $BUILD_OK -eq 1 && -n "${CID:-}" ]] && (( AVAIL_NOW >= 100 * 1024 )); then
       DB0="$(stat -c '%s' "$D/data/epocha.db" 2>/dev/null || echo 0)"
       WAL0="$(stat -c '%s' "$D/data/epocha.db-wal" 2>/dev/null || echo 0)"
       SOAK_START=$SECONDS
-      # The Node watchdog owns the actual child and enforces 300s independent of HTTP/PoW timeouts.
+      # The Node watchdog owns the actual child and enforces 330s independent of HTTP/PoW timeouts.
       EPOCHA_SITE_SECRET="$SOAK_SECRET" node docs/scripts/soak-evidence.mjs run --out "$LOGS/soak-run.json" --log "$LOGS/soak.txt" -- \
         "$BIN/loadtest" --base "$MU" --site-key "$SOAK_POW" --concurrency 1 --requests 450 --pace 660ms --timeout 10s &
       SOAK_PID=$!
@@ -1101,7 +1101,7 @@ if [[ $BUILD_OK -eq 1 && -n "${CID:-}" ]] && (( AVAIL_NOW >= 100 * 1024 )); then
       node docs/scripts/soak-evidence.mjs verify --run "$LOGS/soak-run.json" --log "$LOGS/soak.txt" --samples "$SAMPLES" \
         --pool-before "$LOGS/pool-before.json" --pool-after "$LOGS/pool-after.json" --out "$LOGS/soak-summary.json" || VERIFY_RC=$?
       if [[ $SOAK_RC -eq 0 && $SAMPLE_FAILED -eq 0 && $POOL_READY -eq 1 && $POOL_AFTER_OK -eq 1 && $VERIFY_RC -eq 0 ]]; then
-        pass "持续演练实际 450/450 闭环成功、无失败、300s 硬上限内结束；高档图片 ready/字节与连续可解析资源采样均有实证（${SOAK_T}s）"
+        pass "持续演练实际 450/450 闭环成功、无失败、330s 看门狗内结束；高档图片 ready/字节与连续可解析资源采样均有实证（${SOAK_T}s）"
       else
         fail "持续演练不满足完整证据（load_rc=$SOAK_RC sample_failed=$SAMPLE_FAILED pool_before=$POOL_READY pool_after=$POOL_AFTER_OK verify_rc=$VERIFY_RC）；缺失或未知数据不能视为通过"
       fi

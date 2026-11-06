@@ -168,7 +168,8 @@ pass "管理 API 可创建 pow_question 站点（默认仍是 pow_only，模式�
   || fail "未登记的题型应被管理面拒绝"
 # 基线题型的定位必须在管理返回里看得见，而不是藏在文档里
 ac GET /api/admin/generators >/dev/null
-jqpy 'import json,sys;g=json.load(open(sys.argv[1]))["generators"][0];assert g["production_ready"] is False and "不抗自动解题" in g["note"]' \
+# 列表按 id 排序，不能再假设 arithmetic 是第一个（Phase 3 起 accessible-choice 排在它前面）。
+jqpy 'import json,sys;gs=json.load(open(sys.argv[1]))["generators"];assert gs;base=next(x for x in gs if x["id"]=="arithmetic-baseline-v1");assert base["production_ready"] is False and "不抗自动解题" in base["note"];assert all(x["production_ready"] is False and x["experimental"] is True and x["note"] for x in gs)' \
   || fail '生成器列表未标明"工程基线/不抗自动解题"'
 pass "管理面拒绝未知题型，并把基线题型的定位显式返回"
 

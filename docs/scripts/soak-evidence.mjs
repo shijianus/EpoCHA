@@ -6,7 +6,10 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 
-export const SOAK_LIMIT_MS = 300000;
+// 450 次 × 660ms 的节流下限是 296.34s；300s 只剩 3.66s 给 450 次真实闭环，
+// 任何 >8ms/次的机器都会超时（本机 Linux 验证实测 300s 被 SIGKILL）。330s 仍是"约 5 分钟"，
+// 只放宽看门狗，不放宽 450/660 的负载形状。
+export const SOAK_LIMIT_MS = 330000;
 const requireValue = (value, message) => { if (!value) throw new Error(message); };
 const sha = (value) => createHash('sha256').update(value).digest('hex');
 const positive = (value) => Number.isSafeInteger(value) && value > 0;
@@ -21,7 +24,7 @@ function durationMS(text) {
   return ms;
 }
 export function checkLoad({ text, exit_code, elapsed_ms, timed_out }) {
-  requireValue(exit_code === 0 && timed_out === false && Number.isFinite(elapsed_ms) && elapsed_ms > 0 && elapsed_ms <= SOAK_LIMIT_MS, 'load process failed or exceeded the independent 300s deadline');
+  requireValue(exit_code === 0 && timed_out === false && Number.isFinite(elapsed_ms) && elapsed_ms > 0 && elapsed_ms <= SOAK_LIMIT_MS, 'load process failed or exceeded the independent 330s deadline');
   requireValue(typeof text === 'string' && text.trim(), 'empty load evidence');
   const plans = [...text.matchAll(/^负载形状 concurrency=(\d+) requests=(\d+) base=\S+（凭据不回显）\r?$/gm)];
   requireValue(plans.length === 1 && plans[0][1] === '1' && plans[0][2] === '450', 'load plan must be exactly concurrency=1 requests=450');

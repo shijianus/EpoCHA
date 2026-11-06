@@ -300,6 +300,19 @@ type summary struct {
 
 func newSummary() *summary { return &summary{StageErrors: map[string]int{}} }
 
+// paceWait 是节流等待。测试替换它来验证 pace=0 不发生等待，
+// 不依赖墙钟——-race 或并发构建会让毫秒阈值变成随机失败。
+var paceWait = func(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
 // drive 用固定数量 worker 消费一个已装满的任务队列。now 注入是为了让测试可判定。
 func drive(ctx context.Context, c *client, o *options, now func() time.Time) *summary {
 	s := newSummary()
@@ -318,11 +331,8 @@ func drive(ctx context.Context, c *client, o *options, now func() time.Time) *su
 				// 节流：持续演练要的是"每秒 1–2 次、跑满 5 分钟"的形状，
 				// 而不是把上限打满再拿一个没意义的峰值数字。
 				if o.pace > 0 {
-					t := time.NewTimer(o.pace)
-					select {
-					case <-ctx.Done():
-						t.Stop()
-					case <-t.C:
+					if !paceWait(ctx, o.pace) {
+						return
 					}
 				}
 			}

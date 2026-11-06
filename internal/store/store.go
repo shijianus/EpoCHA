@@ -28,8 +28,11 @@ var migration0003 string
 //go:embed migrations/0004_stage3b.sql
 var migration0004 string
 
+//go:embed migrations/0005_payload_8k.sql
+var migration0005 string
+
 // schemaVersion 是最后一条迁移对应的版本号，写入 meta 表。
-const schemaVersion = 4
+const schemaVersion = 5
 
 // retiredPrefix 是阶段 1 secret_mac 列被中和时加在摘要输入上的域分隔串（见 0002 注释）。
 const retiredPrefix = "epocha/v1|retired|"
@@ -45,12 +48,13 @@ const (
 )
 
 // 难度档与单题体积上限。上限是**预算**而非测量值：它的作用是让一条恶意或退化的题目
-// 无法把池撑爆，而不是"实测最优大小"。
+// 无法把池撑爆，而不是"实测最优大小"。交互式底座把 payload/verifier 预算提高（ADR-028）：
+// payload 由 0005 迁移的库内 CHECK 强制，verifier 由 Go 侧常量强制。
 const (
 	MinDifficulty    = 1
 	MaxDifficulty    = 5
-	MaxPayloadBytes  = 4096
-	MaxVerifierBytes = 512
+	MaxPayloadBytes  = 8192
+	MaxVerifierBytes = 4096
 
 	// MaxAssetBytes 是单题图片资产的字节上限。**必须与 0004 迁移里 CHECK 的字面量一致**，
 	// 两侧各有测试（Go 侧拒绝、库侧拒绝），改一处就必须同时改另一处。
@@ -227,6 +231,7 @@ var migrations = []migration{
 	{version: 2, sql: migration0002, data: migrateStage2Data},
 	{version: 3, sql: migration0003},
 	{version: 4, sql: migration0004},
+	{version: 5, sql: migration0005},
 }
 
 // SchemaVersion 返回当前库版本。

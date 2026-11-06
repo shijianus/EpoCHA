@@ -153,8 +153,9 @@ const (
 	verifierNonceSz = 16
 	verifierTagSz   = sha256.Size
 
-	// AnswerVerifierLen 是共用 verifier 的字节长度（48）。库侧的 MaxVerifierBytes=512 是上限，
-	// 这里有测试按 48 钉住实际形态，改长度必须同时改 0003 迁移注释与 DESIGN §5.4。
+	// AnswerVerifierLen 是共用 verifier 的字节长度（48）。库侧的 MaxVerifierBytes=4096 是上限
+	// （ADR-028；交互题用 TSV，见 tsv.go），这里有测试按 48 钉住实际形态，
+	// 改长度必须同时改迁移注释与 DESIGN §5.4。
 	AnswerVerifierLen = verifierNonceSz + verifierTagSz
 
 	// answerMACDomain 是域分隔前缀。它与站点 secret 摘要串、token 派生串、管理凭据串都不同，
@@ -188,6 +189,61 @@ func verifyAnswer(macKey []byte, v PrivateVerifier, canonicalAnswer string) bool
 	}
 	want := answerTag(macKey, v[:verifierNonceSz], canonicalAnswer)
 	return subtle.ConstantTimeCompare(want, v[verifierNonceSz:]) == 1
+}
+
+// --- 逐字容差 verifier（ADR-024，仅 text-image-v3 使用）---
+//
+// 形态：nonce(16B) || tag_0 || … || tag_{L-1}，每标签 32B。
+// tag_i = HMAC(K(qver), "epocha/v1|qver-char|" || nonce || 0x00 || byte(i) || char_i)
+//
+// 为什么要单独一条构造：v1/v2 的精确 verifier 只能回答"整串是否相等"，
+// 无法在不读回答案的前提下接受"有一个字符认错了"。逐字标签让 Verify 能数出
+// 不匹配的位置数；接受域因此扩大到"精确答案 + 任一位置替换"。
+// 边界：拿到 qver 密钥的人本来就能离线枚举 verifier（ADR-011 的残余风险）；
+// 逐字标签把有密钥时的离线枚举从 32^L 降到 L×32，不改变无密钥时的安全边界。
+const (
+	charTagSz     = sha256.Size
+	charMACDomain = "epocha/v1|qver-char|"
+)
+
+// charTag 算第 pos 个字符的 HMAC 标签。位置与字符之间写入 0x00 分隔，
+// 避免把"位置字节 + 字符字节"当成一个可拼接的整体。
+func charTag(macKey, nonce []byte, pos int, ch byte) []byte {
+	m := hmac.New(sha256.New, macKey)
+	m.Write([]byte(charMACDomain))
+	m.Write(nonce)
+	m.Write([]byte{0})
+	m.Write([]byte{byte(pos)})
+	m.Write([]byte{0})
+	m.Write([]byte{ch})
+	return m.Sum(nil)
+}
+
+// charVerifier 拼出逐字 verifier。答案明文到此为止。
+func charVerifier(macKey, nonce []byte, canonicalAnswer string) []byte {
+	out := make([]byte, 0, verifierNonceSz+len(canonicalAnswer)*charTagSz)
+	out = append(out, nonce...)
+	for i := 0; i < len(canonicalAnswer); i++ {
+		out = append(out, charTag(macKey, nonce, i, canonicalAnswer[i])...)
+	}
+	return out
+}
+
+// verifyChars 逐位重算标签并累计不匹配数；所有位置都比较完，不提前返回。
+// tolerance < 0 或 verifier 长度与答案长度不一致时一律判假（fail closed）。
+func verifyChars(macKey []byte, v PrivateVerifier, canonicalAnswer string, tolerance int) bool {
+	if tolerance < 0 || len(v) != verifierNonceSz+len(canonicalAnswer)*charTagSz {
+		return false
+	}
+	nonce := v[:verifierNonceSz]
+	mismatches := 0
+	for i := 0; i < len(canonicalAnswer); i++ {
+		want := charTag(macKey, nonce, i, canonicalAnswer[i])
+		got := v[verifierNonceSz+i*charTagSz : verifierNonceSz+(i+1)*charTagSz]
+		eq := subtle.ConstantTimeCompare(want, got)
+		mismatches += 1 - eq
+	}
+	return mismatches <= tolerance
 }
 
 // --- 共享的输入规范化工具 ---

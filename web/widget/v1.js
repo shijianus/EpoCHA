@@ -7,14 +7,11 @@
 
   var WIDGET_VERSION = "v1";
   var MIME_PNG = "image/png";
-  // 单题 PNG 上限 65536 字节（store 0004 的 CHECK），base64 后约 87382 字符。
-  // 上限写在这里的作用是"畸形的巨大响应不会先展开再丢弃"，不是安全边界。
   var MAX_IMAGE_B64_CHARS = 87384;
   var POW_ALGO = "sha256-prefix";
 
-  // 与 web/widget/v1.worker.js **逐字节相同**（由 widget_test.go 的防漂移测试钉住）：
-  // Blob Worker 用这段源码，同源部署 workerUrl 用那个文件，两条路径必须跑同一份代码。
-  var POW_WORKER_SOURCE = String.raw`/*! epocha widget PoW worker v1 — sha256-prefix 工作量证明（DESIGN §7）
+
+var POW_WORKER_SOURCE = String.raw`/*! epocha widget PoW worker v1 — sha256-prefix 工作量证明（DESIGN §7）
  *
  * 这份文件是 PoW 求解的**唯一实现**。它以两种方式加载：
  *   A) 默认：widget 读取内嵌的同一份源码（见 v1.js 里的 POW_WORKER_SOURCE）创建 Blob Worker，
@@ -262,7 +259,6 @@ if (typeof self !== "undefined") {
     SUBMITTING: "submitting", VERIFIED: "verified", EXPIRED: "expired",
     ERROR: "error", DESTROYED: "destroyed"
   };
-  // 需要用户介入（不能自动继续）的状态集合。
   var BUSY = { loading: 1, solving: 1, submitting: 1 };
 
   var I18N = {
@@ -295,8 +291,39 @@ if (typeof self !== "undefined") {
       errBadResponse: "验证服务返回了无法识别的响应。",
       errExpiredSend: "题目已过期，请换一张后提交。",
       experimental: "实验性视觉题型：已有固定工具的 OCR 基线，但不代表抗多模态/抗机器能力；人工可读性尚未验收。",
-      a11yGap: "本题型只有视觉通道：无法看清图片的用户目前无法完成验证（非视觉等价通道尚未实现）。",
-      answerPlaceholder: "{length} 个字符"
+      answerPlaceholder: "{length} 个字符",
+      noteCells: "点选所有符合描述的格子；再次点击可取消。每题一次作答机会。",
+      notePairs: "两个数字分别对应下方两个标签；每题一次作答机会。",
+      noteAngle: "拖动滑块调整角度；滑块值直接作为本题答案。",
+      notePoint: "点击图片设置目标位置；方向键可微调，Shift+方向键步长更小。",
+      noteTiming: "观察动画，在目标时机点击“记录时机”；每题一次作答机会。",
+      noteAccessible: "这是一个纯文本无障碍题；选择一项后提交，不加载图片。",
+      errIncompleteOption: "请选择一个选项。",
+      cellLabel: "第 {n} 格",
+      selectedCount: "已选 {n} 格",
+      cellSelected: "已选中第 {n} 格",
+      cellUnselected: "已取消第 {n} 格",
+      errIncompleteSelection: "请至少点选一个格子。",
+      errIncompletePairs: "请填写两个数字。",
+      errIncompleteAngle: "请先调整角度。",
+      errIncompletePoint: "请先点击图片中的目标位置。",
+      errIncompleteTiming: "请先记录时机。",
+      errMotionRequired: "此设备启用了减少动态，无法完成动画题；请换一题。",
+      tolerantNote: "本题最多允许 1 个字符认错；请仍然尽量按看到的填写。",
+      imageAltCells: "验证图片：按提示点选格子",
+      imageAltPairs: "验证图片：数出两类图形的数量",
+      imageAltAngle: "验证图片：调整角度",
+      imageAltPoint: "验证图片：点击目标位置",
+      imageAltTiming: "验证图片：观察动画并记录时机",
+      pointLabel: "点击图片选择位置",
+      pointSelected: "已选择位置 {x},{y}",
+      timingRecord: "记录时机",
+      timingIdle: "等待你记录时机",
+      timingRecorded: "已记录 {ms} ms",
+      framePause: "暂停",
+      framePlay: "继续",
+      frameReplay: "重播",
+      promptFallback: "按图片完成验证。"
     },
     "en": {
       instruction: "Type the {length} characters shown in the image",
@@ -329,9 +356,39 @@ if (typeof self !== "undefined") {
       errExpiredSend: "The question expired before submit. Get a new one.",
       experimental: "Experimental visual question type: a fixed-tool OCR baseline exists, but this "
         + "does not claim resistance to multimodal or automated solving; human readability is not yet accepted.",
-      a11yGap: "Visual channel only: users who cannot see the image cannot complete this check "
-        + "(a non-visual equivalent is not implemented yet).",
-      answerPlaceholder: "{length} characters"
+      answerPlaceholder: "{length} characters",
+      noteCells: "Click every cell that matches the prompt; click again to undo. One attempt per question.",
+      notePairs: "Enter the two counts for the labels below. One attempt per question.",
+      noteAngle: "Drag the slider to set the angle; the slider value is the answer.",
+      notePoint: "Click the image to set the target; arrow keys nudge, Shift+arrow is finer.",
+      noteTiming: "Watch the animation and click “Record timing” at the target moment. One attempt per question.",
+      noteAccessible: "This is a text-only accessible question. Choose one option and submit; no image is loaded.",
+      errIncompleteOption: "Choose one option.",
+      cellLabel: "Cell {n}",
+      selectedCount: "{n} selected",
+      cellSelected: "Selected cell {n}",
+      cellUnselected: "Unselected cell {n}",
+      errIncompleteSelection: "Select at least one cell.",
+      errIncompletePairs: "Enter both numbers.",
+      errIncompleteAngle: "Adjust the angle first.",
+      errIncompletePoint: "Click the target position first.",
+      errIncompleteTiming: "Record the timing first.",
+      errMotionRequired: "Reduced motion is enabled, so this animated question cannot run. Get another question.",
+      tolerantNote: "This question tolerates one misread character; still enter what you see.",
+      imageAltCells: "Verification image: select cells as described",
+      imageAltPairs: "Verification image: count the two kinds of shapes",
+      imageAltAngle: "Verification image: adjust the angle",
+      imageAltPoint: "Verification image: click the target position",
+      imageAltTiming: "Verification image: watch the animation and record timing",
+      pointLabel: "Click the image to choose a position",
+      pointSelected: "Position {x},{y} selected",
+      timingRecord: "Record timing",
+      timingIdle: "Waiting for your timing",
+      timingRecorded: "Recorded {ms} ms",
+      framePause: "Pause",
+      framePlay: "Resume",
+      frameReplay: "Replay",
+      promptFallback: "Complete the check shown in the image."
     }
   };
 
@@ -352,7 +409,6 @@ if (typeof self !== "undefined") {
     return s;
   }
 
-  // --- 小工具（全部是安全 DOM 构造：服务端字符串只进 textContent）---
 
   function el(tag, attrs, text) {
     var node = document.createElement(tag);
@@ -367,6 +423,111 @@ if (typeof self !== "undefined") {
     return typeof s === "string" && /^[A-Za-z0-9+/]+={0,2}$/.test(s) && s.length % 4 === 0;
   }
 
+  function intField(obj, key) {
+    var v = obj[key];
+    return (typeof v === "number" && isFinite(v) && Math.floor(v) === v) ? v : null;
+  }
+
+  function validGrid(q, iw, ih) {
+    var cols = intField(q, "grid_cols"), rows = intField(q, "grid_rows");
+    var x = intField(q, "grid_x"), y = intField(q, "grid_y");
+    var cell = intField(q, "grid_cell"), gap = intField(q, "grid_gap");
+    if (cols === null || rows === null || x === null || y === null || cell === null || gap === null) return false;
+    if (cols < 2 || cols > 6 || rows < 2 || rows > 6 || cols * rows > 36) return false;
+    if (cell < 20 || cell > 160 || gap < 0 || gap > 32 || x < 0 || y < 0) return false;
+    if (x + cols * cell + (cols - 1) * gap > iw) return false;
+    if (y + rows * cell + (rows - 1) * gap > ih) return false;
+    return typeof q.prompt_zh === "string" && typeof q.prompt_en === "string";
+  }
+
+  function validPairs(q) {
+    var lz = q.labels_zh, le = q.labels_en;
+    if (!Array.isArray(lz) || !Array.isArray(le) || lz.length !== 2 || le.length !== 2) return false;
+    for (var i = 0; i < 2; i++) {
+      if (typeof lz[i] !== "string" || !lz[i] || lz[i].length > 64) return false;
+      if (typeof le[i] !== "string" || !le[i] || le[i].length > 64) return false;
+    }
+    var min = intField(q, "min"), max = intField(q, "max");
+    if (min === null || max === null || min < 0 || max > 99 || min >= max) return false;
+    return typeof q.prompt_zh === "string" && typeof q.prompt_en === "string";
+  }
+
+  function validPrompts(q) {
+    return typeof q.prompt_zh === "string" && q.prompt_zh.length > 0 && q.prompt_zh.length <= 200
+      && typeof q.prompt_en === "string" && q.prompt_en.length > 0 && q.prompt_en.length <= 200;
+  }
+
+  function validAngle(q) {
+    var min = intField(q, "angle_min"), max = intField(q, "angle_max"), step = intField(q, "angle_step");
+    if (min === null || max === null || step === null) return false;
+    if (min < 0 || max > 3599 || min >= max) return false;
+    if (step < 1 || step > 90 || (max - min) < step) return false;
+    return validPrompts(q);
+  }
+
+  function validPoint(q) {
+    return validPrompts(q);
+  }
+
+  function validAim(q, iw, ih) {
+    var cx = intField(q, "cue_x"), cy = intField(q, "cue_y"), len = intField(q, "aim_len");
+    if (cx === null || cy === null || len === null) return false;
+    if (cx < 0 || cx > iw || cy < 0 || cy > ih) return false;
+    return len >= 40 && len <= 300;
+  }
+
+  function validFrames(q, iw, ih) {
+    if (q.render_mode !== "sprite_sheet") return false;
+    var count = intField(q, "frame_count"), cols = intField(q, "frame_cols");
+    var rows = intField(q, "frame_rows"), ms = intField(q, "frame_ms");
+    if (count === null || cols === null || rows === null || ms === null) return false;
+    if (count < 2 || count > 64 || cols < 1 || cols > 8 || rows < 1 || rows > 8) return false;
+    if (cols * rows < count) return false;
+    if (ms < 20 || ms > 500) return false;
+    if (typeof q.frame_loop !== "boolean") return false;
+    if (iw * cols > 2048 || ih * rows > 2048) return false;
+    return true;
+  }
+
+  function validTextOptions(q) {
+    if (q.answer_type !== "text" || q.length !== 1 || q.charset !== "ABCDEFGHIJKL") return false;
+    if (!Array.isArray(q.options) || q.options.length < 4 || q.options.length > 12) return false;
+    if (!validPrompts(q)) return false;
+    var seen = {};
+    for (var i = 0; i < q.options.length; i++) {
+      var o = q.options[i];
+      if (!o || typeof o.id !== "string" || !/^[A-L]$/.test(o.id) || seen[o.id]) return false;
+      if (typeof o.label_zh !== "string" || !o.label_zh || o.label_zh.length > 32) return false;
+      if (typeof o.label_en !== "string" || !o.label_en || o.label_en.length > 32) return false;
+      seen[o.id] = true;
+    }
+    return true;
+  }
+
+  function sessionID() {
+    if (global.crypto && typeof global.crypto.getRandomValues === "function") {
+      var b = new Uint8Array(16);
+      global.crypto.getRandomValues(b);
+      var s = "";
+      for (var i = 0; i < b.length; i++) s += (b[i] < 16 ? "0" : "") + b[i].toString(16);
+      return s;
+    }
+    return "s" + Date.now().toString(36) + Math.random().toString(36).slice(2);
+  }
+
+  function deviceHints() {
+    var coarse = !!(global.matchMedia && global.matchMedia("(pointer: coarse)").matches);
+    var reduced = !!(global.matchMedia && global.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    return { pointer: coarse ? "coarse" : "fine", reduced_motion: reduced };
+  }
+
+  function promptText(q, lang) {
+    var zh = typeof q.prompt_zh === "string" ? q.prompt_zh : "";
+    var en = typeof q.prompt_en === "string" ? q.prompt_en : "";
+    var s = lang === "zh-CN" ? (zh || en) : (en || zh);
+    return s || tr(lang, "promptFallback");
+  }
+
   function b64urlToBytes(s) {
     var bin = global.atob(s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice(0, (4 - (s.length % 4)) % 4));
     var out = new Uint8Array(bin.length);
@@ -374,7 +535,6 @@ if (typeof self !== "undefined") {
     return out;
   }
 
-  // leadingZeroBits 与 internal/pow.LeadingZeroBits、worker 里的实现同义（三位一体由向量测试钉住）。
   function leadingZeroBits(b) {
     var n = 0;
     for (var i = 0; i < b.length; i++) {
@@ -402,11 +562,39 @@ if (typeof self !== "undefined") {
     ".st[data-kind=err]{border-color:#a31414;background:rgba(163,20,20,.07)}",
     ".st[data-kind=busy]{border-color:#1a5fb4;background:rgba(26,95,180,.07)}",
     ".note{margin:8px 0 0;font-size:12px;color:#555}",
-    ".tag{display:inline-block;margin:8px 0 0;font-size:12px;border:1px solid #b0761a;border-radius:4px;padding:2px 6px;color:#7a5312}"
+    ".tag{display:inline-block;margin:8px 0 0;font-size:12px;border:1px solid #b0761a;border-radius:4px;padding:2px 6px;color:#7a5312}",
+    ".hidden{display:none!important}",
+    ".qimg{position:relative;display:inline-block;max-width:100%;line-height:0}",
+    ".qimg img{display:block;max-width:100%;height:auto}",
+    ".cells{position:absolute;inset:0}",
+    ".cell{position:absolute;margin:0;padding:0;min-width:0;border:1px solid transparent;background:transparent;border-radius:3px;cursor:pointer}",
+    ".cell[aria-pressed=true]{background:rgba(26,95,180,.30);border-color:#1a5fb4}",
+    ".cell:focus-visible{outline:2px solid #1a5fb4;outline-offset:0}",
+    ".cellsum{margin:6px 0 0;font-size:12px;color:#555}",
+    ".pairs{margin:8px 0 0}",
+    ".pairrow{display:flex;gap:8px;align-items:center;margin:4px 0}",
+    ".pairrow label{flex:0 0 auto;max-width:55%;font-size:13px}",
+    ".pairrow input{width:90px;box-sizing:border-box;font:inherit;padding:4px}",
+    ".angle{margin:8px 0 0}",
+    ".angle input{width:100%;box-sizing:border-box}",
+    ".angleout{display:inline-block;margin-left:8px;font-variant-numeric:tabular-nums}",
+    ".pointlayer{position:absolute;inset:0;z-index:2;cursor:crosshair;outline:none}",
+    ".pointlayer:focus-visible{outline:2px solid #1a5fb4;outline-offset:0}",
+    ".pointmark{position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;border:2px solid #1a5fb4;border-radius:50%;background:rgba(26,95,180,.20);pointer-events:none}",
+    ".aimlayer{position:absolute;inset:0;z-index:1;pointer-events:none}",
+    ".aimline{stroke:#f2c94c;stroke-width:3;stroke-dasharray:8 6}",
+    ".angledrag{position:absolute;inset:0;z-index:3;cursor:crosshair;touch-action:none}",
+    ".timing{margin:8px 0 0}",
+    ".timingout{margin-left:8px;font-variant-numeric:tabular-nums}",
+    ".options{margin:8px 0 0;display:grid;gap:6px}",
+    ".opt{display:block;width:100%;text-align:left;margin:0;padding:8px 10px;border:1px solid #7a7a7a;border-radius:4px;background:#f7f7f7;cursor:pointer;font:inherit}",
+    ".opt[aria-pressed=true]{border-color:#1a5fb4;background:rgba(26,95,180,.12)}",
+    ".frameplay{margin:6px 0 0;font-size:12px}",
+    ".frameplay button{margin:0 6px 0 0;padding:3px 8px}",
+    ".frameview{display:block;max-width:100%;background-repeat:no-repeat}"
   ];
   var STYLE = STYLE_RULES.join("");
 
-  // 构造式样式表不需要 CSP 的 style-src 例外；老浏览器回落到 <style> 时才需要，文档里写明。
   function applyStyle(root) {
     if (typeof CSSStyleSheet === "function" && typeof root.adoptedStyleSheets !== "undefined") {
       try {
@@ -469,14 +657,11 @@ if (typeof self !== "undefined") {
         return Math.min(Math.floor(n), 5);
       })(),
       showExperimentalNote: o.showExperimentalNote !== false,
-      // form：<form> 元素或它的 id。容器不在目标 form 内时用它显式关联字段。
-      // 刻意不做的事：不接受跨文档元素、不接受选择器字符串（querySelector 会把"随便挑一个 form"
-      // 变成默认行为），也不接受服务端 challenge 里带回来的任何东西。
+      accessibility: o.accessibility === true,
       form: o.form === undefined || o.form === null || o.form === "" ? null : o.form,
       ariaLabel: o.ariaLabel || ""
     };
     if (opt.workerUrl) {
-      // 只允许同源 worker：跨域 URL 等于把可执行代码的来源交给服务端/第三方决定。
       var abs;
       try { abs = new URL(opt.workerUrl, global.location ? global.location.href : undefined); }
       catch (e) { throw new TypeError("EpoCHA.render: workerUrl 不是合法 URL"); }
@@ -494,14 +679,10 @@ if (typeof self !== "undefined") {
     return opt;
   }
 
-  // resolveForm：把 `form` 选项解析成**当前文档里的真实 <form>**。
-  // 返回 null 表示"没关联上"，调用方据此 fail loudly —— 隐藏字段落在 form 外等于
-  // 什么都没提交，而页面看起来一切正常，是最难被发现的一类接入错误。
   function resolveForm(spec, container) {
     var doc = container.ownerDocument;
     if (!doc) return null;
     if (spec && typeof spec === "object" && spec.nodeType === 1) {
-      // 传元素：必须是同一文档里的 FORM。跨文档（iframe/adopted node）不参与本文档的提交。
       return String(spec.tagName) === "FORM" && spec.ownerDocument === doc ? spec : null;
     }
     if (typeof spec === "string") {
@@ -532,6 +713,13 @@ if (typeof self !== "undefined") {
     this.destroyed = false;
     this.successFired = false;
     this.listeners = [];
+    this.frameAnim = null;
+    this.frameView = null;
+    this.frameStartedAt = 0;
+    this.frameCycleMs = 0;
+    this.frameAnimated = false;
+    this.session = sessionID();
+    this.tel = { start: 0, first: 0, events: 0, pointer: 0, key: 0 };
     this._build();
   }
 
@@ -539,24 +727,19 @@ if (typeof self !== "undefined") {
 
   Widget.prototype._build = function () {
     var o = this.o;
-    // 隐藏字段必须挂在 **light DOM**：Shadow DOM 里的 input 不参与表单提交。
     this.field = null;
     if (o.fieldName) {
-      // 先定目标 form，再插入字段：反过来（先插再判定）就留下一枚"验证过但没提交"的孤儿 input。
       var implicit = typeof this.container.closest === "function" ? this.container.closest("form") : null;
       var want = o.form ? resolveForm(o.form, this.container) : implicit;
       if (o.form && !want) {
         throw new TypeError("EpoCHA.render: form 选项没有指向当前文档里的真实 <form>");
       }
       if (!want) {
-        // 静默不提交是比报错更糟的结果：宁可接入期就炸，也不让线上"验证过了但后端收不到"。
         throw new TypeError("EpoCHA.render: fieldName 要求把字段提交出去，但容器不在任何 <form> 内。"
           + "把容器放进目标 form、用 form 选项显式关联，或设 fieldName:'' 只走 onSuccess/getResponse。");
       }
       this.field = el("input", { type: "hidden", name: o.fieldName });
       this.field.setAttribute("data-epocha-field", this.id);
-      // 容器已在目标 form 内 ⇒ 字段落进容器（跟着容器一起移动/移除）；
-      // 显式 form 关联 ⇒ 字段落进那个 form，容器可以在页面任意位置。
       (want.contains(this.container) ? this.container : want).appendChild(this.field);
     }
 
@@ -573,7 +756,34 @@ if (typeof self !== "undefined") {
       class: "lbl", id: headingId, "for": this.id + "-ans"
     }, tr(o.lang, "instruction", { length: 6 }));
     this.imgWrap = el("div", { class: "img" });
-    this.imgWrap.textContent = "…";
+    this.imgBox = el("div", { class: "qimg" });
+    this.cellWrap = el("div", { class: "cells hidden", role: "group" });
+    this.imgBox.appendChild(this.cellWrap);
+    this.pointLayer = el("div", {
+      class: "pointlayer hidden", role: "button", tabindex: "-1", id: this.id + "-point",
+      "aria-label": tr(o.lang, "pointLabel"), "aria-describedby": noteId + " " + statusId
+    });
+    this.pointMark = el("span", { class: "pointmark hidden" });
+    this.pointLayer.appendChild(this.pointMark);
+    this.imgBox.appendChild(this.pointLayer);
+    var svgNS = "http://www.w3.org/2000/svg";
+    this.aimLayer = document.createElementNS(svgNS, "svg");
+    this.aimLayer.setAttribute("class", "aimlayer hidden");
+    this.aimLayer.setAttribute("preserveAspectRatio", "none");
+    this.aimLine = document.createElementNS(svgNS, "line");
+    this.aimLine.setAttribute("class", "aimline");
+    this.aimLine.setAttribute("x1", "0");
+    this.aimLine.setAttribute("y1", "0");
+    this.aimLine.setAttribute("x2", "0");
+    this.aimLine.setAttribute("y2", "0");
+    this.aimLayer.appendChild(this.aimLine);
+    this.imgBox.appendChild(this.aimLayer);
+    this.angleDragLayer = el("div", { class: "angledrag hidden" });
+    this.imgBox.appendChild(this.angleDragLayer);
+    this.imgWrap.appendChild(this.imgBox);
+    this.imgMsg = el("p", { class: "imgmsg" }, "…");
+    this.imgWrap.appendChild(this.imgMsg);
+    this.imgEl = null;
     this.answer = el("input", {
       class: "ans", type: "text", id: this.id + "-ans", autocomplete: "off",
       autocapitalize: "characters", spellcheck: "false", maxlength: "8",
@@ -581,6 +791,56 @@ if (typeof self !== "undefined") {
       "aria-describedby": noteId + " " + statusId
     });
     this.answer.placeholder = tr(o.lang, "answerPlaceholder", { length: 6 });
+    this.pairWrap = el("div", { class: "pairs hidden" });
+    this.pairInputs = [];
+    this.pairLabels = [];
+    for (var pi = 0; pi < 2; pi++) {
+      var pid = this.id + "-p" + pi;
+      var pairLabel = el("label", { for: pid }, "");
+      var pairInput = el("input", {
+        type: "number", inputmode: "numeric", id: pid, min: "0", max: "99",
+        autocomplete: "off", "aria-required": "true",
+        "aria-describedby": noteId + " " + statusId
+      });
+      var pairRow = el("div", { class: "pairrow" });
+      pairRow.appendChild(pairLabel);
+      pairRow.appendChild(pairInput);
+      this.pairWrap.appendChild(pairRow);
+      this.pairLabels.push(pairLabel);
+      this.pairInputs.push(pairInput);
+    }
+    this.cellStatus = el("p", { class: "cellsum hidden", "aria-live": "polite" });
+    this.angleWrap = el("div", { class: "angle hidden" });
+    this.angleInput = el("input", {
+      type: "range", id: this.id + "-angle", min: "0", max: "3599", step: "1", value: "0",
+      "aria-describedby": noteId + " " + statusId
+    });
+    this.angleOut = el("output", { class: "angleout", "for": this.id + "-angle" }, "0.0°");
+    this.angleWrap.appendChild(this.angleInput);
+    this.angleWrap.appendChild(this.angleOut);
+    this.timingWrap = el("div", { class: "timing hidden" });
+    this.timingBtn = el("button", { type: "button", id: this.id + "-timing" }, tr(o.lang, "timingRecord"));
+    this.timingOut = el("span", { class: "timingout", "aria-live": "polite" }, tr(o.lang, "timingIdle"));
+    this.timingWrap.appendChild(this.timingBtn);
+    this.timingWrap.appendChild(this.timingOut);
+    this.frameWrap = el("div", { class: "frameplay hidden" });
+    this.frameToggle = el("button", { type: "button" }, tr(o.lang, "framePause"));
+    this.frameReplay = el("button", { type: "button" }, tr(o.lang, "frameReplay"));
+    this.frameWrap.appendChild(this.frameToggle);
+    this.frameWrap.appendChild(this.frameReplay);
+    this.optionsWrap = el("div", { class: "options hidden", role: "group" });
+    this.optionButtons = [];
+    this.angleCueX = null;
+    this.angleCueY = null;
+    this.angleAimLen = 0;
+    this.angleImageW = 0;
+    this.angleImageH = 0;
+    this.angleDragging = false;
+    this.anglePointer = null;
+    this.framePlaying = false;
+    this.answerMode = "text";
+    this.selection = {};
+    this.cellButtons = [];
     this.btnSubmit = el("button", { type: "button" }, tr(o.lang, "submit"));
     this.btnRefresh = el("button", { type: "button" }, tr(o.lang, "refresh"));
     this.status = el("p", { class: "st", id: statusId, role: "status", "aria-live": "polite" }, "…");
@@ -589,7 +849,13 @@ if (typeof self !== "undefined") {
 
     box.appendChild(this.heading);
     box.appendChild(this.imgWrap);
+    box.appendChild(this.optionsWrap);
+    box.appendChild(this.frameWrap);
     box.appendChild(this.answer);
+    box.appendChild(this.angleWrap);
+    box.appendChild(this.pairWrap);
+    box.appendChild(this.timingWrap);
+    box.appendChild(this.cellStatus);
     box.appendChild(this.btnSubmit);
     box.appendChild(this.btnRefresh);
     box.appendChild(this.status);
@@ -605,6 +871,24 @@ if (typeof self !== "undefined") {
     this._on(this.answer, "keydown", function (e) {
       if (e.key === "Enter") { e.preventDefault(); self.submit(); }
     });
+    for (var pj = 0; pj < this.pairInputs.length; pj++) {
+      this._on(this.pairInputs[pj], "input", function () { self._syncPairs(); });
+      this._on(this.pairInputs[pj], "change", function () { self._syncPairs(); });
+    }
+    this._on(this.angleInput, "input", function () { self._syncAngle(); });
+    this._on(this.angleInput, "change", function () { self._syncAngle(); });
+    this._on(this.pointLayer, "click", function (e) { self._pointFromEvent(e); });
+    this._on(this.pointLayer, "keydown", function (e) { self._pointKey(e); });
+    this._on(this.timingBtn, "click", function (e) { e.preventDefault(); self._recordTiming(); });
+    this._on(this.angleDragLayer, "pointerdown", function (e) { self._anglePointerDown(e); });
+    this._on(this.angleDragLayer, "pointermove", function (e) { self._anglePointerMove(e); });
+    this._on(this.angleDragLayer, "pointerup", function (e) { self._anglePointerUp(e); });
+    this._on(this.angleDragLayer, "pointercancel", function (e) { self._anglePointerUp(e); });
+    this._on(this.frameToggle, "click", function (e) { e.preventDefault(); self._toggleFrames(); });
+    this._on(this.frameReplay, "click", function (e) { e.preventDefault(); self._replayFrames(); });
+    this._on(this.host, "pointerdown", function () { self._telEvent("pointer"); });
+    this._on(this.host, "pointermove", function () { self._telEvent("pointer"); });
+    this._on(this.host, "keydown", function () { self._telEvent("key"); });
   };
 
   Widget.prototype._on = function (node, type, fn) {
@@ -612,11 +896,548 @@ if (typeof self !== "undefined") {
     this.listeners.push([node, type, fn]);
   };
 
+  Widget.prototype._off = function (node, type, fn) {
+    try { node.removeEventListener(type, fn); } catch (e) { /* 已分离 */ }
+    for (var i = 0; i < this.listeners.length; i++) {
+      var l = this.listeners[i];
+      if (l[0] === node && l[1] === type && l[2] === fn) { this.listeners.splice(i, 1); return; }
+    }
+  };
+
+  Widget.prototype._clearCells = function () {
+    for (var i = 0; i < this.cellButtons.length; i++) {
+      var b = this.cellButtons[i];
+      if (b._epochaClick) this._off(b, "click", b._epochaClick);
+    }
+    this.cellButtons = [];
+    this.selection = {};
+    clear(this.cellWrap);
+    this.cellWrap.setAttribute("class", "cells hidden");
+    this.cellStatus.setAttribute("class", "cellsum hidden");
+    this.cellStatus.textContent = "";
+  };
+
+  Widget.prototype._resetInputs = function () {
+    this._clearCells();
+    this._clearPoint();
+    this._clearAim();
+    this._clearTiming();
+    this._clearOptions();
+    this._clearFrameAnim();
+    this.answer.setAttribute("maxlength", "8");
+    this.answerMode = "text";
+    this.answer.value = "";
+    this.answer.setAttribute("class", "ans");
+    this.answer.setAttribute("aria-invalid", "false");
+    this.answer.disabled = false;
+    this.heading.setAttribute("for", this.answer.getAttribute("id"));
+    this.pairWrap.setAttribute("class", "pairs hidden");
+    this.angleWrap.setAttribute("class", "angle hidden");
+    this.optionsWrap.setAttribute("class", "options hidden");
+    this.angleInput.value = "0";
+    this.angleOut.textContent = "0.0°";
+    for (var i = 0; i < this.pairInputs.length; i++) {
+      this.pairInputs[i].value = "";
+      this.pairInputs[i].disabled = false;
+    }
+  };
+
+  Widget.prototype._clearPoint = function () {
+    if (this.pointLayer) this.pointLayer.setAttribute("class", "pointlayer hidden");
+    if (this.pointMark) this.pointMark.setAttribute("class", "pointmark hidden");
+  };
+
+  Widget.prototype._clearOptions = function () {
+    for (var i = 0; i < this.optionButtons.length; i++) {
+      var b = this.optionButtons[i];
+      if (b._epochaClick) this._off(b, "click", b._epochaClick);
+    }
+    this.optionButtons = [];
+    if (this.optionsWrap) {
+      clear(this.optionsWrap);
+      this.optionsWrap.setAttribute("class", "options hidden");
+    }
+  };
+
+  Widget.prototype._clearAim = function () {
+    if (this.aimLayer) this.aimLayer.setAttribute("class", "aimlayer hidden");
+    if (this.angleDragLayer) this.angleDragLayer.setAttribute("class", "angledrag hidden");
+    this.angleCueX = null;
+    this.angleCueY = null;
+    this.angleAimLen = 0;
+    this.angleDragging = false;
+    this.anglePointer = null;
+  };
+
+  Widget.prototype._clearTiming = function () {
+    if (this.timingWrap) this.timingWrap.setAttribute("class", "timing hidden");
+    if (this.timingOut) this.timingOut.textContent = tr(this.o.lang, "timingIdle");
+  };
+
+  Widget.prototype._clearFrameAnim = function () {
+    if (this.frameAnim) {
+      try { this.frameAnim.cancel(); } catch (e) { /* 已结束 */ }
+      this.frameAnim = null;
+    }
+    this.frameStartedAt = 0;
+    this.frameCycleMs = 0;
+    this.frameAnimated = false;
+    this.framePlaying = false;
+    if (this.frameToggle) this.frameToggle.textContent = tr(this.o.lang, "framePause");
+    this._showFrameControls(false);
+  };
+
+  Widget.prototype._showFrameControls = function (show) {
+    if (!this.frameWrap) return;
+    this.frameWrap.setAttribute("class", show ? "frameplay" : "frameplay hidden");
+    this.frameToggle.disabled = !show;
+    this.frameReplay.disabled = !show;
+  };
+
+  Widget.prototype._clearImage = function () {
+    this._clearFrameAnim();
+    if (this.frameView && this.frameView.parentNode) this.frameView.parentNode.removeChild(this.frameView);
+    this.frameView = null;
+    this._clearPoint();
+    if (this.imgEl && this.imgEl.parentNode) this.imgEl.parentNode.removeChild(this.imgEl);
+    this.imgEl = null;
+  };
+
+  Widget.prototype._showImageMessage = function (text) {
+    this._clearImage();
+    this.imgWrap.setAttribute("class", "img");
+    this.imgBox.setAttribute("class", "qimg hidden");
+    this.imgMsg.textContent = String(text);
+    this.imgMsg.setAttribute("class", "imgmsg");
+  };
+
+  Widget.prototype._showImageBox = function () {
+    this.imgWrap.setAttribute("class", "img");
+    this.imgMsg.setAttribute("class", "imgmsg hidden");
+    this.imgBox.setAttribute("class", "qimg");
+  };
+
+  Widget.prototype._syncCells = function () {
+    var keys = [];
+    for (var k in this.selection) {
+      if (Object.prototype.hasOwnProperty.call(this.selection, k)) keys.push(Number(k));
+    }
+    keys.sort(function (a, b) { return a - b; });
+    var parts = [];
+    for (var i = 0; i < keys.length; i++) parts.push(String(keys[i] + 1));
+    this.answer.value = parts.join(",");
+    this.cellStatus.textContent = tr(this.o.lang, "selectedCount", { n: keys.length });
+  };
+
+  Widget.prototype._toggleCell = function (idx, btn) {
+    var n = idx + 1;
+    if (Object.prototype.hasOwnProperty.call(this.selection, idx)) {
+      delete this.selection[idx];
+      btn.setAttribute("aria-pressed", "false");
+      this.cellStatus.textContent = tr(this.o.lang, "cellUnselected", { n: n });
+    } else {
+      this.selection[idx] = true;
+      btn.setAttribute("aria-pressed", "true");
+      this.cellStatus.textContent = tr(this.o.lang, "cellSelected", { n: n });
+    }
+    this._syncCells();
+  };
+
+  Widget.prototype._renderCells = function (q, iw, ih) {
+    this._clearCells();
+    this.answerMode = "cells";
+    this.answer.value = "";
+    this.answer.setAttribute("class", "ans hidden");
+    this.pairWrap.setAttribute("class", "pairs hidden");
+    this.cellWrap.setAttribute("class", "cells");
+    this.cellStatus.setAttribute("class", "cellsum");
+    var self = this;
+    var cols = intField(q, "grid_cols"), rows = intField(q, "grid_rows");
+    var x = intField(q, "grid_x"), y = intField(q, "grid_y");
+    var cell = intField(q, "grid_cell"), gap = intField(q, "grid_gap");
+    for (var r = 0; r < rows; r++) {
+      for (var c = 0; c < cols; c++) {
+        var idx = r * cols + c, n = idx + 1;
+        var left = (x + c * (cell + gap)) / iw * 100;
+        var top = (y + r * (cell + gap)) / ih * 100;
+        var w = cell / iw * 100, h = cell / ih * 100;
+        var btn = el("button", {
+          type: "button", class: "cell", "data-cell": String(n),
+          "aria-label": tr(this.o.lang, "cellLabel", { n: n }),
+          "aria-pressed": "false", "aria-describedby": this.note.getAttribute("id") + " " + this.status.getAttribute("id"),
+          style: "left:" + left + "%;top:" + top + "%;width:" + w + "%;height:" + h + "%"
+        });
+        var fn = (function (cellIdx, button) {
+          return function (e) { e.preventDefault(); self._toggleCell(cellIdx, button); };
+        })(idx, btn);
+        btn._epochaClick = fn;
+        this._on(btn, "click", fn);
+        this.cellButtons.push(btn);
+        this.cellWrap.appendChild(btn);
+      }
+    }
+    this.cellStatus.textContent = tr(this.o.lang, "selectedCount", { n: 0 });
+  };
+
+  Widget.prototype._renderPairs = function (q) {
+    this._clearCells();
+    this.answerMode = "pairs";
+    this.answer.value = "";
+    this.answer.setAttribute("class", "ans hidden");
+    this.cellWrap.setAttribute("class", "cells hidden");
+    this.cellStatus.setAttribute("class", "cellsum hidden");
+    this.pairWrap.setAttribute("class", "pairs");
+    var min = intField(q, "min"), max = intField(q, "max");
+    for (var i = 0; i < 2; i++) {
+      var zh = q.labels_zh[i], en = q.labels_en[i];
+      this.pairLabels[i].textContent = this.o.lang === "zh-CN" ? (zh || en) : (en || zh);
+      this.pairInputs[i].value = "";
+      this.pairInputs[i].setAttribute("min", String(min));
+      this.pairInputs[i].setAttribute("max", String(max));
+      this.pairInputs[i].disabled = false;
+    }
+    this.heading.setAttribute("for", this.pairInputs[0].getAttribute("id"));
+  };
+
+  Widget.prototype._syncPairs = function () {
+    var a = String(this.pairInputs[0].value || "").trim();
+    var b = String(this.pairInputs[1].value || "").trim();
+    var min = Number(this.pairInputs[0].getAttribute("min"));
+    var max = Number(this.pairInputs[0].getAttribute("max"));
+    var aOK = /^[0-9]{1,2}$/.test(a) && Number(a) >= min && Number(a) <= max;
+    var bOK = /^[0-9]{1,2}$/.test(b) && Number(b) >= min && Number(b) <= max;
+    this.answer.value = aOK && bOK ? a + "," + b : "";
+    this.pairInputs[0].setAttribute("aria-invalid", a !== "" && !aOK ? "true" : "false");
+    this.pairInputs[1].setAttribute("aria-invalid", b !== "" && !bOK ? "true" : "false");
+  };
+
+  Widget.prototype._renderAngle = function (q, iw, ih) {
+    this._clearCells();
+    this._clearPoint();
+    this._clearAim();
+    this._clearTiming();
+    this.answerMode = "angle";
+    this.answer.value = "";
+    this.answer.setAttribute("class", "ans hidden");
+    this.pairWrap.setAttribute("class", "pairs hidden");
+    this.angleWrap.setAttribute("class", "angle");
+    var min = intField(q, "angle_min"), max = intField(q, "angle_max"), step = intField(q, "angle_step");
+    this.angleInput.setAttribute("min", String(min));
+    this.angleInput.setAttribute("max", String(max));
+    this.angleInput.setAttribute("step", String(step));
+    this.angleInput.value = String(min);
+    var cueX = intField(q, "cue_x"), cueY = intField(q, "cue_y"), aimLen = intField(q, "aim_len");
+    if (cueX !== null && cueY !== null && aimLen !== null) {
+      this.angleCueX = cueX;
+      this.angleCueY = cueY;
+      this.angleAimLen = aimLen;
+      this.angleImageW = iw;
+      this.angleImageH = ih;
+      this.aimLayer.setAttribute("viewBox", "0 0 " + iw + " " + ih);
+      this.aimLayer.setAttribute("class", "aimlayer");
+      this.angleDragLayer.setAttribute("class", "angledrag");
+    }
+    this._syncAngle();
+    this.heading.textContent = promptText(q, this.o.lang);
+    this.heading.setAttribute("for", this.angleInput.getAttribute("id"));
+    this.note.textContent = tr(this.o.lang, "noteAngle");
+  };
+
+  Widget.prototype._syncAngle = function () {
+    var v = Number(this.angleInput.value);
+    if (!isFinite(v)) v = 0;
+    this.answer.value = String(v);
+    this.angleOut.textContent = (v / 10).toFixed(1) + "°";
+    this.angleInput.setAttribute("aria-valuetext", this.angleOut.textContent);
+    if (this.angleCueX !== null && this.angleImageW > 0 && this.angleImageH > 0) {
+      var rad = v / 10 * Math.PI / 180;
+      this.aimLine.setAttribute("x1", String(this.angleCueX));
+      this.aimLine.setAttribute("y1", String(this.angleCueY));
+      this.aimLine.setAttribute("x2", String(this.angleCueX + Math.cos(rad) * this.angleAimLen));
+      this.aimLine.setAttribute("y2", String(this.angleCueY + Math.sin(rad) * this.angleAimLen));
+    }
+  };
+
+  Widget.prototype._angleFromPointer = function (ev) {
+    if (this.destroyed || this.state !== STATES.READY || this.answerMode !== "angle") return;
+    if (this.angleCueX === null || !this.angleImageW || !this.angleImageH) return;
+    var rect = this.imgBox.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    var x = (ev.clientX - rect.left) / rect.width * this.angleImageW;
+    var y = (ev.clientY - rect.top) / rect.height * this.angleImageH;
+    var dx = x - this.angleCueX, dy = y - this.angleCueY;
+    if (!dx && !dy) return;
+    var deg = Math.atan2(dy, dx) * 180 / Math.PI;
+    if (deg < 0) deg += 360;
+    this.angleInput.value = String(Math.round(deg * 10) % 3600);
+    this._syncAngle();
+  };
+
+  Widget.prototype._anglePointerDown = function (ev) {
+    if (this.destroyed || this.state !== STATES.READY || this.answerMode !== "angle") return;
+    this.angleDragging = true;
+    this.anglePointer = ev.pointerId;
+    try { this.angleDragLayer.setPointerCapture(ev.pointerId); } catch (e) { /* 指针已释放 */ }
+    this._angleFromPointer(ev);
+    ev.preventDefault();
+  };
+
+  Widget.prototype._anglePointerMove = function (ev) {
+    if (!this.angleDragging || this.anglePointer !== ev.pointerId) return;
+    this._angleFromPointer(ev);
+    ev.preventDefault();
+  };
+
+  Widget.prototype._anglePointerUp = function (ev) {
+    if (this.anglePointer !== ev.pointerId) return;
+    this.angleDragging = false;
+    this.anglePointer = null;
+    try { this.angleDragLayer.releasePointerCapture(ev.pointerId); } catch (e) { /* 已释放 */ }
+  };
+
+  Widget.prototype._renderPoint = function (q) {
+    this._clearCells();
+    this._clearAim();
+    this._clearTiming();
+    this.answerMode = "point";
+    this.answer.value = "";
+    this.answer.setAttribute("class", "ans hidden");
+    this.pairWrap.setAttribute("class", "pairs hidden");
+    this.angleWrap.setAttribute("class", "angle hidden");
+    this.pointLayer.setAttribute("class", "pointlayer");
+    this.pointMark.setAttribute("class", "pointmark hidden");
+    this.pointLayer.setAttribute("aria-label", tr(this.o.lang, "pointLabel"));
+    this.heading.textContent = promptText(q, this.o.lang);
+    this.heading.removeAttribute("for");
+    this.pointLayer.setAttribute("aria-labelledby", this.heading.getAttribute("id"));
+    this.note.textContent = tr(this.o.lang, "notePoint");
+  };
+
+  Widget.prototype._renderTextOptions = function (q) {
+    this._clearCells();
+    this._clearPoint();
+    this._clearAim();
+    this._clearTiming();
+    this._clearOptions();
+    this._showFrameControls(false);
+    this.answerMode = "options";
+    this.answer.value = "";
+    this.answer.setAttribute("class", "ans hidden");
+    this.pairWrap.setAttribute("class", "pairs hidden");
+    this.angleWrap.setAttribute("class", "angle hidden");
+    this.timingWrap.setAttribute("class", "timing hidden");
+    this.imgWrap.setAttribute("class", "img hidden");
+    this.imgMsg.setAttribute("class", "imgmsg hidden");
+    this.optionsWrap.setAttribute("class", "options");
+    this.optionsWrap.setAttribute("aria-labelledby", this.heading.getAttribute("id"));
+    this.heading.textContent = promptText(q, this.o.lang);
+    this.heading.removeAttribute("for");
+    this.note.textContent = tr(this.o.lang, "noteAccessible");
+    var self = this;
+    for (var i = 0; i < q.options.length; i++) {
+      var o = q.options[i];
+      var label = self.o.lang === "zh-CN" ? (o.label_zh || o.label_en) : (o.label_en || o.label_zh);
+      var btn = el("button", { type: "button", class: "opt", "aria-pressed": "false" });
+      btn.textContent = o.id + ". " + label;
+      var fn = (function (opt, button) {
+        return function (e) {
+          e.preventDefault();
+          if (self.state !== STATES.READY) return;
+          self.answer.value = opt.id;
+          for (var k = 0; k < self.optionButtons.length; k++) {
+            self.optionButtons[k].setAttribute("aria-pressed", self.optionButtons[k] === button ? "true" : "false");
+          }
+        };
+      })(o, btn);
+      btn._epochaClick = fn;
+      this._on(btn, "click", fn);
+      this.optionButtons.push(btn);
+      this.optionsWrap.appendChild(btn);
+    }
+  };
+
+  Widget.prototype._setPoint = function (x, y) {
+    x = Math.max(0, Math.min(999, Math.round(x)));
+    y = Math.max(0, Math.min(999, Math.round(y)));
+    this.answer.value = x + "," + y;
+    this.pointMark.setAttribute("class", "pointmark");
+    this.pointMark.style.left = (x / 999 * 100) + "%";
+    this.pointMark.style.top = (y / 999 * 100) + "%";
+    this.pointLayer.setAttribute("aria-label", tr(this.o.lang, "pointSelected", { x: x, y: y }));
+  };
+
+  Widget.prototype._pointFromEvent = function (ev) {
+    if (this.destroyed || this.state !== STATES.READY || this.answerMode !== "point") return;
+    ev.preventDefault();
+    var rect = this.imgBox.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    this._setPoint(
+      (ev.clientX - rect.left) / rect.width * 999,
+      (ev.clientY - rect.top) / rect.height * 999
+    );
+  };
+
+  Widget.prototype._pointKey = function (ev) {
+    if (this.destroyed || this.state !== STATES.READY || this.answerMode !== "point") return;
+    var cur = String(this.answer.value || "500,500").split(",");
+    var x = Number(cur[0]), y = Number(cur[1]);
+    if (!isFinite(x) || !isFinite(y)) { x = 500; y = 500; }
+    var step = ev.shiftKey ? 1 : 10;
+    var handled = true;
+    switch (ev.key) {
+      case "ArrowLeft": x -= step; break;
+      case "ArrowRight": x += step; break;
+      case "ArrowUp": y -= step; break;
+      case "ArrowDown": y += step; break;
+      case "Home": x = 500; y = 500; break;
+      default: handled = false;
+    }
+    if (!handled) return;
+    ev.preventDefault();
+    this._setPoint(x, y);
+  };
+
+  Widget.prototype._renderTiming = function (q) {
+    this._clearCells();
+    this._clearPoint();
+    this.answerMode = "timing";
+    this.answer.value = "";
+    this.answer.setAttribute("class", "ans hidden");
+    this.angleWrap.setAttribute("class", "angle hidden");
+    this.pairWrap.setAttribute("class", "pairs hidden");
+    this.timingWrap.setAttribute("class", "timing");
+    this.timingOut.textContent = tr(this.o.lang, "timingIdle");
+    this._showFrameControls(false);
+    this.heading.textContent = promptText(q, this.o.lang);
+    this.heading.setAttribute("for", this.timingBtn.getAttribute("id"));
+    this.note.textContent = tr(this.o.lang, "noteTiming");
+    if (!this.frameAnimated) {
+      this._fail("motion-required", "errMotionRequired", null, true);
+      return false;
+    }
+    return true;
+  };
+
+  Widget.prototype._recordTiming = function () {
+    if (this.destroyed || this.state !== STATES.READY || this.answerMode !== "timing") return;
+    if (!this.frameStartedAt) return;
+    var elapsed = Date.now() - this.frameStartedAt;
+    if (this.frameCycleMs > 0) elapsed = elapsed % this.frameCycleMs;
+    var ms = Math.max(0, Math.min(60000, Math.round(elapsed)));
+    this.answer.value = String(ms);
+    this.timingOut.textContent = tr(this.o.lang, "timingRecorded", { ms: ms });
+  };
+
+  Widget.prototype._renderFrames = function (q, iw, ih, alt) {
+    if (!validFrames(q, iw, ih)) { this._imageFailed(); return false; }
+    this._clearImage();
+    var count = intField(q, "frame_count"), cols = intField(q, "frame_cols");
+    var rows = intField(q, "frame_rows"), ms = intField(q, "frame_ms");
+    var view = el("div", { class: "frameview", role: "img", "aria-label": alt });
+    view.style.width = iw + "px";
+    view.style.height = ih + "px";
+    view.style.backgroundImage = "url(data:" + q.image_mime + ";base64," + q.image_base64 + ")";
+    view.style.backgroundSize = (iw * cols) + "px " + (ih * rows) + "px";
+    this.frameView = view;
+    this.imgBox.appendChild(view);
+    this._showImageBox();
+
+    var reduced = global.matchMedia && global.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduced) {
+      this.frameAnimated = false;
+      this.frameStartedAt = 0;
+      this.frameCycleMs = 0;
+      this._showFrameControls(false);
+      return true;
+    }
+    if (typeof view.animate !== "function") { this._imageFailed(); return false; }
+    var keyframes = [];
+    for (var f = 0; f < count; f++) {
+      keyframes.push({
+        backgroundPosition: (-(f % cols) * iw) + "px " + (-Math.floor(f / cols) * ih) + "px",
+        offset: f / count
+      });
+    }
+    var anim;
+    try {
+      anim = view.animate(keyframes, {
+        duration: count * ms,
+        iterations: q.frame_loop ? Infinity : 1,
+        easing: "steps(1, end)"
+      });
+    } catch (e) { this._imageFailed(); return false; }
+    this.frameAnim = anim;
+    this.frameAnimated = true;
+    this.frameStartedAt = Date.now();
+    this.frameCycleMs = q.frame_loop ? count * ms : 0;
+    this.framePlaying = true;
+    this.frameToggle.textContent = tr(this.o.lang, "framePause");
+    this._showFrameControls(true);
+    return true;
+  };
+
+  Widget.prototype._toggleFrames = function () {
+    if (!this.frameAnim || !this.frameAnimated || this.answerMode === "timing") return;
+    if (this.frameAnim.playState === "paused") {
+      this.frameAnim.play();
+      this.framePlaying = true;
+      this.frameToggle.textContent = tr(this.o.lang, "framePause");
+    } else {
+      this.frameAnim.pause();
+      this.framePlaying = false;
+      this.frameToggle.textContent = tr(this.o.lang, "framePlay");
+    }
+  };
+
+  Widget.prototype._replayFrames = function () {
+    if (!this.frameAnim || !this.frameAnimated || this.answerMode === "timing") return;
+    try {
+      this.frameAnim.currentTime = 0;
+      this.frameAnim.play();
+      this.frameStartedAt = Date.now();
+      this.framePlaying = true;
+      this.frameToggle.textContent = tr(this.o.lang, "framePause");
+    } catch (e) { /* 动画已结束 */ }
+  };
+
+  Widget.prototype._renderQuestionMedia = function (q, iw, ih, alt) {
+    if (q.render_mode === "sprite_sheet") return this._renderFrames(q, iw, ih, alt);
+    return this._renderImage(q, iw, ih, alt);
+  };
+
+  Widget.prototype._telBegin = function () {
+    this.tel = { start: Date.now(), first: 0, events: 0, pointer: 0, key: 0 };
+  };
+
+  Widget.prototype._telEvent = function (kind) {
+    if (this.state !== STATES.READY || !this.tel || !this.tel.start) return;
+    if (this.tel.events >= 10000) return;
+    this.tel.events++;
+    if (!this.tel.first) this.tel.first = Math.max(0, Date.now() - this.tel.start);
+    if (kind === "pointer") this.tel.pointer++;
+    else this.tel.key++;
+  };
+
+  Widget.prototype._telemetrySummary = function () {
+    var t = this.tel || {};
+    var total = t.start ? Math.max(0, Date.now() - t.start) : 0;
+    var events = Math.min(10000, Math.max(0, t.events || 0));
+    var pointer = Math.min(events, Math.max(0, t.pointer || 0));
+    var key = Math.min(events - pointer, Math.max(0, t.key || 0));
+    return {
+      total_ms: total,
+      first_input_ms: Math.min(total, Math.max(0, t.first || 0)),
+      event_count: events,
+      pointer_events: pointer,
+      key_events: key,
+      focus_blur: 0
+    };
+  };
+
   Widget.prototype._setState = function (next) {
     var my = this.gen;
     this.state = next;
     if (this.o.onState) { try { this.o.onState(next, this.id); } catch (e) { /* 回调异常不影响组件 */ } }
-    // 宿主可能在 onState 中同步 reset/refresh/destroy，旧转换必须到此停止。
     return !this.destroyed && my === this.gen && this.state === next;
   };
 
@@ -631,23 +1452,46 @@ if (typeof self !== "undefined") {
     this._clearRetry();
     this._clearDeadline();
     this._terminateWorker();
+    this._clearFrameAnim();
     this.challenge = null;
     this._setToken("");
     if (!this._setState(STATES.ERROR)) return;
     this._say(tr(this.o.lang, i18nKey, vars), "err");
     this.btnSubmit.disabled = true;
     this.btnRefresh.disabled = false;
-    this.answer.disabled = true;
+    this._setInputsEnabled(false);
     this.answer.setAttribute("aria-invalid", "true");
     var err = { code: code, message: tr(this.o.lang, i18nKey, vars), retryable: !!retryable, widgetId: this.id };
     if (this.o.onError) { try { this.o.onError(err); } catch (e) { /* 同上 */ } }
     return err;
   };
 
+  Widget.prototype._setInputsEnabled = function (enabled) {
+    this.answer.disabled = !(enabled && this.answerMode === "text");
+    for (var i = 0; i < this.pairInputs.length; i++) {
+      this.pairInputs[i].disabled = !(enabled && this.answerMode === "pairs");
+    }
+    for (var j = 0; j < this.cellButtons.length; j++) {
+      this.cellButtons[j].disabled = !(enabled && this.answerMode === "cells");
+    }
+    this.angleInput.disabled = !(enabled && this.answerMode === "angle");
+    this.timingBtn.disabled = !(enabled && this.answerMode === "timing");
+    for (var oi = 0; oi < this.optionButtons.length; oi++) {
+      this.optionButtons[oi].disabled = !(enabled && this.answerMode === "options");
+    }
+    this.angleDragLayer.style.pointerEvents = (enabled && this.answerMode === "angle") ? "auto" : "none";
+    var framesOn = enabled && this.frameAnimated && this.answerMode !== "timing";
+    this.frameToggle.disabled = !framesOn;
+    this.frameReplay.disabled = !framesOn;
+    var pointOn = enabled && this.answerMode === "point";
+    this.pointLayer.setAttribute("tabindex", pointOn ? "0" : "-1");
+    this.pointLayer.setAttribute("aria-disabled", pointOn ? "false" : "true");
+  };
+
   Widget.prototype._enable = function (busy) {
     this.btnSubmit.disabled = !busy;
     this.btnRefresh.disabled = !busy;
-    this.answer.disabled = !busy;
+    this._setInputsEnabled(busy);
   };
 
   Widget.prototype._clearDeadline = function () {
@@ -663,8 +1507,6 @@ if (typeof self !== "undefined") {
     if (this.retryTimer) { global.clearTimeout(this.retryTimer); this.retryTimer = 0; }
   };
 
-  // 客户端倒计时只为体验；服务端才是最终裁决（过期后库里一样拒绝）。
-  // 服务端没给 expires_in 时**不猜**固定两分钟：不设倒计时，等服务端判定。
   Widget.prototype._armDeadline = function (deadlineEpoch, onExpire) {
     var self = this, my = this.gen;
     this._clearDeadline();
@@ -695,20 +1537,23 @@ if (typeof self !== "undefined") {
     this.challenge = null;
     this._clearDeadline();
     this._terminateWorker();
+    this._clearFrameAnim();
     if (!this._setState(STATES.EXPIRED)) return;
     this._say(tr(this.o.lang, "expired"), "err");
     this.btnSubmit.disabled = true;
     this.btnRefresh.disabled = false;
+    this._setInputsEnabled(false);
   };
 
-  // 过期必须**清掉 token**，不能只改 UI：否则 getResponse() 还能拿到一个已作废的值。
   Widget.prototype._expireToken = function () {
     this._setToken("");
     this.challenge = null;
     this._clearDeadline();
+    this._clearFrameAnim();
     if (!this._setState(STATES.EXPIRED)) return;
     this._say(tr(this.o.lang, "expired"), "err");
     this.btnRefresh.disabled = false;
+    this._setInputsEnabled(false);
     if (this.o.onExpired) { try { this.o.onExpired(this.id); } catch (e) { /* 同上 */ } }
   };
 
@@ -729,16 +1574,19 @@ if (typeof self !== "undefined") {
     this.challenge = null;
     this._setToken("");
     this.successFired = false;
-    this.answer.value = "";
-    this.answer.setAttribute("aria-invalid", "false");
-    clear(this.imgWrap);
-    this.imgWrap.textContent = "…";
+    this._resetInputs();
+    this.answer.setAttribute("class", "ans hidden");
+    this._showImageMessage("…");
     if (!this._setState(STATES.LOADING)) return;
     this._say("…", "busy");
     this._enable(false);
 
     var loadStartedAt = Date.now();
-    this._request("/api/challenge", { site_key: o.siteKey, lang: o.lang })
+    this.tel = { start: 0, first: 0, events: 0, pointer: 0, key: 0 };
+    this._request("/api/challenge", {
+      site_key: o.siteKey, lang: o.lang, session: this.session,
+      accessibility: o.accessibility === true, device: deviceHints()
+    })
       .then(function (r) {
         if (self.destroyed || my !== self.gen) return;      // 晚到的响应不能覆盖新题
         if (!r.ok) { self._handleHttpFailure(r); return; }
@@ -750,14 +1598,61 @@ if (typeof self !== "undefined") {
           self._fail("bad-response", "errBadResponse", { why: "mode" }, false); return;
         }
         var q = j.question;
-        if (q.media !== "image" || q.image_mime !== MIME_PNG || !base64Valid(q.image_base64 || "")
-            || (q.image_base64 || "").length > MAX_IMAGE_B64_CHARS
-            || !Number.isInteger(q.length) || q.length < 1 || q.length > 32) {
-          self._fail("image-unusable", "errImageUnusable", null, true); return;
+        var at = String(q.answer_type || "text");
+        var media = q.media === undefined ? (Array.isArray(q.options) ? "text" : "image") : String(q.media);
+        var iw = 0, ih = 0;
+        if (media === "image") {
+          if (q.image_mime !== MIME_PNG || !base64Valid(q.image_base64 || "")
+              || (q.image_base64 || "").length > MAX_IMAGE_B64_CHARS) {
+            self._fail("image-unusable", "errImageUnusable", null, true); return;
+          }
+          iw = Number(q.image_width) || 0;
+          ih = Number(q.image_height) || 0;
+          if (iw < 1 || ih < 1 || iw > 640 || ih > 640) {
+            self._fail("image-unusable", "errImageUnusable", null, true); return;
+          }
+        } else if (media === "text") {
+          if (at !== "text" || !validTextOptions(q)) {
+            self._fail("bad-response", "errBadResponse", { why: "text-options" }, false); return;
+          }
+        } else {
+          self._fail("bad-response", "errBadResponse", { why: "media" }, false); return;
         }
-        var iw = Number(q.image_width) || 0, ih = Number(q.image_height) || 0;
-        if (iw < 1 || ih < 1 || iw > 640 || ih > 256) {
-          self._fail("image-unusable", "errImageUnusable", null, true); return;
+        if (at !== "text" && at !== "cells" && at !== "pairs"
+            && at !== "angle" && at !== "point" && at !== "timing") {
+          self._fail("bad-response", "errBadResponse", { why: "answer_type" }, false); return;
+        }
+        var rm = q.render_mode === undefined ? "static" : String(q.render_mode);
+        if (media === "image") {
+          if (rm !== "static" && rm !== "sprite_sheet") {
+            self._fail("bad-response", "errBadResponse", { why: "render_mode" }, false); return;
+          }
+          if (rm === "sprite_sheet" && !validFrames(q, iw, ih)) {
+            self._fail("bad-response", "errBadResponse", { why: "frames" }, false); return;
+          }
+          if (at === "timing" && rm !== "sprite_sheet") {
+            self._fail("bad-response", "errBadResponse", { why: "timing" }, false); return;
+          }
+        }
+        if (at === "text" && media === "image"
+            && (!Number.isInteger(q.length) || q.length < 1 || q.length > 32)) {
+          self._fail("bad-response", "errBadResponse", { why: "length" }, false); return;
+        }
+        if (at === "cells" && !validGrid(q, iw, ih)) {
+          self._fail("bad-response", "errBadResponse", { why: "grid" }, false); return;
+        }
+        if (at === "pairs" && !validPairs(q)) {
+          self._fail("bad-response", "errBadResponse", { why: "pairs" }, false); return;
+        }
+        if (at === "angle" && !validAngle(q)) {
+          self._fail("bad-response", "errBadResponse", { why: "angle" }, false); return;
+        }
+        if (at === "angle" && (q.cue_x !== undefined || q.cue_y !== undefined || q.aim_len !== undefined)
+            && !validAim(q, iw, ih)) {
+          self._fail("bad-response", "errBadResponse", { why: "aim" }, false); return;
+        }
+        if (at === "point" && !validPoint(q)) {
+          self._fail("bad-response", "errBadResponse", { why: "point" }, false); return;
         }
         self.challenge = {
           token: j.token, pow: j.pow, question: q,
@@ -770,17 +1665,43 @@ if (typeof self !== "undefined") {
             return;
           }
         }
-        self._renderImage(q, iw, ih);
-        self.heading.textContent = tr(o.lang, "instruction", { length: q.length });
-        self.note.textContent = tr(o.lang, "charsetNote", { charset: q.charset || "—" });
-        self.answer.placeholder = tr(o.lang, "answerPlaceholder", { length: q.length });
-        // worker 在**领题成功后**就建立，而不是等用户按下提交：
-        // CSP 的 worker-src 不允许 blob: 时，构造 Worker 会抛 SecurityError，
-        // 早点探测能让环境不兼容在"还没输入答案"时就报出来，而不是等用户做完题。
-        // 每个实例最多一个 worker（this.worker 复用），不存在"并发多个无上限计算 worker"。
+        if (at === "text") {
+          if (media === "text") {
+            self._renderTextOptions(q);
+          } else {
+            self.answer.setAttribute("class", "ans");
+            if (!self._renderQuestionMedia(q, iw, ih, tr(o.lang, "imageAlt", { length: q.length }))) return;
+            self.heading.textContent = tr(o.lang, "instruction", { length: q.length });
+            self.heading.setAttribute("for", self.answer.getAttribute("id"));
+            self.note.textContent = tr(o.lang, "charsetNote", { charset: q.charset || "—" });
+            if (Number(q.tolerant) > 0) self.note.textContent += " " + tr(o.lang, "tolerantNote");
+            self.answer.placeholder = tr(o.lang, "answerPlaceholder", { length: q.length });
+          }
+        } else if (at === "cells") {
+          if (!self._renderQuestionMedia(q, iw, ih, tr(o.lang, "imageAltCells"))) return;
+          self._renderCells(q, iw, ih);
+          self.heading.textContent = promptText(q, o.lang);
+          self.heading.setAttribute("for", self.answer.getAttribute("id"));
+          self.note.textContent = tr(o.lang, "noteCells");
+        } else if (at === "pairs") {
+          if (!self._renderQuestionMedia(q, iw, ih, tr(o.lang, "imageAltPairs"))) return;
+          self._renderPairs(q);
+          self.heading.textContent = promptText(q, o.lang);
+          self.note.textContent = tr(o.lang, "notePairs");
+        } else if (at === "angle") {
+          if (!self._renderQuestionMedia(q, iw, ih, tr(o.lang, "imageAltAngle"))) return;
+          self._renderAngle(q, iw, ih);
+        } else if (at === "point") {
+          if (!self._renderQuestionMedia(q, iw, ih, tr(o.lang, "imageAltPoint"))) return;
+          self._renderPoint(q);
+        } else {
+          if (!self._renderQuestionMedia(q, iw, ih, tr(o.lang, "imageAltTiming"))) return;
+          if (!self._renderTiming(q)) return;
+        }
         if (!self._ensureWorker()) return;
         self._enable(true);
         if (!self._setState(STATES.READY)) return;
+        self._telBegin();
         self._say(tr(o.lang, "ready"), "idle");
         self.autoRetry = 0;
         if (self.challenge.expires > 0) {
@@ -795,24 +1716,26 @@ if (typeof self !== "undefined") {
 
   Widget.prototype._imageFailed = function () {
     if (this.destroyed) return;
-    clear(this.imgWrap);
-    this.imgWrap.textContent = tr(this.o.lang, "errImageUnusable");
+    this._showImageMessage(tr(this.o.lang, "errImageUnusable"));
     this._fail("image-unusable", "errImageUnusable", null, true);
   };
 
-  Widget.prototype._renderImage = function (q, iw, ih) {
-    clear(this.imgWrap);
+  Widget.prototype._renderImage = function (q, iw, ih, alt) {
+    this._clearImage();
     var img = el("img", {
       src: "data:" + q.image_mime + ";base64," + q.image_base64,
-      alt: tr(this.o.lang, "imageAlt", { length: q.length }),
+      alt: alt,
       width: String(iw), height: String(ih), decoding: "async"
     });
     var self = this, my = this.gen;
     img.addEventListener("error", function () {
-      if (self.destroyed || my !== self.gen || img.parentNode !== self.imgWrap) return;
+      if (self.destroyed || my !== self.gen || img.parentNode !== self.imgBox) return;
       self._imageFailed();
     });
-    this.imgWrap.appendChild(img);
+    this.imgEl = img;
+    this.imgBox.appendChild(img);
+    this._showImageBox();
+    return true;
   };
 
   Widget.prototype._handleHttpFailure = function (r) {
@@ -874,7 +1797,6 @@ if (typeof self !== "undefined") {
       self.inflight = request;
       timer = global.setTimeout(function () {
         if (self.destroyed || my !== self.gen || self.inflight !== request) return;
-        // abort 不保证远端未消费；先结算超时，迟到的成功也不能重新兑现或自动重发。
         if (!finish({ code: "timeout", key: "errNetwork" })) return;
         try { controller.abort(); } catch (e) { /* noop */ }
       }, self.o.fetchTimeoutMs);
@@ -889,8 +1811,6 @@ if (typeof self !== "undefined") {
 
   Widget.prototype._post = function (path, payload, signal) {
     var o = this.o;
-    // URL 上带 site_key：JSON 请求会触发 CORS 预检，而预检看不见请求体。
-    // 服务端另外规定：URL 与体里的 site_key 同时出现时必须一致。
     var url = o.apiBase + path + "?site_key=" + encodeURIComponent(o.siteKey);
     return global.fetch(url, {
       method: "POST",
@@ -908,11 +1828,6 @@ if (typeof self !== "undefined") {
     });
   };
 
-  // --- Worker ---
-  //
-  // 一个实例**最多一个** worker（this.worker），一次**最多一个**在算的 job（this.pending）。
-  // 消息分发只在 worker 创建时挂**一个**监听器：solve/重试都不再加，
-  // 否则反复验证会把同一个 worker 挂满处理器。
 
   Widget.prototype._ensureWorker = function () {
     if (this.worker) return this.worker;
@@ -932,8 +1847,6 @@ if (typeof self !== "undefined") {
         this.worker = new global.Worker(this.workerBlobUrl);        // 方案 A：需要 worker-src blob:
       }
     } catch (e) {
-      // CSP 的 worker-src 不允许 blob: 时构造 Worker 会抛 SecurityError。
-      // 这里明确失败——绝不"那就在主线程算"，也绝不"当作已通过"。
       this.worker = null;
       if (this.workerBlobUrl) { try { global.URL.revokeObjectURL(this.workerBlobUrl); } catch (e2) { /* noop */ } }
       this.workerBlobUrl = "";
@@ -957,9 +1870,6 @@ if (typeof self !== "undefined") {
     if (!m || !m.job) return;
     var p = this.pending[m.job];
     if (!p) return;
-    // 非终态消息**不**摘登记：started/progress 之后还必须能让同 job 的终态消息找到它。
-    // 之前这里无条件 delete，于是 "started" 把 job 摘掉、真正的 "solved" 落地时无处可寻，
-    // 组件就卡在 solving 直到超时（浏览器闭环测试抓到的第二个真实缺陷）。
     if (m.type === "started" || m.type === "progress") { p.settle(m); return; }
     delete this.pending[m.job];          // 终态：一次性结算
     p.settle(m);
@@ -980,9 +1890,6 @@ if (typeof self !== "undefined") {
     }
   };
 
-  // solvePow 返回 Promise：解出 → nonce 字符串；失败/取消 → reject({code, key})。
-  // 取消一律归一到 code="cancelled"；调用方另外按世代（this.gen）再丢一次，
-  // 于是"被取消的旧计算晚到"不可能覆盖新题或触发成功回调。
   Widget.prototype._solvePow = function (pow, onProgress) {
     var self = this, o = this.o;
     var worker = this._ensureWorker();
@@ -990,9 +1897,6 @@ if (typeof self !== "undefined") {
 
     var job = ++this.jobSeq;
     var bits = Number(pow.bits);
-    // 搜索预算：期望 2^bits 次，给 16 倍余量（覆盖泊松长尾），且不超过服务端 nonce 上限 1e12。
-    // 预算 = 期望次数的 64 倍（泊松尾 e^-64 ⇒ 正常难度下"预算耗尽"几乎不可能发生）；
-    // 上限另受 o.powMaxTries 与服务端 nonce 上界 1e12 约束。
     var maxTries = Math.min(o.powMaxTries || 5e7, Math.pow(2, bits + 6), 1e12);
     if (!(maxTries >= 1)) maxTries = 1;
 
@@ -1022,8 +1926,6 @@ if (typeof self !== "undefined") {
       self.pending[job] = {
         cancel: cancel,
         settle: function (m) {
-          // 只有终态消息才结算。worker 会先发 "started"，再发 0..n 条 "progress"：
-          // 把这两类当终态处理会把一次正常求解立刻判成失败（本条由浏览器闭环测试抓到）。
           if (m.type === "started") return;
           if (m.type === "progress") {
             var now = Date.now();
@@ -1064,7 +1966,13 @@ if (typeof self !== "undefined") {
     var val = String(this.answer.value || "").trim();
     if (!val) {
       this.answer.setAttribute("aria-invalid", "true");
-      this._say(tr(o.lang, "errInvalidRequest"), "err");
+      if (this.answerMode === "cells") this._say(tr(o.lang, "errIncompleteSelection"), "err");
+      else if (this.answerMode === "pairs") this._say(tr(o.lang, "errIncompletePairs"), "err");
+      else if (this.answerMode === "angle") this._say(tr(o.lang, "errIncompleteAngle"), "err");
+      else if (this.answerMode === "point") this._say(tr(o.lang, "errIncompletePoint"), "err");
+      else if (this.answerMode === "timing") this._say(tr(o.lang, "errIncompleteTiming"), "err");
+      else if (this.answerMode === "options") this._say(tr(o.lang, "errIncompleteOption"), "err");
+      else this._say(tr(o.lang, "errInvalidRequest"), "err");
       return;
     }
     var my = this.gen;
@@ -1084,7 +1992,8 @@ if (typeof self !== "undefined") {
       self._say(tr(o.lang, "submitting"), "busy");
       redeemStartedAt = Date.now();
       return self._request("/api/redeem", {
-        token: challenge.token, pow_nonce: nonce, answer: val
+        token: challenge.token, pow_nonce: nonce, answer: val,
+        telemetry: self._telemetrySummary()
       }).then(function (r) {
         if (self.destroyed || my !== self.gen) return;
         if (!r.ok) { self._handleRedeemFailure(r); return; }
@@ -1126,7 +2035,6 @@ if (typeof self !== "undefined") {
     var codes = (r.json && r.json["error-codes"]) || [];
     var code = codes.length ? String(codes[0]) : "";
     if (code === "invalid-challenge") {
-      // 答错或已被终结：这张题不可再用，且**必须**清空任何已存在的 token。
       this._setToken("");
       if (!this._setState(STATES.ERROR)) return;
       this._say(tr(this.o.lang, "errInvalidChallenge"), "err");
@@ -1163,13 +2071,11 @@ if (typeof self !== "undefined") {
     this._setToken("");
     this.successFired = false;
     this.autoRetry = 0;
-    this.answer.value = "";
-    this.answer.setAttribute("aria-invalid", "false");
-    clear(this.imgWrap);
-    this.imgWrap.textContent = tr(this.o.lang, "reset");
+    this._resetInputs();
+    this._showImageMessage(tr(this.o.lang, "reset"));
     this.btnSubmit.disabled = true;
     this.btnRefresh.disabled = false;
-    this.answer.disabled = true;
+    this._setInputsEnabled(false);
     if (!this._setState(STATES.IDLE)) return;
     this._say(tr(this.o.lang, "reset"), "idle");
   };
@@ -1182,6 +2088,7 @@ if (typeof self !== "undefined") {
     this._clearRetry();
     this._terminateWorker();
     this._clearDeadline();
+    this._clearFrameAnim();
     for (var i = 0; i < this.listeners.length; i++) {
       var l = this.listeners[i];
       try { l[0].removeEventListener(l[1], l[2]); } catch (e) { /* 已分离 */ }
@@ -1221,7 +2128,6 @@ if (typeof self !== "undefined") {
     destroy: function (id) { var w = registry.get(id); if (w) w.destroy(); },
     state: function (id) { var w = registry.get(id); return w ? w.state : null; },
     ids: function () { return Array.from(registry.keys()); },
-    // 给集成方用的纯函数（也便于单测）：位计数与 base64url 解码，与 worker/Go 同一语义。
     util: { leadingZeroBits: leadingZeroBits, b64urlToBytes: b64urlToBytes, lang: pickLang }
   };
 

@@ -82,6 +82,17 @@ func TestWidgetSourceHygiene(t *testing.T) {
 		"revokeObjectURL",
 		"removeEventListener",
 		"AbortController",
+		"sprite_sheet",
+		"angle_min",
+		"frame_count",
+		"pointLayer",
+		"aimLayer",
+		"angledrag",
+		"frameReplay",
+		"optionsWrap",
+		"validTextOptions",
+		"_telemetrySummary",
+		"accessibility",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("v1.js 应包含 %q", want)

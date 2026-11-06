@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 离线 OCR 基线（阶段 4B）：在**隔离容器**里用 Tesseract 测 text-image-v1 / v2 的机器通过率。
+# 离线 OCR 基线（阶段 4B；v3 入口见 ADR-024）：在**隔离容器**里用 Tesseract 测 text-image-v1 / v2 / v3 的机器通过率。
 #
 # 用法：
 #   docs/scripts/ocr/run-baseline.sh tune     # 只在 dev 集上比候选参数
@@ -26,6 +26,11 @@ GENERATOR="${EPOCHA_OCR_GENERATOR:-text-image-v1}"
 NORMALIZE="${EPOCHA_OCR_NORMALIZE:-textimage}"
 if [[ "$GENERATOR" == "text-image-v2" && "$NORMALIZE" == "textimage" ]]; then
   NORMALIZE="textimage-v2"
+fi
+if [[ "$GENERATOR" == "text-image-v3" && "$NORMALIZE" == "textimage" ]]; then
+  # v3 的生产判分允许 1 个字符替换；evalocr 只做严格整串比较，
+  # 所以这里的数字是生产接受率的**下界**，脚本与报告都必须这样读。
+  NORMALIZE="textimage-v3"
 fi
 OUT="${EPOCHA_OCR_OUT:-$ROOT/eval-out/ocr-${GENERATOR}-$(date -u +%Y%m%dT%H%M%SZ)}"
 MODE="${1:-all}"

@@ -197,7 +197,8 @@ function harness(t, { honorAbort = false, options = {} } = {}) {
   t.after(() => api.destroy(id));
   const host = find(container, (node) => node.getAttribute("data-epocha-widget") === id);
   const field = find(container, (node) => node.getAttribute("data-epocha-field") === id);
-  const answer = find(host.shadowRoot, (node) => node.getAttribute("class") === "ans");
+  // 按稳定 id 找文本答案框：load() 期间它会带 hidden class，按 class 精确匹配会找不到。
+  const answer = find(host.shadowRoot, (node) => (node.getAttribute("id") || "").endsWith("-ans"));
   const buttons = find(host.shadowRoot, (node) => node.getAttribute("class") === "box")
     .children.filter((node) => node.tagName === "BUTTON");
   const status = find(host.shadowRoot, (node) => node.getAttribute("role") === "status");
@@ -619,4 +620,124 @@ test("zh-CN answer placeholder follows the question length", async (t) => {
   assert.equal(h.api.state(h.id), "ready");
   assert.match(h.answer.placeholder, /8/, "placeholder must use the actual v2 length");
   assert.doesNotMatch(h.answer.placeholder, /6/, "placeholder must not keep the v1 hard-coded 6");
+});
+
+// --- ADR-024：cells / pairs 输入模式 ---
+
+function findAll(node, predicate, out = []) {
+  if (predicate(node)) out.push(node);
+  for (const child of node.children) findAll(child, predicate, out);
+  return out;
+}
+
+function cellsChallenge() {
+  return {
+    token: "grid-1", mode: "pow_question", expires_in: 0,
+    pow: { algo: "sha256-prefix", bits: 12, seed: "AAECAwQFBgcICQoLDA0ODw" },
+    question: {
+      media: "image", image_mime: "image/png", image_base64: "AQIDBA==",
+      image_width: 340, image_height: 340,
+      answer_type: "cells", max_answer_len: 32,
+      grid_cols: 3, grid_rows: 3, grid_x: 12, grid_y: 12, grid_cell: 100, grid_gap: 8,
+      prompt_zh: "选出所有的三角形。", prompt_en: "Select every triangle.",
+    },
+  };
+}
+
+function pairsChallenge() {
+  return {
+    token: "pairs-1", mode: "pow_question", expires_in: 0,
+    pow: { algo: "sha256-prefix", bits: 12, seed: "AAECAwQFBgcICQoLDA0ODw" },
+    question: {
+      media: "image", image_mime: "image/png", image_base64: "AQIDBA==",
+      image_width: 480, image_height: 240,
+      answer_type: "pairs", max_answer_len: 16,
+      labels_zh: ["实心三角形", "空心圆形"], labels_en: ["filled triangles", "hollow circles"],
+      min: 1, max: 6,
+      prompt_zh: "数一数两类图形。", prompt_en: "Count the two kinds of shapes.",
+    },
+  };
+}
+
+function solveLastPow(h) {
+  const worker = h.workers.at(-1);
+  const job = worker.sent.filter((message) => message.type === "solve").at(-1);
+  assert.ok(job);
+  worker.emit("message", { data: { type: "solved", job: job.job, nonce: "42" } });
+}
+
+test("cells 输入（Node 工装）：9 个可点击格子、选中集合排序去重后提交", async (t) => {
+  const h = harness(t);
+  h.requests[0].respond(cellsChallenge());
+  await flush();
+  assert.equal(h.api.state(h.id), "ready");
+  const cells = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell");
+  assert.equal(cells.length, 9, "3×3 网格必须渲染 9 个格子");
+  for (const cell of cells) {
+    assert.equal(cell.getAttribute("aria-pressed"), "false");
+    assert.match(cell.getAttribute("style"), /left:.*%;top:.*%;width:.*%;height:.*%/);
+  }
+  assert.equal(h.answer.getAttribute("class"), "ans hidden", "cells 模式必须隐藏文本输入");
+
+  cells[2].emit("click");
+  cells[6].emit("click");
+  assert.equal(h.answer.value, "3,7", "选中集合必须按 1-based 序号排序");
+  assert.equal(cells[2].getAttribute("aria-pressed"), "true");
+  assert.equal(cells[6].getAttribute("aria-pressed"), "true");
+
+  cells[2].emit("click");
+  assert.equal(h.answer.value, "7", "再次点击必须取消选中");
+  assert.equal(cells[2].getAttribute("aria-pressed"), "false");
+
+  h.clickSubmit();
+  assert.equal(h.api.state(h.id), "solving");
+  solveLastPow(h);
+  await flush();
+  const redeem = h.requests.at(-1);
+  assert.equal(redeem.path, "/api/redeem");
+  assert.equal(JSON.parse(redeem.options.body).answer, "7");
+});
+
+test("pairs 输入（Node 工装）：两个数字输入合成为 a,b", async (t) => {
+  const h = harness(t);
+  h.requests[0].respond(pairsChallenge());
+  await flush();
+  assert.equal(h.api.state(h.id), "ready");
+  const inputs = findAll(h.host.shadowRoot,
+    (node) => node.tagName === "INPUT" && node.getAttribute("type") === "number");
+  assert.equal(inputs.length, 2, "pairs 模式必须渲染两个数字输入");
+  // 标题 label 也会指向第一个输入（提示语与控件关联），所以这里按文本找成对的标签。
+  const labels = findAll(h.host.shadowRoot,
+    (node) => node.tagName === "LABEL" && node.textContent === "filled triangles");
+  assert.equal(labels.length, 1);
+  assert.equal(h.answer.getAttribute("class"), "ans hidden");
+
+  // 越界值不合成提交串：服务端不会把畸形输入当成"答错"。
+  inputs[0].value = "9";
+  inputs[1].value = "2";
+  inputs[0].emit("input");
+  inputs[1].emit("input");
+  assert.equal(h.answer.value, "", "超出题面 max 的值不得进入提交串");
+
+  inputs[0].value = "4";
+  inputs[0].emit("input");
+  inputs[1].emit("input");
+  assert.equal(h.answer.value, "4,2");
+
+  h.clickSubmit();
+  assert.equal(h.api.state(h.id), "solving");
+  solveLastPow(h);
+  await flush();
+  assert.equal(JSON.parse(h.requests.at(-1).options.body).answer, "4,2");
+});
+
+test("cells 几何越界（Node 工装）：fail closed，不渲染可点击区域", async (t) => {
+  const h = harness(t);
+  const bad = cellsChallenge();
+  bad.question.grid_cell = 160; // 12 + 3*160 > 340
+  h.requests[0].respond(bad);
+  await flush();
+  assert.equal(h.api.state(h.id), "error");
+  const cells = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell");
+  assert.equal(cells.length, 0, "越界几何不得渲染任何格子按钮");
 });

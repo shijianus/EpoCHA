@@ -46,12 +46,20 @@ const (
 	TextImageV2ID      = "text-image-v2"
 	textImageV2Version = "v2"
 
+	// TextImageV3ID 是"抽象文字"版本（ADR-024）：v2 的逐字形变 + 字形层模糊/正弦位移/
+	// 擦除点/低对比，并允许最多 1 个字符替换。它同样不替换 v1/v2。
+	TextImageV3ID      = "text-image-v3"
+	textImageV3Version = "v3"
+
 	// TextImageLength 是**固定**答案长度。不做可变长度：长度本身会变成答案的一部分信息，
 	// 归一化也要多一条"4..7 都算合法"的分支，而代价是 M3 变差（短答案的猜中率更高）。
 	TextImageLength = 6
 	// TextImageV2Length 是 v2 的固定长度：8 个字符把 M1 从 32^6 提到 32^8，
 	// 同时给"字间重叠 + 旋转 + 剪切"留出更多可读空间（6 字符在强形变下太短，误读一个就整串错）。
 	TextImageV2Length = 8
+	// TextImageV3Length 回到 6：v3 有单字容差，但仍要保持答案空间足够大（32^6），
+	// 同时给模糊/位移后的字形留出人眼可读的余地。
+	TextImageV3Length = 6
 
 	// TextImageCharset 是公开常量：32 个字符，剔除肉眼易混的 I/1 与 O/0（本集合无小写，
 	// 所以也不再排除 l）。它是题面的一部分（进 payload），**不是秘密**。
@@ -59,6 +67,8 @@ const (
 	// TextImageV2Charset 与 v1 相同；单独命名是为了让 v2 的公开题面与评测代码
 	// 明确引用 v2 契约，而不是"碰巧继承了 v1 的常量"。
 	TextImageV2Charset = TextImageCharset
+	// TextImageV3Charset 与 v1/v2 相同；v3 的差异在渲染与容差，不在字符集。
+	TextImageV3Charset = TextImageCharset
 
 	// MimeTypePNG 必须与 store.MimeTypePNG 逐字节一致；交叉检查在 internal/pool 里有测试。
 	MimeTypePNG = "image/png"
@@ -135,7 +145,11 @@ type ImageParams struct {
 	LineSegments int
 	Noise        int
 
-	// style 只给 text-image-v2 使用。零值必须与 v1 的渲染路径完全一致：
+	// Margin 是字形包围盒与画布边缘的最小距离（像素）；0 表示沿用 glyphEdgeMargin(2)。
+	// v3 的模糊/正弦位移会把墨迹向外扩，因此必须用更大的边距，否则"不裁切"的几何保证失效。
+	Margin int
+
+	// style 只给 text-image-v2/v3 使用。零值必须与 v1 的渲染路径完全一致：
 	// v1 的每个档位都不填它，于是 v1 的字节级形状不因这次扩展而改变。
 	style textImageStyle
 }
@@ -165,6 +179,28 @@ type textImageStyle struct {
 	InkSpread int
 	// Stroke 是加粗半径（像素）；0 = 不加粗。
 	Stroke int
+
+	// --- v3 的字形层后处理（ADR-024）---
+	// 这些字段只改题面形状，不参与答案与判分；零值 = 不启用。
+	// BlurPasses 是 3×3 加权模糊（核 1-2-1）的遍数，只模糊字形层。
+	BlurPasses int
+	// WarpAmp/WarpPeriod 是平滑正弦位移的幅度（像素）与周期（像素）。
+	WarpAmp    int
+	WarpPeriod float64
+	// EraseDots 是字形包围盒并集内的稀疏擦除点数。
+	EraseDots int
+	// InkGray/PaperGray 是 v3 的墨色/纸色；0 表示沿用包级默认。
+	InkGray   int
+	PaperGray int
+	// PaperTexture 是纸面低频纹理幅度（0..16）。
+	PaperTexture int
+}
+
+// abstract 判断是否启用 v3 的字形层后处理。零值 style（v1/v2）一律走旧路径，
+// 这是"v1/v2 的字节形状不被本次扩展改变"的代码依据。
+func (s textImageStyle) abstract() bool {
+	return s.BlurPasses > 0 || s.WarpAmp > 0 || s.EraseDots > 0 ||
+		s.InkGray > 0 || s.PaperGray > 0 || s.PaperTexture > 0
 }
 
 func (s textImageStyle) validate() error {
@@ -193,6 +229,24 @@ func (s textImageStyle) validate() error {
 		return fmt.Errorf("%w: v2 墨色扩散 %d 越界（≤120）", ErrBadParams, s.InkSpread)
 	case s.Stroke < 0 || s.Stroke > 3:
 		return fmt.Errorf("%w: v2 加粗 %d 越界（≤3）", ErrBadParams, s.Stroke)
+	case s.BlurPasses < 0 || s.BlurPasses > 2:
+		return fmt.Errorf("%w: v3 模糊遍数 %d 越界（≤2）", ErrBadParams, s.BlurPasses)
+	case s.WarpAmp < 0 || s.WarpAmp > 6:
+		return fmt.Errorf("%w: v3 位移幅度 %d 越界（≤6）", ErrBadParams, s.WarpAmp)
+	case s.WarpAmp > 0 && (s.WarpPeriod < 24 || s.WarpPeriod > 80):
+		return fmt.Errorf("%w: v3 位移周期 %v 越界（24..80）", ErrBadParams, s.WarpPeriod)
+	case s.WarpAmp == 0 && s.WarpPeriod != 0:
+		return fmt.Errorf("%w: v3 未启用位移但给了周期 %v", ErrBadParams, s.WarpPeriod)
+	case s.EraseDots < 0 || s.EraseDots > 32:
+		return fmt.Errorf("%w: v3 擦除点 %d 越界（≤32）", ErrBadParams, s.EraseDots)
+	case s.InkGray < 0 || s.InkGray > 255:
+		return fmt.Errorf("%w: v3 墨色 %d 越界", ErrBadParams, s.InkGray)
+	case s.PaperGray < 0 || s.PaperGray > 255:
+		return fmt.Errorf("%w: v3 纸色 %d 越界", ErrBadParams, s.PaperGray)
+	case s.InkGray > 0 && s.PaperGray > 0 && s.PaperGray-s.InkGray < 96:
+		return fmt.Errorf("%w: v3 墨/纸对比 %d 过低（需要 ≥96）", ErrBadParams, s.PaperGray-s.InkGray)
+	case s.PaperTexture < 0 || s.PaperTexture > 16:
+		return fmt.Errorf("%w: v3 纸面纹理 %d 越界（≤16）", ErrBadParams, s.PaperTexture)
 	}
 	return nil
 }
@@ -247,14 +301,51 @@ func TextImageV2Params(difficulty int) (ImageParams, error) {
 	return p, nil
 }
 
+// textImageV3Tiers 是"抽象文字"的五档（ADR-024）。与 v2 的取舍不同：
+//   - 单字旋转只到 24°，不靠大角度旋转制造难度；
+//   - 主要抽象手段是字形层加权模糊（1..2 遍 3×3 核 1-2-1）、正弦位移（1..3px）、
+//     稀疏擦除点（4..20 个）、低对比（墨 44..52 / 纸 238..242）与纸面纹理；
+//   - Margin 必须 ≥ WarpAmp + 2*BlurPasses + 2，否则位移会把墨迹推出画布；
+//   - 6 字符 + 单字容差：人认错一个字符仍能通过，但答案空间仍是 32^6。
+//
+// 这些参数是**题面形状**，不是安全证明；M4 未测，production_ready 必须保持 false。
+var textImageV3Tiers = map[int]ImageParams{
+	1: {Width: 480, Height: 160, FontSize: 50, DPI: 72, BaselineJitter: 3, SpacingJitter: 4, Lines: 1, LineSegments: 4, Noise: 400, Margin: 8,
+		style: textImageStyle{RotationDeg: 6, Shear: 0.06, ScaleMin: 0.94, ScaleMax: 1.06, OverlapDivisor: 6.0, OverlapPx: 0, WaveAmplitude: 1, WavePeriod: 90, CrossLines: 1, InkSpread: 24, Stroke: 0,
+			BlurPasses: 1, WarpAmp: 1, WarpPeriod: 70, EraseDots: 4, InkGray: 44, PaperGray: 242, PaperTexture: 4}},
+	2: {Width: 480, Height: 160, FontSize: 50, DPI: 72, BaselineJitter: 4, SpacingJitter: 5, Lines: 2, LineSegments: 5, Noise: 600, Margin: 9,
+		style: textImageStyle{RotationDeg: 10, Shear: 0.10, ScaleMin: 0.93, ScaleMax: 1.07, OverlapDivisor: 6.0, OverlapPx: 0, WaveAmplitude: 1, WavePeriod: 85, CrossLines: 1, InkSpread: 28, Stroke: 0,
+			BlurPasses: 1, WarpAmp: 2, WarpPeriod: 64, EraseDots: 8, InkGray: 46, PaperGray: 241, PaperTexture: 5}},
+	3: {Width: 480, Height: 160, FontSize: 50, DPI: 72, BaselineJitter: 5, SpacingJitter: 6, Lines: 2, LineSegments: 5, Noise: 800, Margin: 10,
+		style: textImageStyle{RotationDeg: 14, Shear: 0.14, ScaleMin: 0.92, ScaleMax: 1.08, OverlapDivisor: 5.0, OverlapPx: 0, WaveAmplitude: 2, WavePeriod: 80, CrossLines: 1, InkSpread: 32, Stroke: 0,
+			BlurPasses: 1, WarpAmp: 2, WarpPeriod: 56, EraseDots: 12, InkGray: 48, PaperGray: 240, PaperTexture: 6}},
+	4: {Width: 480, Height: 160, FontSize: 50, DPI: 72, BaselineJitter: 6, SpacingJitter: 7, Lines: 3, LineSegments: 6, Noise: 1000, Margin: 11,
+		style: textImageStyle{RotationDeg: 18, Shear: 0.18, ScaleMin: 0.92, ScaleMax: 1.08, OverlapDivisor: 4.0, OverlapPx: 0, WaveAmplitude: 2, WavePeriod: 72, CrossLines: 2, InkSpread: 36, Stroke: 0,
+			BlurPasses: 2, WarpAmp: 3, WarpPeriod: 48, EraseDots: 16, InkGray: 50, PaperGray: 239, PaperTexture: 7}},
+	5: {Width: 480, Height: 160, FontSize: 50, DPI: 72, BaselineJitter: 7, SpacingJitter: 7, Lines: 3, LineSegments: 7, Noise: 1200, Margin: 12,
+		style: textImageStyle{RotationDeg: 20, Shear: 0.20, ScaleMin: 0.92, ScaleMax: 1.08, OverlapDivisor: 3.5, OverlapPx: 0, WaveAmplitude: 2, WavePeriod: 64, CrossLines: 2, InkSpread: 40, Stroke: 1,
+			BlurPasses: 2, WarpAmp: 3, WarpPeriod: 40, EraseDots: 20, InkGray: 52, PaperGray: 238, PaperTexture: 8}},
+}
+
+// TextImageV3Params 返回 v3 某个难度档的渲染参数。
+func TextImageV3Params(difficulty int) (ImageParams, error) {
+	p, ok := textImageV3Tiers[difficulty]
+	if !ok {
+		return ImageParams{}, fmt.Errorf("%w: 难度 %d 没有对应的 v3 档位", ErrBadParams, difficulty)
+	}
+	return p, nil
+}
+
 // textImageProfile 是同一套渲染器上的一组"题型身份"：id/version、答案长度、字符集与档位表。
-// v1 与 v2 只在 profile 上不同，判分与正常化路径共用。
+// v1/v2/v3 只在 profile 上不同，判分路径共用；tolerance>0 时改用逐字 verifier（ADR-024）。
 type textImageProfile struct {
 	id      string
 	version string
 	length  int
 	charset string
 	tiers   map[int]ImageParams
+	// tolerance 是允许的字符替换数。0 = 精确 HMAC（v1/v2）；1 = 逐字标签容差（v3）。
+	tolerance int
 }
 
 var textImageV1Profile = textImageProfile{
@@ -264,7 +355,13 @@ var textImageV1Profile = textImageProfile{
 
 var textImageV2Profile = textImageProfile{
 	id: TextImageV2ID, version: textImageV2Version,
-	length: TextImageV2Length, charset: TextImageCharset, tiers: textImageV2Tiers,
+	length: TextImageV2Length, charset: TextImageV2Charset, tiers: textImageV2Tiers,
+}
+
+var textImageV3Profile = textImageProfile{
+	id: TextImageV3ID, version: textImageV3Version,
+	length: TextImageV3Length, charset: TextImageV3Charset, tiers: textImageV3Tiers,
+	tolerance: 1,
 }
 
 // validate 检查全部渲染边界。任何一项越界都拒绝，绝不"就地夹紧后继续画"：
@@ -293,15 +390,31 @@ func (p ImageParams) validate() error {
 		return fmt.Errorf("%w: 干扰线段数 %d 越界（≤%d）", ErrBadParams, p.LineSegments, maxLineSegments)
 	case p.Noise < 0 || p.Noise > p.Width*p.Height/maxNoiseDivisor:
 		return fmt.Errorf("%w: 噪声点数 %d 超过像素总数的 1/%d", ErrBadParams, p.Noise, maxNoiseDivisor)
+	case p.Margin < 0 || p.Margin > 24:
+		return fmt.Errorf("%w: 字形边距 %d 越界（≤24）", ErrBadParams, p.Margin)
 	}
 	if err := p.style.validate(); err != nil {
 		return err
+	}
+	// 后处理会把墨迹向外扩：边距必须覆盖位移 + 模糊半径，否则"不裁切"的几何保证失效。
+	if p.style.abstract() && p.margin() < p.style.WarpAmp+2*p.style.BlurPasses+2 {
+		return fmt.Errorf("%w: 边距 %d 小于位移 %d + 模糊 %d 所需的余量",
+			ErrBadParams, p.margin(), p.style.WarpAmp, p.style.BlurPasses)
 	}
 	// 字形必须放得下：字号 × 6 个字符至少要有可辨认的宽度，否则布局重试会变成忙循环。
 	if p.Width <= (glyphEdgeMargin+1)*2 {
 		return fmt.Errorf("%w: 宽 %d 放不下任何字形", ErrBadParams, p.Width)
 	}
 	return nil
+}
+
+// margin 返回实际使用的字形边距。0 必须解释成 glyphEdgeMargin(2)，
+// 这样 v1/v2 的全部档位（都不填 Margin）保持历史行为不变。
+func (p ImageParams) margin() int {
+	if p.Margin > 0 {
+		return p.Margin
+	}
+	return glyphEdgeMargin
 }
 
 // TextImagePublic 是视觉题的**唯一**公开题面类型：字段即白名单。
@@ -316,6 +429,9 @@ type TextImagePublic struct {
 	MaxAnswerLen int    `json:"max_answer_len"`
 	ImageWidth   int    `json:"image_width"`
 	ImageHeight  int    `json:"image_height"`
+	// Tolerant 是允许的字符替换数：0/缺省 = 精确匹配（v1/v2），1 = v3。
+	// 它必须与 profile 一致，否则 SanitizePublic 报错（防止库里的旧题面被新实现换一套判分口径）。
+	Tolerant int `json:"tolerant,omitempty"`
 }
 
 func (TextImagePublic) PublicKind() string { return "text-image" }
@@ -359,9 +475,18 @@ func NewTextImageV2(macKey []byte) (TextImage, error) {
 	return newTextImage(macKey, textImageV2Profile)
 }
 
+// NewTextImageV3 构造抽象文字 v3：v2 的形变 + 字形层后处理 + 单字容差。
+// 它使用逐字 HMAC verifier（ADR-024），与 v1/v2 的 48B 精确 verifier 是两条构造。
+func NewTextImageV3(macKey []byte) (TextImage, error) {
+	return newTextImage(macKey, textImageV3Profile)
+}
+
 func newTextImage(macKey []byte, profile textImageProfile) (TextImage, error) {
 	if len(macKey) < 32 {
 		return TextImage{}, fmt.Errorf("%w: verifier 密钥短于 32 字节", ErrBadParams)
+	}
+	if profile.tolerance < 0 || profile.tolerance > 1 {
+		return TextImage{}, fmt.Errorf("%w: 容差 %d 越界（只支持 0/1）", ErrBadParams, profile.tolerance)
 	}
 	font, err := loadGoRegular()
 	if err != nil {
@@ -421,6 +546,11 @@ func TextImageAnswerFrom(entropy io.Reader) (string, error) {
 // TextImageV2AnswerFrom 是 v2 的离线评测入口；与生产 Generate 使用同一 profile 和抽样顺序。
 func TextImageV2AnswerFrom(entropy io.Reader) (string, error) {
 	return textImageAnswerFrom(textImageV2Profile, entropy)
+}
+
+// TextImageV3AnswerFrom 是 v3 的离线评测入口；与生产 Generate 使用同一 profile 和抽样顺序。
+func TextImageV3AnswerFrom(entropy io.Reader) (string, error) {
+	return textImageAnswerFrom(textImageV3Profile, entropy)
 }
 
 func textImageAnswerFrom(profile textImageProfile, entropy io.Reader) (string, error) {
@@ -516,8 +646,9 @@ func (g TextImage) generateWithAnswer(ctx context.Context, p Params, entropy io.
 				MaxAnswerLen: g.profile.length,
 				ImageWidth:   ip.Width,
 				ImageHeight:  ip.Height,
+				Tolerant:     g.profile.tolerance,
 			},
-			Verifier: PrivateVerifier(answerVerifier(g.macKey, nonce, answer)),
+			Verifier: PrivateVerifier(textImageVerifier(g.macKey, nonce, answer, g.profile.tolerance)),
 			Asset:    asset,
 			MimeType: MimeTypePNG,
 		}
@@ -545,6 +676,9 @@ type placedGlyph struct {
 	base  image.Rectangle
 	dr    image.Rectangle
 	tile  *image.RGBA
+	// alpha 是字形 mask 的独立副本，只给 v3 的字形层后处理用（v1/v2 为 nil）。
+	// 不能留到下一次 face.Glyph 调用之后再取：mask 会被下一次调用改写。
+	alpha *image.Alpha
 	box   image.Rectangle // 变换后在画布上的包围盒（用于不越界判定）
 	ink   uint8
 }
@@ -581,19 +715,32 @@ func layoutGlyphs(face xfont.Face, answer string, ip ImageParams, jitter *mrand.
 	// 字形的左部衬垫可以是负数（旋转还会再撑开包围盒），固定起点会让首字偶尔压到边缘，
 	// 那种偶发失败在 128 次重试里表现为"5% 的补题白做"。
 	// 竖直方向把基线放到"允许区间的正中"，于是上下两侧各留一半余量给基线抖动。
+	edge := ip.margin()
 	upExtent, downExtent, leftExtent := 0, 0, 0
 	for _, p := range probes {
 		upExtent = max(upExtent, -p.rel.Min.Y)
 		downExtent = max(downExtent, p.rel.Max.Y)
 		leftExtent = max(leftExtent, -p.rel.Min.X)
 	}
-	pen := glyphEdgeMargin + leftExtent
-	baselineLo, baselineHi := glyphEdgeMargin+upExtent, ip.Height-glyphEdgeMargin-downExtent
+	pen := edge + leftExtent
+	baselineLo, baselineHi := edge+upExtent, ip.Height-edge-downExtent
 	if baselineHi < baselineLo {
 		return nil, fmt.Errorf("generator: 画布高 %d 放不下字形升降部（需要 %d..%d）",
 			ip.Height, baselineLo, baselineHi)
 	}
 	baseline := (baselineLo + baselineHi) / 2
+	// v3 的 6 个字符在 480px 宽画布上左对齐会留下大半张空白，既难看也把字形挤在
+	// 干扰线最密的一侧。只对 v3 做近似居中（v1/v2 的布局与字节形状保持不变）。
+	// 估算宽度加上字间抖动上界，宁可靠左一点也不要让末字压到右边缘。
+	if ip.style.abstract() {
+		total := 0
+		for _, p := range probes {
+			total += p.adv
+		}
+		if start := (ip.Width - total - len(probes)*ip.SpacingJitter) / 2; start > pen {
+			pen = start
+		}
+	}
 
 	// 第二遍：从左到右排，必要时**强制**推开（推开的量不受 SpacingJitter 上界约束，
 	// 但整体仍受画布宽度约束——放不下就重试）。
@@ -626,8 +773,8 @@ func layoutGlyphs(face xfont.Face, answer string, ip ImageParams, jitter *mrand.
 				box = p.rel.Add(image.Pt(x, baseline+dy+wave))
 			}
 		}
-		if box.Min.X < glyphEdgeMargin || box.Max.X > ip.Width-glyphEdgeMargin ||
-			box.Min.Y < glyphEdgeMargin || box.Max.Y > ip.Height-glyphEdgeMargin {
+		if box.Min.X < edge || box.Max.X > ip.Width-edge ||
+			box.Min.Y < edge || box.Max.Y > ip.Height-edge {
 			return nil, fmt.Errorf("generator: 字形 %q 放不进 %dx%d（box=%v）", r, ip.Width, ip.Height, box)
 		}
 		out = append(out, placedGlyph{
@@ -662,6 +809,11 @@ func layoutGlyphs(face xfont.Face, answer string, ip ImageParams, jitter *mrand.
 		g.tile = image.NewRGBA(image.Rectangle{Max: dr.Size()})
 		xdraw.DrawMask(g.tile, g.tile.Bounds(), image.NewUniform(color.Gray{Y: g.ink}),
 			image.Point{}, mask, maskp, xdraw.Over)
+		if ip.style.abstract() {
+			// 独立副本：mask 是 face 的内部缓冲，下一次 Glyph 调用就会改写它。
+			g.alpha = image.NewAlpha(g.tile.Bounds())
+			xdraw.Draw(g.alpha, g.alpha.Bounds(), mask, maskp, xdraw.Src)
+		}
 	}
 	return out, nil
 }
@@ -766,7 +918,14 @@ func applyAff3(m f64.Aff3, x, y float64) (float64, float64) {
 //
 // 画布用 **image.Gray**（单通道）而不是 RGBA：同一尺寸的裸数据小 4 倍，PNG 体积也随之下降，
 // 而视觉题不需要颜色。抖动与抗识别都不依赖色彩。
+//
+// v1/v2 的 style 是零值，走下面这条**原样保留**的路径；v3 走 renderAbstractCanvas。
+// 分支条件只由 style 决定，所以"v1/v2 的字节形状不变"是代码结构上的事实，不靠测试碰巧覆盖。
 func renderCanvas(ip ImageParams, glyphs []placedGlyph, jitter *mrand.Rand) ([]byte, error) {
+	if ip.style.abstract() {
+		return renderAbstractCanvas(ip, glyphs, jitter)
+	}
+
 	img := image.NewGray(image.Rect(0, 0, ip.Width, ip.Height))
 	xdraw.Draw(img, img.Bounds(), image.NewUniform(color.Gray{Y: paperGray}), image.Point{}, xdraw.Src)
 
@@ -803,7 +962,77 @@ func renderCanvas(ip ImageParams, glyphs []placedGlyph, jitter *mrand.Rand) ([]b
 		v := int(paperGray) - jitter.Intn(noiseGraySpread+1)
 		img.SetGray(x, y, color.Gray{Y: uint8(clampInt(v, 0, 255))})
 	}
+	return encodeGrayPNG(img)
+}
 
+// minInkRetainPct 是 v3 后处理允许保留的最小字墨覆盖率（百分比）。
+// 它证明的是"字没有被模糊/擦除吃掉"，不是"人能读出来"——后者仍须人工验收。
+const minInkRetainPct = 55
+
+// renderAbstractCanvas 是 v3 的渲染路径：字形先画进独立的 Alpha 层，
+// 在层上做正弦位移、加权模糊、稀疏擦除，再按墨色合成到纸面。
+//
+// 为什么不直接在全画布上做模糊/位移：那会把干扰线与纸面纹理一起糊掉，
+// "只模糊字"和"糊整张图"是两种视觉结果；后者还会让背景线变成灰雾，降低可读性。
+func renderAbstractCanvas(ip ImageParams, glyphs []placedGlyph, jitter *mrand.Rand) ([]byte, error) {
+	layer := image.NewAlpha(image.Rect(0, 0, ip.Width, ip.Height))
+	for _, g := range glyphs {
+		if g.alpha == nil {
+			continue
+		}
+		cx := float64(g.alpha.Bounds().Dx()) / 2
+		cy := float64(g.alpha.Bounds().Dy()) / 2
+		drawGlyph := func(offset image.Point) {
+			m := glyphAbout(cx, cy, g.angle, g.shear, g.sx, g.sy, g.dr.Min.Add(offset))
+			xdraw.ApproxBiLinear.Transform(layer, m, g.alpha, g.alpha.Bounds(), xdraw.Over, nil)
+		}
+		drawGlyph(image.Pt(0, 0))
+		for i := 0; i < ip.style.Stroke; i++ {
+			for _, o := range []image.Point{{X: -i - 1}, {X: i + 1}, {Y: -i - 1}, {Y: i + 1}} {
+				drawGlyph(o)
+			}
+		}
+	}
+
+	origInk := alphaSum(layer)
+	if origInk == 0 {
+		return nil, fmt.Errorf("%w: 字形层为空", ErrGenerateExhausted)
+	}
+	layer = warpAlpha(layer, ip.style.WarpAmp, ip.style.WarpPeriod, jitter)
+	for i := 0; i < ip.style.BlurPasses; i++ {
+		layer = blurAlpha3x3(layer)
+	}
+	eraseAlphaDots(layer, glyphs, ip.style.EraseDots, jitter)
+	if kept := alphaSum(layer); kept*100 < origInk*minInkRetainPct {
+		return nil, fmt.Errorf("%w: 字墨覆盖率 %d%% 低于 %d%%",
+			ErrGenerateExhausted, kept*100/origInk, minInkRetainPct)
+	}
+
+	img := image.NewGray(image.Rect(0, 0, ip.Width, ip.Height))
+	paper := uint8(paperGray)
+	if ip.style.PaperGray > 0 {
+		paper = uint8(ip.style.PaperGray)
+	}
+	fillPaperTexture(img, paper, ip.style.PaperTexture, jitter)
+	drawRandomLines(img, ip, jitter, ip.Lines, lineGray)
+	for range ip.Noise {
+		x, y := jitter.Intn(ip.Width), jitter.Intn(ip.Height)
+		v := int(paper) - jitter.Intn(noiseGraySpread+1)
+		img.SetGray(x, y, color.Gray{Y: uint8(clampInt(v, 0, 255))})
+	}
+
+	ink := uint8(inkGray)
+	if ip.style.InkGray > 0 {
+		ink = uint8(ip.style.InkGray)
+	}
+	xdraw.DrawMask(img, img.Bounds(), image.NewUniform(color.Gray{Y: ink}), image.Point{},
+		layer, image.Point{}, xdraw.Over)
+	// 穿越线最后画：它切断字形的连通域，是 v3 与 v2 共有的"反切片"手段。
+	drawRandomLines(img, ip, jitter, ip.style.CrossLines, lineCrossGray)
+	return encodeGrayPNG(img)
+}
+
+func encodeGrayPNG(img *image.Gray) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := png.Encoder{CompressionLevel: png.DefaultCompression}
 	if err := enc.Encode(&buf, img); err != nil {
@@ -814,6 +1043,146 @@ func renderCanvas(ip ImageParams, glyphs []placedGlyph, jitter *mrand.Rand) ([]b
 		return nil, fmt.Errorf("%w: %d 字节（上限 %d）", ErrRenderTooLarge, len(out), MaxImageAssetBytes)
 	}
 	return out, nil
+}
+
+func alphaSum(img *image.Alpha) uint64 {
+	var sum uint64
+	for _, v := range img.Pix {
+		sum += uint64(v)
+	}
+	return sum
+}
+
+// warpAlpha 对字形层做平滑正弦位移：sx = x + amp·sin(2πy/period + φx)，
+// sy = y + 0.6·amp·sin(2πx/(1.35·period) + φy)。两个方向周期不同，
+// 避免位移场退化成一条整齐的波浪（那反而更容易被线性校正）。
+func warpAlpha(src *image.Alpha, amp int, period float64, rng *mrand.Rand) *image.Alpha {
+	if amp <= 0 || period <= 0 {
+		return src
+	}
+	b := src.Bounds()
+	w, h := b.Dx(), b.Dy()
+	sxTab := make([]float64, w)
+	syTab := make([]float64, h)
+	phaseX, phaseY := rng.Float64()*2*math.Pi, rng.Float64()*2*math.Pi
+	for x := range sxTab {
+		sxTab[x] = math.Sin(2*math.Pi*float64(x)/(period*1.35) + phaseY)
+	}
+	for y := range syTab {
+		syTab[y] = math.Sin(2*math.Pi*float64(y)/period + phaseX)
+	}
+	dst := image.NewAlpha(b)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			dx := float64(x) + float64(amp)*syTab[y]
+			dy := float64(y) + 0.6*float64(amp)*sxTab[x]
+			dst.SetAlpha(x, y, color.Alpha{A: sampleAlphaBilinear(src, dx, dy)})
+		}
+	}
+	return dst
+}
+
+func sampleAlphaBilinear(img *image.Alpha, x, y float64) uint8 {
+	x0, y0 := int(math.Floor(x)), int(math.Floor(y))
+	fx, fy := x-float64(x0), y-float64(y0)
+	b := img.Bounds()
+	at := func(xx, yy int) float64 {
+		if xx < b.Min.X || xx >= b.Max.X || yy < b.Min.Y || yy >= b.Max.Y {
+			return 0
+		}
+		return float64(img.AlphaAt(xx, yy).A)
+	}
+	top := at(x0, y0)*(1-fx) + at(x0+1, y0)*fx
+	bottom := at(x0, y0+1)*(1-fx) + at(x0+1, y0+1)*fx
+	return uint8(clampInt(int(top*(1-fy)+bottom*fy+0.5), 0, 255))
+}
+
+// blurAlpha3x3 是 3×3 加权模糊（核 1-2-1，近似高斯）。不用 9 格等权盒式模糊：
+// 等权把 4px 笔画的中轴也拉掉一截，低对比下会直接变成"看不清"；加权核保留中心，
+// 只软化边缘——同样降低 OCR 的边沿信息，但让人眼仍有可辨认的笔画主体。
+var blurKernel3x3 = [3][3]int{
+	{1, 2, 1},
+	{2, 4, 2},
+	{1, 2, 1},
+}
+
+func blurAlpha3x3(src *image.Alpha) *image.Alpha {
+	b := src.Bounds()
+	dst := image.NewAlpha(b)
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			sum, weight := 0, 0
+			for dy := -1; dy <= 1; dy++ {
+				for dx := -1; dx <= 1; dx++ {
+					xx, yy := x+dx, y+dy
+					if xx < b.Min.X || xx >= b.Max.X || yy < b.Min.Y || yy >= b.Max.Y {
+						continue
+					}
+					w := blurKernel3x3[dy+1][dx+1]
+					sum += w * int(src.AlphaAt(xx, yy).A)
+					weight += w
+				}
+			}
+			if weight > 0 {
+				dst.SetAlpha(x, y, color.Alpha{A: uint8(sum / weight)})
+			}
+		}
+	}
+	return dst
+}
+
+// eraseAlphaDots 在字形包围盒内点掉少量像素。点只落在字形上，不会在空白处
+// 造出"看起来像笔画"的孤立点（那会把题面变成噪声题）。
+func eraseAlphaDots(layer *image.Alpha, glyphs []placedGlyph, count int, rng *mrand.Rand) {
+	if count <= 0 || len(glyphs) == 0 {
+		return
+	}
+	b := layer.Bounds()
+	for i := 0; i < count; i++ {
+		g := glyphs[rng.Intn(len(glyphs))]
+		box := g.box.Intersect(b)
+		if box.Empty() {
+			continue
+		}
+		x := box.Min.X + rng.Intn(box.Dx())
+		y := box.Min.Y + rng.Intn(box.Dy())
+		for dy := -1; dy <= 1; dy++ {
+			for dx := -1; dx <= 1; dx++ {
+				if dx*dx+dy*dy > 2 {
+					continue
+				}
+				xx, yy := x+dx, y+dy
+				if xx >= b.Min.X && xx < b.Max.X && yy >= b.Min.Y && yy < b.Max.Y {
+					layer.SetAlpha(xx, yy, color.Alpha{A: 0})
+				}
+			}
+		}
+	}
+}
+
+func fillPaperTexture(img *image.Gray, paper uint8, amp int, rng *mrand.Rand) {
+	b := img.Bounds()
+	if amp <= 0 {
+		xdraw.Draw(img, b, image.NewUniform(color.Gray{Y: paper}), image.Point{}, xdraw.Src)
+		return
+	}
+	w, h := b.Dx(), b.Dy()
+	tx := make([]float64, w)
+	ty := make([]float64, h)
+	periodX, periodY := 80+rng.Float64()*60, 50+rng.Float64()*40
+	phaseX, phaseY := rng.Float64()*2*math.Pi, rng.Float64()*2*math.Pi
+	for x := range tx {
+		tx[x] = math.Sin(2*math.Pi*float64(x)/periodX + phaseX)
+	}
+	for y := range ty {
+		ty[y] = math.Sin(2*math.Pi*float64(y)/periodY + phaseY)
+	}
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			v := int(paper) + int(float64(amp)*tx[x]*ty[y])
+			img.SetGray(b.Min.X+x, b.Min.Y+y, color.Gray{Y: uint8(clampInt(v, 0, 255))})
+		}
+	}
 }
 
 // drawRandomLines 画 count 条有界折线。v1 的 count=ip.Lines、颜色 lineGray，
@@ -916,12 +1285,26 @@ func (g TextImage) NormalizeAnswer(input string) (string, bool) {
 	return string(out), true
 }
 
-// Verify 判分：与算术基线**同一条** HMAC 路径（generator.go），容差为零——
-// 字符序列要么等于要么不等于，没有"差不多"的余量，因此 M2 的接受域就是那一个串。
+// textImageVerifier 按 profile 选择 verifier 构造：
+// tolerance=0 ⇒ 48B 精确 HMAC（v1/v2）；tolerance>0 ⇒ 逐字标签（v3，ADR-024）。
+// 这里不能"统一用逐字标签再要求 0 不匹配"：那会改变 v1/v2 的历史 verifier 形态与长度。
+func textImageVerifier(macKey, nonce []byte, answer string, tolerance int) []byte {
+	if tolerance > 0 {
+		return charVerifier(macKey, nonce, answer)
+	}
+	return answerVerifier(macKey, nonce, answer)
+}
+
+// Verify 判分：v1/v2 与算术基线同一条 HMAC 路径（容差为零）；v3 用逐字标签，
+// 允许最多 profile.tolerance 个字符替换。
 func (g TextImage) Verify(v PrivateVerifier, input string) bool {
 	canon, ok := g.NormalizeAnswer(input)
 	if !ok {
 		return false
+	}
+	g.profile = g.effectiveProfile()
+	if g.profile.tolerance > 0 {
+		return verifyChars(g.macKey, v, canon, g.profile.tolerance)
 	}
 	return verifyAnswer(g.macKey, v, canon)
 }
@@ -948,6 +1331,9 @@ func (g TextImage) SanitizePublic(raw []byte) (map[string]any, error) {
 		return nil, fmt.Errorf("generator: 题面 answer_type=%q 不合法", p.AnswerType)
 	case p.MaxAnswerLen < 1 || p.MaxAnswerLen > 64:
 		return nil, fmt.Errorf("generator: 题面 max_answer_len=%d 越界", p.MaxAnswerLen)
+	case p.Tolerant != g.profile.tolerance:
+		// 题面声明的容差必须与判分 profile 一致：否则库里的旧题面会被换一套判分口径。
+		return nil, fmt.Errorf("generator: 题面 tolerant=%d 与 profile 的 %d 不符", p.Tolerant, g.profile.tolerance)
 	}
 	if p.ImageWidth < 40 || p.ImageWidth > maxImageWidth ||
 		p.ImageHeight < 40 || p.ImageHeight > maxImageHeight ||
@@ -956,12 +1342,12 @@ func (g TextImage) SanitizePublic(raw []byte) (map[string]any, error) {
 	}
 	for k := range generic {
 		switch k {
-		case "length", "charset", "answer_type", "max_answer_len", "image_width", "image_height":
+		case "length", "charset", "answer_type", "max_answer_len", "image_width", "image_height", "tolerant":
 		default:
 			return nil, fmt.Errorf("generator: 题面含非白名单字段 %q", k)
 		}
 	}
-	return map[string]any{
+	out := map[string]any{
 		"kind":           p.PublicKind(),
 		"length":         p.Length,
 		"charset":        p.Charset,
@@ -969,5 +1355,9 @@ func (g TextImage) SanitizePublic(raw []byte) (map[string]any, error) {
 		"max_answer_len": p.MaxAnswerLen,
 		"image_width":    p.ImageWidth,
 		"image_height":   p.ImageHeight,
-	}, nil
+	}
+	if p.Tolerant > 0 {
+		out["tolerant"] = p.Tolerant
+	}
+	return out, nil
 }

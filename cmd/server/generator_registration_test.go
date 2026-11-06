@@ -16,7 +16,11 @@ func TestKnownGeneratorsIncludeTextImageV2(t *testing.T) {
 	for _, g := range gens {
 		seen[g.ID()] = true
 	}
-	for _, id := range []string{generator.ArithID, generator.TextImageID, generator.TextImageV2ID} {
+	for _, id := range []string{
+		generator.ArithID, generator.TextImageID, generator.TextImageV2ID, generator.TextImageV3ID,
+		generator.ShapeGridID, generator.ShapeCountID,
+		generator.ParallaxID, generator.BankShotID, generator.AccessibleChoiceID,
+	} {
 		if !seen[id] {
 			t.Fatalf("knownGenerators 未登记 %q（已登记：%v）", id, seen)
 		}

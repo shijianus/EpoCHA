@@ -23,6 +23,7 @@ import (
 	"github.com/shijianus/EpoCHA/internal/generator"
 	"github.com/shijianus/EpoCHA/internal/pool"
 	"github.com/shijianus/EpoCHA/internal/pow"
+	"github.com/shijianus/EpoCHA/internal/risk"
 	"github.com/shijianus/EpoCHA/internal/store"
 	"github.com/shijianus/EpoCHA/internal/token"
 )
@@ -118,6 +119,15 @@ func newHarness(t *testing.T, tune func(*config.Config)) *harness {
 	// 过期相关测试全部假通过。
 	srv.now = func() time.Time { return h.clock }
 	h.srv, h.gens = srv, gens
+	tracker, err := risk.NewTracker(risk.MaxTrackedSources, func() time.Time { return h.clock })
+	if err != nil {
+		t.Fatalf("risk.NewTracker: %v", err)
+	}
+	gate, err := risk.NewAccessibilityGate(risk.MaxTrackedSources, risk.AccessibilityLimit, risk.AccessibilityWindow, func() time.Time { return h.clock })
+	if err != nil {
+		t.Fatalf("risk.NewAccessibilityGate: %v", err)
+	}
+	h.srv.tracker, h.srv.access = tracker, gate
 	_ = h.gens
 	h.cleanup = append(h.cleanup, func() { _ = db.Close() })
 	t.Cleanup(func() {
@@ -131,26 +141,33 @@ func newHarness(t *testing.T, tune func(*config.Config)) *harness {
 // testMasterKey 与 newHarness 用的是同一把主密钥：restart 之后签发的 token 仍可验签。
 var testMasterKey = bytes.Repeat([]byte{0x5a}, 32)
 
-// testRegistry 登记本程序**全部**生成器（3A 的算术基线 + 3B 的视觉题型）；
+// testRegistry 登记本程序**全部**生成器（3A 的算术基线 + 3B/ADR-024 的视觉题型）；
 // verifier 密钥走与生产同一条派生路径（token.DerivePurpose(master, "qver")）。
 func testRegistry(t *testing.T, master []byte) *generator.Registry {
 	t.Helper()
 	r := generator.NewRegistry()
 	k := token.DerivePurpose(master, "qver")
-	g, err := generator.NewArithmeticBaseline(k)
-	if err != nil {
-		t.Fatal(err)
+	register := func(g generator.Generator, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Register(g); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := r.Register(g); err != nil {
-		t.Fatal(err)
-	}
-	img, err := generator.NewTextImage(k)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := r.Register(img); err != nil {
-		t.Fatal(err)
-	}
+	register(generator.NewArithmeticBaseline(k))
+	register(generator.NewTextImage(k))
+	register(generator.NewTextImageV2(k))
+	register(generator.NewTextImageV3(k))
+	register(generator.NewShapeGrid(k))
+	register(generator.NewShapeCount(k))
+	register(generator.NewParallax(k))
+	register(generator.NewBankShot(k))
+	register(generator.NewAccessibleChoice(k))
+	register(newContractAngle(k))
+	register(newContractPoint(k))
+	register(newContractTiming(k))
 	return r
 }
 
@@ -173,6 +190,7 @@ func (h *harness) questionSite(t *testing.T, name, siteKey string, difficulty in
 func (h *harness) fillPool(t *testing.T, difficulty, n int) {
 	t.Helper()
 	cfg := pool.DefaultConfig()
+	cfg.Prewarm = false
 	cfg.LowWatermark = n
 	cfg.HighWatermark = n
 	cfg.BatchPerTick = n

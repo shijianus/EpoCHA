@@ -43,6 +43,7 @@ func measureFill(b *testing.B, n int) (time.Duration, int64, int64, int64, int64
 		b.Fatal(err)
 	}
 	cfg := DefaultConfig()
+	cfg.Prewarm = false
 	cfg.LowWatermark = n
 	cfg.HighWatermark = n
 	cfg.BatchPerTick = n // 一次性补满，测"有限批次"的整批成本

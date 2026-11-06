@@ -57,6 +57,8 @@ type Claims struct {
 	// 注意：mode 为空是**非法**的，不允许"缺字段=按旧语义放行"这种回落。
 	Mode string `json:"mode"`
 	Gen  string `json:"gen,omitempty"`
+	// Sess 是调用方的弱会话标识，仅用于刷新/遥测状态聚合；它不是凭据，也不是信任根。
+	Sess string `json:"sess,omitempty"`
 }
 
 // Signer 持有一把当前主密钥与可选的一把上一把主密钥（kid 轮换期间双活）。

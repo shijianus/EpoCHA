@@ -492,9 +492,9 @@ func TestPurgeExpiryIsInclusiveForReadyAndResponses(t *testing.T) {
 	}
 }
 
-// TestMigration0004FromStage3ADatabase 拿一个**只有 0001..0003** 的库让当前程序打开：
-// 0004 必须是纯增量（旧行 asset 为 NULL、旧流程不变），而不是"重建表"。
-func TestMigration0004FromStage3ADatabase(t *testing.T) {
+// TestMigration0005FromStage3ADatabase 拿一个**只有 0001..0003** 的库让当前程序打开：
+// 0004 加资产列、0005 重建 payload CHECK；旧行必须完整保留（asset 为 NULL、状态不变）。
+func TestMigration0005FromStage3ADatabase(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "stage3a.db")
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", path)
 	h, err := sql.Open("sqlite", dsn)
@@ -530,8 +530,8 @@ VALUES('legacy-1','arithmetic-baseline-v1','v1',3,'ready','{"task":"1 + 1","answ
 		t.Fatalf("打开阶段 3A 的库失败: %v", err)
 	}
 	t.Cleanup(func() { _ = d.Close() })
-	if v, _ := d.SchemaVersion(ctx); v != 4 {
-		t.Fatalf("升级后版本 = %d，期望 4", v)
+	if v, _ := d.SchemaVersion(ctx); v != 6 {
+		t.Fatalf("升级后版本 = %d，期望 6", v)
 	}
 	// 旧行完整保留，且新列是 NULL/''（不静默改变既有行的语义）
 	var (

@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -25,18 +26,19 @@ import (
 
 // 策略边界。DB 的 CHECK 与这里的校验必须一致：SQL 侧是最后一道，Go 侧负责给出可解释的错误。
 const (
-	MaxSites            = 512 // FindSiteBySecret 是常数时间的全表扫描，站点数必须有上界
-	MaxSecretsPerSite   = 4   // 同时有效的验证凭据数（过渡期新旧并存的上限）
-	MaxOriginsPerSite   = 32  // 允许来源条目数
-	MaxNameLen          = 64
-	MaxSiteKeyLen       = 64
-	MinSecretLen        = 16 // 导入阶段 1 配置时兼容短 secret；本专案自生成的是 68 字符
-	SecretPrefix        = "sk_"
-	AdminKeyPrefix      = "ak_"
-	MaxTTLSeconds       = 3600
-	MinTTLSeconds       = 1
-	MaxRateRPM          = 100000
-	MaxTransitionSecond = 86400 // 轮换过渡期硬上限（1 天）
+	MaxSites             = 512 // FindSiteBySecret 是常数时间的全表扫描，站点数必须有上界
+	MaxSecretsPerSite    = 4   // 同时有效的验证凭据数（过渡期新旧并存的上限）
+	MaxOriginsPerSite    = 32  // 允许来源条目数
+	MaxGeneratorsPerSite = 8   // 站点级候选题型上限（ADR-026）
+	MaxNameLen           = 64
+	MaxSiteKeyLen        = 64
+	MinSecretLen         = 16 // 导入阶段 1 配置时兼容短 secret；本专案自生成的是 68 字符
+	SecretPrefix         = "sk_"
+	AdminKeyPrefix       = "ak_"
+	MaxTTLSeconds        = 3600
+	MinTTLSeconds        = 1
+	MaxRateRPM           = 100000
+	MaxTransitionSecond  = 86400 // 轮换过渡期硬上限（1 天）
 )
 
 // SitePolicy 是站点级可配策略。
@@ -51,8 +53,21 @@ type SitePolicy struct {
 	// 因此必须是站点的显式声明，不能由"池里刚好有题"推导。
 	VerifyMode string
 	// GeneratorID 与 Difficulty 只在 pow_question 下有意义：它们就是领题的分桶键。
-	GeneratorID string
-	Difficulty  int
+	// GeneratorPool 为空时等价于只含 GeneratorID；非空时由调度器在池内按风险/设备抽题。
+	GeneratorID   string
+	GeneratorPool []string
+	Difficulty    int
+}
+
+// GeneratorIDs 返回调度候选；空池回落到旧的单 generator_id。
+func (p SitePolicy) GeneratorIDs() []string {
+	if len(p.GeneratorPool) > 0 {
+		return append([]string(nil), p.GeneratorPool...)
+	}
+	if p.GeneratorID != "" {
+		return []string{p.GeneratorID}
+	}
+	return nil
 }
 
 // Site 是库中站点的完整视图（权威数据源是 SQLite，配置文件只是一次性导入入口）。
@@ -72,7 +87,7 @@ type Site struct {
 // 任何真实 secret 都匹配不上它（见 0002_stage2.sql 注释）。
 const siteColumns = `id, name, site_key, pow_bits, enabled, version,
 	challenge_ttl_sec, response_ttl_sec, rate_ip_rpm, rate_site_rpm, allow_missing_origin,
-	verify_mode, generator_id, difficulty, created_at`
+	verify_mode, generator_id, generator_pool, difficulty, created_at`
 
 func scanSite(sc interface {
 	Scan(dest ...any) error
@@ -82,11 +97,15 @@ func scanSite(sc interface {
 		enabled, allowMiss int64
 		chalTTL, respTTL   int64
 		created            string
+		poolRaw            string
 		err                error
 	)
 	if err = sc.Scan(&s.ID, &s.Name, &s.SiteKey, &s.PowBits, &enabled, &s.Version,
 		&chalTTL, &respTTL, &s.Policy.RateIPRPM, &s.Policy.RateSiteRPM, &allowMiss,
-		&s.Policy.VerifyMode, &s.Policy.GeneratorID, &s.Policy.Difficulty, &created); err != nil {
+		&s.Policy.VerifyMode, &s.Policy.GeneratorID, &poolRaw, &s.Policy.Difficulty, &created); err != nil {
+		return nil, err
+	}
+	if s.Policy.GeneratorPool, err = parseGeneratorPool(poolRaw); err != nil {
 		return nil, err
 	}
 	s.Policy.PowBits = s.PowBits
@@ -119,6 +138,9 @@ func (p SitePolicy) Validate() error {
 		return fmt.Errorf("%w: pow_question 站点必须指定 generator_id", ErrBadConfig)
 	case p.VerifyMode == ModePowQuestion && (p.Difficulty < MinDifficulty || p.Difficulty > MaxDifficulty):
 		return fmt.Errorf("%w: 难度档须在 %d..%d", ErrBadConfig, MinDifficulty, MaxDifficulty)
+	}
+	if _, err := normalizeGeneratorPool(p.GeneratorPool); err != nil {
+		return err
 	}
 	return nil
 }
@@ -218,6 +240,10 @@ func (d *DB) createSiteWithOrigins(ctx context.Context, name, siteKey string, p 
 		return nil, "", err
 	}
 	now := formatTime(time.Now().UTC())
+	poolJSON, err := encodeGeneratorPool(p.GeneratorPool)
+	if err != nil {
+		return nil, "", err
+	}
 	tx, err := d.h.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, "", fmt.Errorf("store: 建站点事务: %w", err)
@@ -232,12 +258,12 @@ func (d *DB) createSiteWithOrigins(ctx context.Context, name, siteKey string, p 
 	res, err := tx.ExecContext(ctx, `
 INSERT INTO sites(name, site_key, secret_mac, pow_bits, created_at, enabled, version,
                   challenge_ttl_sec, response_ttl_sec, rate_ip_rpm, rate_site_rpm, allow_missing_origin,
-                  verify_mode, generator_id, difficulty)
-VALUES(?,?,?,?,?,?,1,?,?,?,?,?,?,?,?)`,
+                  verify_mode, generator_id, generator_pool, difficulty)
+VALUES(?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?)`,
 		name, siteKey, retiredMacFor(siteKey), int(p.PowBits), now,
 		1, int64(p.ChallengeTTL/time.Second), int64(p.ResponseTTL/time.Second),
 		p.RateIPRPM, p.RateSiteRPM, b2i(p.AllowMissingOrigin),
-		p.VerifyMode, p.GeneratorID, p.Difficulty)
+		p.VerifyMode, p.GeneratorID, poolJSON, p.Difficulty)
 	if err != nil {
 		if isUniqueErr(err) {
 			return nil, "", fmt.Errorf("%w: 站点名或 site_key 已存在", ErrConflict)
@@ -307,6 +333,7 @@ type SiteUpdate struct {
 	AllowMissingOrigin *bool
 	VerifyMode         *string
 	GeneratorID        *string
+	GeneratorPool      *[]string
 	Difficulty         *int
 }
 
@@ -331,13 +358,17 @@ func (d *DB) UpdateSite(ctx context.Context, id int64, u SiteUpdate) (*Site, err
 		}
 		name = *u.Name
 	}
+	poolJSON, err := encodeGeneratorPool(next.GeneratorPool)
+	if err != nil {
+		return nil, err
+	}
 	res, err := d.h.ExecContext(ctx, `
 UPDATE sites SET name=?, pow_bits=?, challenge_ttl_sec=?, response_ttl_sec=?, rate_ip_rpm=?, rate_site_rpm=?,
-                 allow_missing_origin=?, verify_mode=?, generator_id=?, difficulty=?
+                 allow_missing_origin=?, verify_mode=?, generator_id=?, generator_pool=?, difficulty=?
 WHERE id=?`,
 		name, int(next.PowBits), int64(next.ChallengeTTL/time.Second), int64(next.ResponseTTL/time.Second),
 		next.RateIPRPM, next.RateSiteRPM, b2i(next.AllowMissingOrigin),
-		next.VerifyMode, next.GeneratorID, next.Difficulty, id)
+		next.VerifyMode, next.GeneratorID, poolJSON, next.Difficulty, id)
 	if err != nil {
 		// name 与 site_key 都是 UNIQUE：撞名是"另一个站点已经用了这个名字"，
 		// 不是内部错误，也不回滚任何东西（这条 UPDATE 要么整体生效要么整体不生效）。
@@ -417,6 +448,58 @@ func (d *DB) querySite(ctx context.Context, q string, arg any) (*Site, error) {
 	return s, nil
 }
 
+// --- 生成器池 ---
+
+// normalizeGeneratorPool 去空/去重并做边界校验；返回副本，调用方可安全持有。
+func normalizeGeneratorPool(in []string) ([]string, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	if len(in) > MaxGeneratorsPerSite {
+		return nil, fmt.Errorf("%w: 生成器池最多 %d 项", ErrBadConfig, MaxGeneratorsPerSite)
+	}
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		id := strings.TrimSpace(raw)
+		if !printableOK(id) || len(id) > 64 {
+			return nil, fmt.Errorf("%w: 生成器 id 须为 1..64 个可见字符", ErrBadConfig)
+		}
+		if seen[id] {
+			return nil, fmt.Errorf("%w: 生成器池含重复 id %q", ErrBadConfig, id)
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+func encodeGeneratorPool(in []string) (string, error) {
+	clean, err := normalizeGeneratorPool(in)
+	if err != nil {
+		return "", err
+	}
+	if len(clean) == 0 {
+		return "", nil
+	}
+	raw, err := json.Marshal(clean)
+	if err != nil {
+		return "", fmt.Errorf("store: 编码生成器池: %w", err)
+	}
+	return string(raw), nil
+}
+
+func parseGeneratorPool(raw string) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, fmt.Errorf("store: 解析生成器池: %w", err)
+	}
+	return normalizeGeneratorPool(out)
+}
+
 // --- 辅助 ---
 
 // retiredMacFor 给已弃用的 sites.secret_mac 列生成占位值。
@@ -481,6 +564,9 @@ func applyUpdate(cur SitePolicy, u SiteUpdate) SitePolicy {
 	}
 	if u.GeneratorID != nil {
 		out.GeneratorID = *u.GeneratorID
+	}
+	if u.GeneratorPool != nil {
+		out.GeneratorPool = append([]string(nil), (*u.GeneratorPool)...)
 	}
 	if u.Difficulty != nil {
 		out.Difficulty = *u.Difficulty

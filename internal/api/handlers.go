@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shijianus/EpoCHA/internal/dispatch"
 	"github.com/shijianus/EpoCHA/internal/generator"
 	"github.com/shijianus/EpoCHA/internal/pow"
 	"github.com/shijianus/EpoCHA/internal/risk"
@@ -19,8 +20,16 @@ import (
 )
 
 type challengeRequest struct {
-	SiteKey string `json:"site_key"`
-	Lang    string `json:"lang"`
+	SiteKey       string      `json:"site_key"`
+	Lang          string      `json:"lang"`
+	Accessibility bool        `json:"accessibility,omitempty"`
+	Device        *deviceHint `json:"device,omitempty"`
+	Session       string      `json:"session,omitempty"`
+}
+
+type deviceHint struct {
+	Pointer       string `json:"pointer,omitempty"` // fine | coarse
+	ReducedMotion bool   `json:"reduced_motion,omitempty"`
 }
 
 type powPayload struct {
@@ -43,6 +52,8 @@ type redeemRequest struct {
 	PowNonce string `json:"pow_nonce"`
 	// Answer 只在 pow_question 下必填。它**不是**安全边界：真正的判定在服务端库里。
 	Answer string `json:"answer"`
+	// Telemetry 是量化摘要（ADR-027），只做弱证据；不参与显式判定。
+	Telemetry *risk.Telemetry `json:"telemetry,omitempty"`
 }
 
 type redeemResponse struct {
@@ -241,7 +252,133 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	params, err := pow.NewParams(site.PowBits)
+	if req.Session != "" && !fieldOK(req.Session, 64) {
+		s.reject(w, CodeInvalidRequest)
+		return
+	}
+	device := dispatch.DeviceDesktop
+	noMotion := false
+	if req.Device != nil {
+		switch req.Device.Pointer {
+		case "", "fine":
+		case "coarse":
+			device = dispatch.DeviceTouch
+		default:
+			s.reject(w, CodeInvalidRequest)
+			return
+		}
+		noMotion = req.Device.ReducedMotion
+	}
+
+	// 风险调度只使用进程内可观测的弱信号；它决定"下一次出什么题"，不改变当前判定。
+	// pow_only 站点不进入调度器：它没有题型，也不该因为"池为空"被误判成缺题。
+	var (
+		bits        = int(site.PowBits)
+		difficulty  = site.Policy.Difficulty
+		selectedID  string
+		selectedGen generator.Generator
+	)
+	now := s.now().UTC()
+	if site.Policy.VerifyMode == store.ModePowQuestion {
+		riskKey := "site:" + strconv.FormatInt(site.ID, 10) + ":ip:" + risk.Key(s.src.ClientIP(r))
+		if req.Session != "" {
+			riskKey = "site:" + strconv.FormatInt(site.ID, 10) + ":sess:" + req.Session
+		}
+		riskScore := 0
+		var penalty risk.RefreshPenalty
+		// 没有 session 的调用方按旧客户端处理：仍受限流/来源策略约束，但不启用
+		// "连续刷新"难度地板。Widget 总会带 session；这是兼容边界，不是信任提升。
+		if req.Session != "" && s.tracker != nil {
+			riskScore, penalty = s.tracker.Assess(riskKey, 0)
+		}
+		if penalty.Cooldown > 0 {
+			s.rateLimited(w, penalty.Cooldown)
+			return
+		}
+		band := dispatch.BandForScore(riskScore)
+		if req.Accessibility && (band == dispatch.BandHigh || band == dispatch.BandCritical) {
+			// 高风险不开放无障碍降维；先拒绝，不消耗 24h 名额。
+			s.challengeUnavailable(w)
+			return
+		}
+		difficulty = site.Policy.Difficulty + penalty.FloorDelta
+		if difficulty > store.MaxDifficulty {
+			difficulty = store.MaxDifficulty
+		}
+
+		var configured []dispatch.Candidate
+		catalog := dispatch.Catalog()
+		for _, id := range site.Policy.GeneratorIDs() {
+			if _, err := s.gens.Lookup(id); err != nil {
+				// 池里有一个未登记 ID：跳过它，但不把整站静默降级成"随便挑一个"。
+				continue
+			}
+			c, ok := catalog[id]
+			if !ok {
+				c = dispatch.FallbackCandidate(id)
+			}
+			configured = append(configured, c)
+		}
+		if req.Accessibility {
+			// 先确认池内真的配置了 accessible 候选；没有就 503，不消耗 24h 名额。
+			hasAccessible := false
+			for _, c := range configured {
+				if c.Accessible {
+					hasAccessible = true
+					break
+				}
+			}
+			if !hasAccessible {
+				s.challengeUnavailable(w)
+				return
+			}
+			// 闸门按 site+source 计，不按可伪造的 session 计；
+			// 否则每次换 session 就能无限申请"更简单的题"。
+			accessKey := "site:" + strconv.FormatInt(site.ID, 10) + ":ip:" + risk.Key(s.src.ClientIP(r))
+			if s.access == nil || !s.access.Allow(accessKey) {
+				retry := time.Duration(0)
+				if s.access != nil {
+					retry = s.access.RetryAfter(accessKey)
+				}
+				s.rateLimited(w, retry)
+				return
+			}
+		}
+		var candidates []dispatch.Candidate
+		for _, c := range configured {
+			g, err := s.gens.Lookup(c.ID)
+			if err != nil {
+				continue
+			}
+			n, err := s.db.ReadyCount(ctx, store.PoolSpec{GeneratorID: c.ID, Version: g.Version(), Difficulty: difficulty}, now)
+			if err == nil && n > 0 {
+				candidates = append(candidates, c)
+			}
+		}
+		if len(candidates) == 0 || s.scheduler == nil {
+			s.challengeUnavailable(w)
+			return
+		}
+		pick, err := s.scheduler.Pick(candidates, dispatch.Request{
+			Band: band, Device: device, Accessibility: req.Accessibility, NoMotion: noMotion,
+		})
+		if err != nil {
+			s.challengeUnavailable(w)
+			return
+		}
+		g, err := s.gens.Lookup(pick.ID)
+		if err != nil {
+			s.challengeUnavailable(w)
+			return
+		}
+		selectedID, selectedGen = pick.ID, g
+		bits = int(site.PowBits) + penalty.PoWDelta
+		if bits > pow.MaxBits {
+			bits = pow.MaxBits
+		}
+	}
+
+	params, err := pow.NewParams(uint8(bits))
 	if err != nil {
 		s.internalError(w, r, "生成 PoW 参数", err)
 		return
@@ -251,10 +388,9 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, "生成 challenge id", err)
 		return
 	}
-	now := s.now().UTC()
 	ch := &store.Challenge{
 		ID: id, SiteID: site.ID, Origin: oc.Canonical,
-		PowSeed: params.Seed, PowBits: site.PowBits,
+		PowSeed: params.Seed, PowBits: params.Bits,
 		CreatedAt: now, ExpiresAt: now.Add(site.Policy.ChallengeTTL),
 	}
 
@@ -262,19 +398,12 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 	// 也没有任何方式让客户端把 pow_question 降级成 pow_only。
 	var spec *store.PoolSpec
 	if site.Policy.VerifyMode == store.ModePowQuestion {
-		g, err := s.gens.Lookup(site.Policy.GeneratorID)
-		if err != nil {
-			// 站点配了本程序没登记的题型：宁可 503，也不"随便挑一个题型顶上"
-			s.log.Warn("生成器不可用", "site_id", site.ID, "err", errKind(err))
-			s.challengeUnavailable(w)
-			return
-		}
 		spec = &store.PoolSpec{
-			GeneratorID: site.Policy.GeneratorID, Version: g.Version(),
-			Difficulty: site.Policy.Difficulty,
+			GeneratorID: selectedID, Version: selectedGen.Version(),
+			Difficulty: difficulty,
 		}
 		ch.Mode = site.Policy.VerifyMode
-		ch.GeneratorID = site.Policy.GeneratorID
+		ch.GeneratorID = selectedID
 	} else {
 		ch.Mode = store.ModePowOnly
 	}
@@ -295,8 +424,8 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 	seedB64 := base64.RawURLEncoding.EncodeToString(params.Seed)
 	tok, err := s.signer.Sign(token.PurposeChallenge, token.Claims{
 		Sid: site.ID, Svid: site.Version, CID: id,
-		Exp: ch.ExpiresAt.Unix(), Bits: site.PowBits, Seed: seedB64,
-		Mode: ch.Mode, Gen: ch.GeneratorID,
+		Exp: ch.ExpiresAt.Unix(), Bits: params.Bits, Seed: seedB64,
+		Mode: ch.Mode, Gen: ch.GeneratorID, Sess: req.Session,
 	}, now)
 	if err != nil {
 		s.internalError(w, r, "签名", err)
@@ -305,7 +434,7 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 	out := challengeResponse{
 		Token:     tok,
 		ExpiresIn: int64(site.Policy.ChallengeTTL / time.Second),
-		Pow:       powPayload{Algo: params.Algo, Seed: seedB64, Bits: site.PowBits},
+		Pow:       powPayload{Algo: params.Algo, Seed: seedB64, Bits: params.Bits},
 		Mode:      ch.Mode,
 	}
 	if q != nil {
@@ -362,6 +491,11 @@ func (s *Server) questionDTO(q *store.PoolQuestion) (map[string]any, error) {
 	if len(q.Asset) > 0 || q.AssetMime != "" {
 		return nil, errAssetInconsistent
 	}
+	// accessible-choice 是唯一显式的纯文本题型；给客户端一个明确的媒体标识，
+	// 而不是让它从 options 是否存在去猜。
+	if q.GeneratorID == generator.AccessibleChoiceID {
+		fields["media"] = generator.MediaText
+	}
 	return fields, nil
 }
 
@@ -387,6 +521,13 @@ func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 		len(req.Answer) > maxAnswerLen {
 		s.reject(w, CodeInvalidRequest)
 		return
+	}
+	if req.Telemetry != nil {
+		if err := req.Telemetry.Validate(); err != nil {
+			// 遥测畸形是结构错误，不消耗作答机会；它仍不参与判定。
+			s.reject(w, CodeInvalidRequest)
+			return
+		}
 	}
 	if !s.allowGlobalIP(r, w) {
 		return
@@ -528,6 +669,14 @@ func (s *Server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 		}
 		s.rejectChallenge(w, ch.ID)
 		return
+	}
+	if s.tracker != nil {
+		riskKey := "site:" + strconv.FormatInt(site.ID, 10) + ":ip:" + risk.Key(s.src.ClientIP(r))
+		if claims.Sess != "" {
+			riskKey = "site:" + strconv.FormatInt(site.ID, 10) + ":sess:" + claims.Sess
+		}
+		// 遥测只在显式判定已提交后更新风险状态；它不改变 verdict，也不进入响应。
+		s.tracker.ObserveRedeem(riskKey, res.Outcome != store.OutcomeWrongAnswer, req.Telemetry)
 	}
 	if res.Outcome == store.OutcomeWrongAnswer {
 		// 答案错：状态**已经提交**为终态。这里返回的必须是"不可兑换"，

@@ -91,6 +91,19 @@ func TestParseFlags(t *testing.T) {
 		"--generator", "cjk-v1"}, env); err == nil {
 		t.Fatal("未实现的题型应被拒（预览不猜题型）")
 	}
+	for _, gen := range []string{
+		generator.TextImageV2ID, generator.TextImageV3ID,
+		generator.ShapeGridID, generator.ShapeCountID,
+	} {
+		opt, err := parseFlags([]string{"--api", "http://h:1", "--site-key", "sk", "--site-secret", demoSecret,
+			"--generator", gen}, env)
+		if err != nil {
+			t.Fatalf("预览应接受已登记题型 %s: %v", gen, err)
+		}
+		if opt.Generator != gen {
+			t.Fatalf("预览题型 %s 被改成 %s", gen, opt.Generator)
+		}
+	}
 	if _, err := parseFlags([]string{"--api", "http://h:1", "--site-key", "sk", "--site-secret", demoSecret,
 		"--difficulty", "9"}, env); err == nil {
 		t.Fatal("难度越界应被拒")

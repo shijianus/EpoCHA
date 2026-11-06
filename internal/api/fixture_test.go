@@ -39,6 +39,11 @@ type seededQuestion struct {
 	// Answer 是**规范化之后**的答案串（与生成器 NormalizeAnswer 的输出同形）。
 	Answer string
 	Asset  []byte // 图片资产（阶段 3B）；nil 表示文本题
+	// Tolerance > 0 表示该题使用逐字容差 verifier（text-image-v3，ADR-024）。
+	// 夹具必须按同一个线格式独立构造 verifier，才能证明"库里的字节被服务端按预期解释"。
+	Tolerance int
+	// Verifier 非 nil 时直接使用（ADR-028 的 TSV 契约夹具）；nil 走旧的精确/逐字构造。
+	Verifier []byte
 }
 
 // answerVerifier 在测试侧**独立实现** DESIGN §5.4 的 verifier 线格式：
@@ -58,6 +63,29 @@ func answerVerifier(t *testing.T, master, nonce []byte, canonicalAnswer string) 
 	out := make([]byte, 0, 16+sha256.Size)
 	out = append(out, nonce...)
 	return append(out, m.Sum(nil)...)
+}
+
+// charAnswerVerifier 独立实现 ADR-024 的逐字线格式：
+//
+//	nonce(16B) || HMAC(K(qver), "epocha/v1|qver-char|" || nonce || 0x00 || byte(pos) || 0x00 || char)
+//
+// 与 answerVerifier 一样不复用生产构造函数：线格式改动时这里必须一起变红。
+func charAnswerVerifier(t *testing.T, master, nonce []byte, canonicalAnswer string) []byte {
+	t.Helper()
+	key := token.DerivePurpose(master, "qver")
+	out := make([]byte, 0, 16+len(canonicalAnswer)*sha256.Size)
+	out = append(out, nonce...)
+	for i := 0; i < len(canonicalAnswer); i++ {
+		m := hmac.New(sha256.New, key)
+		m.Write([]byte("epocha/v1|qver-char|"))
+		m.Write(nonce)
+		m.Write([]byte{0})
+		m.Write([]byte{byte(i)})
+		m.Write([]byte{0})
+		m.Write([]byte{canonicalAnswer[i]})
+		out = append(out, m.Sum(nil)...)
+	}
+	return out
 }
 
 // seedQuestions 按给定顺序把题目写成 ready 行，并保证领题查询（ORDER BY expires_at）
@@ -90,6 +118,13 @@ func (h *harness) seedQuestions(t *testing.T, difficulty int, qs ...seededQuesti
 		copy(nonce, []byte("epocha-fixture-q"))
 		nonce[15] = byte(idx + 1)
 		created := h.clock.Add(time.Duration(idx) * time.Second)
+		ver := q.Verifier
+		if ver == nil {
+			ver = answerVerifier(t, h.cfg.MasterKey, nonce, q.Answer)
+			if q.Tolerance > 0 {
+				ver = charAnswerVerifier(t, h.cfg.MasterKey, nonce, q.Answer)
+			}
+		}
 		row := &store.PoolQuestion{
 			ID:          "fixture" + hex.EncodeToString([]byte{byte(idx >> 8), byte(idx), byte(len(qs))}),
 			GeneratorID: genID,
@@ -97,7 +132,7 @@ func (h *harness) seedQuestions(t *testing.T, difficulty int, qs ...seededQuesti
 			Difficulty:  difficulty,
 			Status:      store.PoolReady,
 			PayloadJSON: string(payload),
-			Verifier:    answerVerifier(t, h.cfg.MasterKey, nonce, q.Answer),
+			Verifier:    ver,
 			CreatedAt:   created,
 			// 过期时间按序号递增：领取查询按 expires_at 升序取题，于是发出顺序 = 给定顺序。
 			ExpiresAt: h.clock.Add(30*time.Minute + time.Duration(idx)*time.Minute),

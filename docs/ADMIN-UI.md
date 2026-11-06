@@ -58,13 +58,16 @@
 | --- | --- | --- |
 | 凭据入口 | `GET /api/admin/whoami` | 成功后显示公开 `key_id`，不显示凭据原文 |
 | 站点列表 | `GET /api/admin/sites?limit=20&after_id=N` | 名称 / `site_key` / 验证模式 / 题型 / 状态徽标 / 版本；游标分页（后端只有前进游标，上一页由页面记栈） |
-| 创建站点 | `POST /api/admin/sites` | 名称、`site_key`（留空由服务生成 `pk_…`）、`verify_mode`、`generator_id`、难度档、PoW bits；201 结果里**一次性**展示 secret 明文 |
+| 创建站点 | `POST /api/admin/sites` | 名称、`site_key`（留空由服务生成 `pk_…`）、`verify_mode`、`generator_id`、`generator_pool`（多选，留空回落到单题型）、难度档、PoW bits；201 结果里**一次性**展示 secret 明文 |
 | 站点详情 | `GET/PUT /api/admin/sites/{id}`、`PUT /api/admin/sites/{id}/origins` | 概览（ID/`site_key`/状态/版本/创建时间）+ 策略表单 + Origin 列表 + 凭据视图（只有 `key_id` 与时间） |
 | 启停 | `POST /api/admin/sites/{id}/enable|disable` | 二次确认里点名站点名称、`site_key`、当前版本 |
 | 题型下拉 | `GET /api/admin/generators` | `experimental` 与 `production_ready` 两个徽标 + 服务端 `note` 原文 |
 
 列表与详情的空状态、失败状态、重试都是真实分支（加载中 / 空列表 / 失败 + 重试按钮），
 **没有**任何 QPS、成功率、趋势图——那些数据本身还不存在，画出来就是编造。
+
+策略表单的 `generator_pool` 是复选框列表；只有勾选集合发生变化时才发送该字段。
+旧版单字段表单不发送 `generator_pool`，服务端按"字段缺失=不改"保留原池，避免保存策略时意外清空。
 
 ## 4. 保存路径的具体行为
 

@@ -82,7 +82,7 @@ func run(args []string, getenv func(string) string) error {
 	var o options
 	fs.StringVar(&o.DBPath, "db", getenv("EPOCHA_DB"), "SQLite 库路径（必填）")
 	fs.StringVar(&o.OutDir, "out-dir", "", "答案与图片的输出目录（必填，本地开发目录）")
-	fs.StringVar(&o.Generator, "generator", generator.TextImageID, "题型：text-image-v1 或 arithmetic-baseline-v1")
+	fs.StringVar(&o.Generator, "generator", generator.TextImageID, "题型：text-image-v1/v2/v3、shape-grid-v1、shape-count-v1、parallax-code-v1、bank-shot-v1、accessible-choice-v1 或 arithmetic-baseline-v1")
 	fs.IntVar(&o.Difficulty, "difficulty", 2, "难度档 1..5，必须与站点配置一致，否则领不到")
 	fs.IntVar(&o.Count, "count", 1, "注入条数 1..50")
 	fs.DurationVar(&o.TTL, "ttl", 70*time.Minute, "题目寿命（必须 > 站点 challenge TTL）")
@@ -161,6 +161,48 @@ func buildGenerator(id string, qKey []byte) (generator.Generator, error) {
 		g, err := generator.NewTextImage(qKey)
 		if err != nil {
 			return nil, fmt.Errorf("构造视觉题型: %w", err)
+		}
+		return g, nil
+	case generator.TextImageV2ID:
+		g, err := generator.NewTextImageV2(qKey)
+		if err != nil {
+			return nil, fmt.Errorf("构造视觉题型 v2: %w", err)
+		}
+		return g, nil
+	case generator.TextImageV3ID:
+		g, err := generator.NewTextImageV3(qKey)
+		if err != nil {
+			return nil, fmt.Errorf("构造抽象文字题型 v3: %w", err)
+		}
+		return g, nil
+	case generator.ShapeGridID:
+		g, err := generator.NewShapeGrid(qKey)
+		if err != nil {
+			return nil, fmt.Errorf("构造图形点选题型: %w", err)
+		}
+		return g, nil
+	case generator.ShapeCountID:
+		g, err := generator.NewShapeCount(qKey)
+		if err != nil {
+			return nil, fmt.Errorf("构造图形计数题型: %w", err)
+		}
+		return g, nil
+	case generator.ParallaxID:
+		g, err := generator.NewParallax(qKey)
+		if err != nil {
+			return nil, fmt.Errorf("构造时序视差题型: %w", err)
+		}
+		return g, nil
+	case generator.BankShotID:
+		g, err := generator.NewBankShot(qKey)
+		if err != nil {
+			return nil, fmt.Errorf("构造物理反弹题型: %w", err)
+		}
+		return g, nil
+	case generator.AccessibleChoiceID:
+		g, err := generator.NewAccessibleChoice(qKey)
+		if err != nil {
+			return nil, fmt.Errorf("构造无障碍文本题型: %w", err)
 		}
 		return g, nil
 	case generator.ArithID:
@@ -248,10 +290,24 @@ func seedOne(ctx context.Context, db *store.DB, g generator.Generator, o options
 // 算术题型走另一条路：它的答案可由公开题面独立求值（不消费熵流），
 // 所以这里对它返回的是"求值结果"，配对由下面的 Verify 复核。
 func answerFromStream(g generator.Generator, stream io.Reader, params generator.Params) (string, error) {
-	switch g.(type) {
-	case generator.TextImage:
+	switch g.ID() {
+	case generator.TextImageID:
 		return generator.TextImageAnswerFrom(stream)
-	case generator.ArithmeticBaseline:
+	case generator.TextImageV2ID:
+		return generator.TextImageV2AnswerFrom(stream)
+	case generator.TextImageV3ID:
+		return generator.TextImageV3AnswerFrom(stream)
+	case generator.ShapeGridID:
+		return generator.ShapeGridAnswerFrom(stream)
+	case generator.ShapeCountID:
+		return generator.ShapeCountAnswerFrom(stream)
+	case generator.ParallaxID:
+		return generator.ParallaxAnswerFrom(stream, params.Difficulty)
+	case generator.BankShotID:
+		return generator.BankShotAnswerFrom(stream, params.Difficulty)
+	case generator.AccessibleChoiceID:
+		return generator.AccessibleChoiceAnswerFrom(stream, params.Difficulty)
+	case generator.ArithID:
 		// 算术题：先按同一条流（同一难度）生成一次拿到题面，再独立求值
 		q, err := g.Generate(context.Background(), params, stream)
 		if err != nil {

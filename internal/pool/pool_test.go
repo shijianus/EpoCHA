@@ -47,6 +47,7 @@ func newHarness(t *testing.T, tune func(*Config), entropy func() io.Reader) *har
 	cfg.LowWatermark = 4
 	cfg.HighWatermark = 8
 	cfg.BatchPerTick = 4
+	cfg.Prewarm = false
 	cfg.PollInterval = 120 * time.Millisecond
 	cfg.YieldPause = 0
 	cfg.YieldEvery = 100

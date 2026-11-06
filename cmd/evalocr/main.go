@@ -63,7 +63,7 @@ func run(args []string) (int, error) {
 	fs.Var(&stringList{dst: &o.ocrArgs}, "ocr-arg", "OCR 参数，可重复；{image} 会替换成图片路径")
 	fs.IntVar(&timeoutSec, "timeout-sec", 20, "单张超时（秒，1..120）")
 	fs.IntVar(&o.limit, "limit", 0, "只跑前 N 张（0 = 全部）")
-	fs.StringVar(&o.normalize, "normalize", "textimage", "归一化实现：textimage（= 生产 generator.TextImage.NormalizeAnswer，默认）| none（逐字节比较）")
+	fs.StringVar(&o.normalize, "normalize", "textimage", "归一化实现：textimage / textimage-v2 / textimage-v3（= 对应生产 NormalizeAnswer）| none（逐字节比较）")
 	if err := fs.Parse(args); err != nil {
 		return 1, fmt.Errorf("命令行参数: %w", err)
 	}
@@ -231,10 +231,21 @@ func normalizer(kind string) (eval.Normalizer, error) {
 			return nil, fmt.Errorf("构造 v2 归一化器: %w", err)
 		}
 		return g.NormalizeAnswer, nil
+	case "textimage-v3":
+		g, err := generator.NewTextImageV3(bytes.Repeat([]byte{0x11}, 32))
+		if err != nil {
+			return nil, fmt.Errorf("构造 v3 归一化器: %w", err)
+		}
+		// 这是必须写在结果前面的边界：生产 v3 允许最多 1 个字符替换，
+		// 而 eval.Score 只做严格整串比较。这里的 StrictAccuracy 是生产接受率的**下界**，
+		// 不是等价指标；要测生产接受率需要容差感知的评分器（目前没有）。
+		fmt.Println("注意：textimage-v3 的生产判分允许 1 个字符替换；本评分器只做严格整串比较，")
+		fmt.Println("      因此 StrictAccuracy 是生产接受率的下界，不是等价指标。")
+		return g.NormalizeAnswer, nil
 	case "none":
 		return nil, nil // 逐字节比较（eval.Score 的 nil 分支）
 	default:
-		return nil, fmt.Errorf("--normalize 只支持 textimage | textimage-v2 | none，实得 %q", kind)
+		return nil, fmt.Errorf("--normalize 只支持 textimage | textimage-v2 | textimage-v3 | none，实得 %q", kind)
 	}
 }
 

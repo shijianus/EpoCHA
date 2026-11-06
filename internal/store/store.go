@@ -31,8 +31,11 @@ var migration0004 string
 //go:embed migrations/0005_payload_8k.sql
 var migration0005 string
 
+//go:embed migrations/0006_sites_pool.sql
+var migration0006 string
+
 // schemaVersion 是最后一条迁移对应的版本号，写入 meta 表。
-const schemaVersion = 5
+const schemaVersion = 6
 
 // retiredPrefix 是阶段 1 secret_mac 列被中和时加在摘要输入上的域分隔串（见 0002 注释）。
 const retiredPrefix = "epocha/v1|retired|"
@@ -232,6 +235,7 @@ var migrations = []migration{
 	{version: 3, sql: migration0003},
 	{version: 4, sql: migration0004},
 	{version: 5, sql: migration0005},
+	{version: 6, sql: migration0006},
 }
 
 // SchemaVersion 返回当前库版本。

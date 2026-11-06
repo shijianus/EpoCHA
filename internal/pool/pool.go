@@ -45,6 +45,8 @@ type Config struct {
 	PollInterval time.Duration
 	// BatchPerTick 限制单轮补题条数，让写事务与 CPU 都被切成小段。
 	BatchPerTick int
+	// Prewarm 启用车队刷新升档难度的轻量备货桶（Phase 3.5）。测试工装可显式关闭。
+	Prewarm bool
 	// YieldEvery / YieldPause：每生成这么多题主动让出 CPU 这么久。
 	YieldEvery int
 	YieldPause time.Duration
@@ -85,6 +87,7 @@ func DefaultConfig() Config {
 		QuestionTTL:   4200 * time.Second, // = challenge TTL 上界 3600s + 600s 余量
 		PollInterval:  2 * time.Second,
 		BatchPerTick:  20,
+		Prewarm:       true,
 		YieldEvery:    10,
 		YieldPause:    100 * time.Millisecond,
 		BackoffStart:  100 * time.Millisecond,
@@ -388,6 +391,30 @@ func (w *Worker) Tick(ctx context.Context) (int, error) {
 			continue
 		}
 		needAfter := now.Add(bucket.MaxChallengeTTL)
+		if bucket.Prewarm {
+			if !w.cfg.Prewarm {
+				continue
+			}
+			// 无障碍文本题固定难度，不预热升档。
+			if spec.GeneratorID == generator.AccessibleChoiceID || bucket.BaseDifficulty <= 0 {
+				continue
+			}
+			baseSpec := spec
+			baseSpec.Difficulty = bucket.BaseDifficulty
+			baseReady, err := w.db.ReadyCount(ctx, baseSpec, needAfter)
+			if err != nil {
+				w.noteFailed(err)
+				firstErr = err
+				continue
+			}
+			// 基础桶还没进入低水位时优先保基础供给，不抢同一批 CPU/行数预算。
+			if baseReady < low {
+				continue
+			}
+			// 预热只维持轻量水位（约主水位的 1/3，至少 1 条）。
+			low = maxInt(1, low/3)
+			high = maxInt(low, high/3)
+		}
 		ready, err := w.db.ReadyCount(ctx, spec, needAfter)
 		if err != nil {
 			w.noteFailed(err)
@@ -553,4 +580,11 @@ func newQuestionID() (string, error) {
 		return "", fmt.Errorf("pool: 生成题目 id: %w", err)
 	}
 	return hex.EncodeToString(b), nil
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

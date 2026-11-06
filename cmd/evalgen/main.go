@@ -34,9 +34,11 @@ const (
 	// 之前看过的结果也就不能拿来对照了。
 	holdoutSeed   = "epocha-3b-holdout-v1-do-not-retune"
 	holdoutSeedV2 = "epocha-3b-holdout-v2-do-not-retune"
+	holdoutSeedV3 = "epocha-3b-holdout-v3-do-not-retune"
 	// devSeedHint 只是默认值；dev 集鼓励换 seed（换 seed = 换一批新样本）。
 	devSeedHint   = "epocha-3b-dev-v1"
 	devSeedHintV2 = "epocha-3b-dev-v2"
+	devSeedHintV3 = "epocha-3b-dev-v3"
 )
 
 func main() {
@@ -63,7 +65,7 @@ func run(args []string) error {
 	fs.StringVar(&o.set, "set", "", "样本集：dev（调参集）或 holdout（固定验收集）")
 	fs.IntVar(&o.count, "count", 40, "样本数量（1..300）")
 	fs.IntVar(&o.difficulty, "difficulty", 3, "难度档 1..5")
-	fs.StringVar(&o.generator, "generator", generator.TextImageID, "题型：text-image-v1 或 text-image-v2")
+	fs.StringVar(&o.generator, "generator", generator.TextImageID, "题型：text-image-v1 / text-image-v2 / text-image-v3")
 	fs.StringVar(&o.seed, "seed", "", "运行种子；留空则 dev 用默认值、holdout 用固定值")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("命令行参数: %w", err)
@@ -92,8 +94,11 @@ func generate(o *options) error {
 	case generator.TextImageID:
 	case generator.TextImageV2ID:
 		baseHoldout, baseDev = holdoutSeedV2, devSeedHintV2
+	case generator.TextImageV3ID:
+		baseHoldout, baseDev = holdoutSeedV3, devSeedHintV3
 	default:
-		return fmt.Errorf("未知题型 %q（只支持 %s / %s）", o.generator, generator.TextImageID, generator.TextImageV2ID)
+		return fmt.Errorf("未知题型 %q（只支持 %s / %s / %s）", o.generator,
+			generator.TextImageID, generator.TextImageV2ID, generator.TextImageV3ID)
 	}
 	switch o.set {
 	case "holdout":
@@ -129,6 +134,16 @@ func generate(o *options) error {
 		}
 		g, answerFrom = img, generator.TextImageV2AnswerFrom
 		params, err = generator.TextImageV2Params(o.difficulty)
+		if err != nil {
+			return err
+		}
+	case generator.TextImageV3ID:
+		img, err := generator.NewTextImageV3(devKey())
+		if err != nil {
+			return fmt.Errorf("构造生成器: %w", err)
+		}
+		g, answerFrom = img, generator.TextImageV3AnswerFrom
+		params, err = generator.TextImageV3Params(o.difficulty)
 		if err != nil {
 			return err
 		}

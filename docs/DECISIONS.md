@@ -997,3 +997,337 @@ written = true          // ← 保留判定在这里，已经在 cerr 分支之�
 ### 影响
 
 `internal/generator`（v2 与测试）、`internal/config`（demo 开关）、`internal/api`（demo 路由与测试）、`internal/admin`（v2 生命周期文案）、`cmd/server`（v2 登记）、`cmd/evalgen`/`cmd/evalocr`/OCR 脚本（v2 样本与归一化）、`deploy/cloady` 与部署/接入文档。不新增运行时依赖；不改变 v1 的历史结果；不把 Cloady 测试部署写成正式发布或生产持久化认证。
+
+## ADR-024 2026-11-05：视觉题型扩展（图形点选、图形计数、抽象文字）与逐字容差判分
+
+### 背景与授权
+
+用户要求扩大题型面：增加更多不同的题目、增加非纯文字输入的图形识别，并把文字题做得更模糊/抽象，
+允许"人可能认错但仍基本能认出来并通过"。已有 `arithmetic-baseline-v1`、`text-image-v1`、
+`text-image-v2` 保留为历史基线；本轮只新增独立题型，不替换、不改写它们的判分与历史结果。
+约束不变：纯 Go、无 cgo、不新增依赖、不引入外部素材或网络调用。
+
+### 决策
+
+1. **新增 `shape-grid-v1`（图形点选）**：3×3 网格，每个格子一个简单几何图形（圆/三角/正方形/五边形/六边形，
+   实心或空心）。题面要求点选所有满足某个公开判据的格子——按种类（"所有三角形"）、按填充（"所有实心图形"）
+   或按两者组合（"所有空心正方形"）。**只有点选，没有文字输入**。
+   答案编码是 1-based 格子序号排序去重后的逗号串（如 `3,7`）；顺序不同、重复提交同一格被规范化，但接受域仍是
+   一个确定的集合，不引入坐标/区域容差。
+2. **新增 `shape-count-v1`（图形计数）**：480×240 场景中只出现两类目标图形（实心/空心 × 圆/三角/正方形/五边形/六边形
+   中的两类），每类数量 1..6，另有 0..2 个不属于任何目标类别的干扰图形。题面同时问两类各有多少个；
+   widget 渲染两个带标签的数字输入，答案编码为 `a,b`（规范化后无前导零）。服务端仍只判字符串，不接受负数/小数。
+3. **新增 `text-image-v3`（抽象文字）**：6 字符、480×160、32 字符集。在 v2 的逐字形变之上增加
+   **字形层后处理**：低对比墨色/纸色、1..2 遍 3×3 加权模糊（核 1-2-1）、平滑正弦位移（水平/垂直各一条）、
+   稀疏擦除点、纸面纹理；渲染后用字墨覆盖率下限（≥55%）做有界重试，覆盖率不足就重排（不重抽答案）。
+   v3 与 v1/v2 共用布局器和字形测量，但只有 v3 走后处理分支；v1/v2 的渲染路径与字节形状不变。
+4. **v3 的判分允许最多 1 个字符替换**（Hamming 距离 ≤1）。私有 verifier 改为逐字 HMAC 标签：
+   `nonce(16B) || tag_0 || … || tag_{L-1}`，每个标签 32B；L=6 ⇒ 208B。`Verify` 对每个位置重算标签、
+   用 `crypto/subtle.ConstantTimeCompare` 逐位比较并累计不匹配数，全部位置都比较完（不提前返回），
+   `mismatches ≤ 1` 才通过。没有读回答案的接口，答案明文仍不落库/不下发/不写日志。
+   这条逐字构造只用于 v3；v1/v2 继续使用 48B 的精确匹配 verifier。
+   **为什么可以接受**：拿到判分密钥的人本来就能离线枚举 verifier（ADR-011 的残余风险）；
+   逐字标签把"有密钥时的离线枚举"从 32^6 降到 6×32，**不改变无密钥时的安全边界**。这条限制必须如实写在
+   题型文档里，不能把逐字标签描述成比精确 HMAC 更强。
+5. **M1–M4 必须分列**（ADR-002；本轮没有新的 M4 实测）：
+   - `shape-grid-v1`：M1 = 判据组合 × 图形种类/填充 × 格子排列；M2 = 唯一规范化下标集合；
+     答案空间 `C(9,2)=36` 或 `C(9,3)=84`（生成器只允许 k=2/3）；M3 = 最坏单次 `1/36`，
+     3 次上界 `1-(35/36)^3 ≈ 8.1%`（<10% 红线）；M4 未测。
+   - `shape-count-v1`：M1 = 两类目标类别组合 × 两个数量 × 干扰图形排列；M2 = 唯一 `a,b` 串；
+     答案空间 `6×6=36`；M3 = 单次 `1/36`，3 次 ≈8.1%；M4 未测。
+   - `text-image-v3`：M1 = 32^6 个答案串再乘形变参数；M2 = 接受域 `1 + 6×31 = 187` 个规范化串
+     （精确答案 + 任一位置替换成其余 31 个字符）；M3 = `187 / 32^6 ≈ 1.74e-7`，3 次 ≈`5.2e-7`；M4 未测。
+   - 三个题型一律 `experimental:true` / `production_ready:false`。**不得**用"图形多/噪声多/随机实例多"
+     论证抗 AI；图形题对机器视觉本来就是容易的，它们提供的是交互多样性与工程闭环，不是抗机器证明。
+     人工可读性、辅助技术、真机移动端仍为 **NOT_RUN**。
+6. **资源与依赖边界**：沿用 §13 的画布/像素/PNG 上界；`shape-grid` 340×340 = 115,600 像素，
+   `shape-count` 480×240 = 115,200 像素，均在 120,000 像素上限内；PNG ≤65,536B；单个场景图形 ≤14 个目标
+   + ≤2 个干扰；绘制只用已批准的 `golang.org/x/image`（`vector` 光栅化器 + 标准库 `image`），不新增依赖。
+7. **widget 扩两种输入**：`answer_type=cells` 在图片上覆盖可聚焦按钮（百分比定位，随图片缩放；
+   `aria-pressed` 反映选中；键盘可完成）；`answer_type=pairs` 渲染两个带标签的数字输入。
+   两种模式最终都写入同一个 `answer` 字符串并按现有 `/api/redeem` 提交。widget 不解释答案、不做判定，
+   服务端仍是唯一权威；服务端下发的题面文本只进 `textContent`，不拼 HTML。
+8. **本轮不实现按权重混合多题型**：站点仍只选一个 `generator_id`。DESIGN 里"题型权重与多生成器选择"
+   仍未实现，"多样"指的是可选题型增加与题型内变化，不是同一站点自动轮换。不得把未实现的混合模式写成已实现。
+9. 开发工具同步扩展：`cmd/server` 登记三个新题型；`cmd/devseed`/`cmd/preview` 支持新题型；
+   `cmd/evalgen`/`cmd/evalocr` 增加 v3（OCR 基线仍属 NOT_RUN，工具只是准备好了入口）。
+
+### 未做（以及为什么）
+
+- **单选/单点点击题型**：答案空间只有 N（4..12），3 次尝试通过率远超 10% 红线；不做。
+- **拖拽/滑块/旋转/区域容差**：连续坐标会放大接受域，且需要另一套容差判分构造；本轮不做。
+- **非视觉等价通道（音频等）**：仍未实现；PoW-only 降级不是等效替代。
+- **自动混合/权重/统计淘汰**：仍是后续阶段；本轮不把站点选择变成随机池。
+- **v3 的 OCR 基线、M4、人工可读性**：NOT_RUN。覆盖率下限只是"字没有被擦掉"的几何守卫，
+  不是"人能读出来"的证明。
+
+### 影响
+
+`internal/generator`（新的图形绘制/生成器/测试、v3 与逐字 verifier）、`web/widget`（两个新输入模式与 i18n）、
+`cmd/{server,devseed,preview,evalgen,evalocr}`、`internal/admin`（题型生命周期与说明）、
+`docs/{DESIGN,QUESTION-TYPES}.md`。不新增运行时依赖；不改变 v1/v2 的判分与历史结果；
+不把新题型写成生产可用或抗机器。
+
+---
+
+## ADR-025 2026-11-05：交互式题型契约（Phase 1：angle/point/timing 与多帧渲染）
+
+### 背景与授权
+
+用户审阅 `docs/CAPTCHA-BANK-DESIGN.md` 后批准先落地交互式题型的**底座契约**，不一次性实现 24 个题型。
+Phase 1 的目标是让服务端、API 与 widget 对"连续角度、归一化点选、时序/多帧"使用同一套可验证的
+答案编码与渲染契约，同时保持现有 6 个题型（`arithmetic-baseline-v1`、`text-image-v1/v2/v3`、
+`shape-grid-v1`、`shape-count-v1`）零回归。
+
+约束不变：纯 Go、无 cgo、不新增依赖；客户端不持有答案、不计算通过与否；所有判定回到服务端；
+不声称任何题型抗 AI/抗 OCR（红线 14）。
+
+### 决策
+
+1. **保留现有 `answer_type`**：`text`、`integer`、`cells`、`pairs` 的规范化与判分路径不改；
+   现有 6 个生成器不改 ID、verifier 线格式或渲染路径。
+2. **新增三种通用答案编码**（只定义契约，不注册生产题型）：
+   - `angle`：整数 decidegrees，`0..3599`（0.1° 量化）。不接受小数、符号、内部空白、全角数字；
+     `0375` 规范化为 `375`。`360.0°` 不单独表示；需要整圈的角度题用 `0..3599` 表达。
+   - `point`：`x,y`，两段整数各 `0..999`（归一化到图宽/高的千分位），恰好两个字段；
+     允许逗号两侧 ASCII 空格，剥前导零；规范串如 `12,34`。坐标不是像素，也不是客户端自报的容差。
+   - `timing`：整数毫秒，`0..60000`；循环动画的语义是"当前周期内的相位"，由题型在 verifier 中
+     按自己的周期折算；非循环动画是"从首帧起的经过时间"。服务端不从客户端读取"动画开始时刻"作为权威。
+   具体规范化函数在 `internal/generator/answer.go`；答案仍以**字符串**提交，不引入结构化答案对象。
+3. **哑渲染器（Dumb Renderer）**：widget 只负责：
+   - 渲染服务端下发的像素资产/几何快照；
+   - 采集并量化 `point`、`path`、`angle`、`order`、`timing`、`polygon` 六类交互原语；
+   - 把原语写成规范化字符串；
+   - 不包含物理碰撞终点、答案、可推导答案的种子或判分逻辑。
+   Phase 1 实现 `angle`、`point`、`timing` 三种；`path`/`order`/`polygon` 只保留在契约中，**未实现**。
+4. **多帧渲染契约**：Phase 1 用**一张 PNG 雪碧图**承载多帧，避免改动 `pool.asset_blob` 的单资产形态。
+   公开字段为：
+   `render_mode:"sprite_sheet"`、`frame_count`、`frame_cols`、`frame_rows`、`frame_ms`、`frame_loop`；
+   帧按行优先排列；`image_width`/`image_height` 在 `sprite_sheet` 模式下表示**单帧**尺寸，不是整张图尺寸。
+   边界：`frame_count 2..64`、`frame_cols/frame_rows 1..8`、`frame_cols*frame_rows >= frame_count`、
+   `frame_ms 20..500`、整张雪碧图显示尺寸 ≤2048×2048（widget 侧形状校验）。
+   单张 PNG 仍受 `store.MaxAssetBytes=65536` 限制；更大的时序/3D 预算**没有**在本轮启用。
+5. **Widget 架构**：保留单个核心 `v1.js`（状态机、API、PoW、`text/cells/pairs`、遥测/生命周期），
+   新增的交互原语放在同一核心的**精简分发器**里，按 `answer_type` 选择控件；不加载第三方脚本。
+   后续题型模块化时，核心仍须守住 gzip <30KB，模块按需加载并逐个守护体积。
+6. **公开/私有边界**：`angle`/`point`/`timing` 的公开 payload 只含渲染与交互所需字段；
+   接受域（目标角、目标格、时间窗）只存在私有 verifier。Phase 1 的 verifier 使用 ADR-028 的 TSV。
+7. **向后兼容**：旧 challenge 的 `answer_type`、verifier 形态、DTO 字段与 `/api/redeem` 行为不变；
+   新类型只通过新生成器/新 payload 生效。**本轮不注册**任何新的生产题型；测试夹具不得进入
+   生产注册表。
+
+### 明确未做
+
+- `path`/`order`/`polygon` 的编码与判分（契约保留，未实现）；
+- 真实物理题、3D、时序题、无障碍通道的生成器；
+- 行为遥测、风险评分、动态调度（ADR-026/027 留待下一阶段）；
+- 任何"抗 AI/抗 OCR/抗多模态"结论；人工可读性、辅助技术、真机移动端仍为 **NOT_RUN**。
+
+### 影响
+
+`internal/generator/answer.go`（规范化与格式化）、`internal/generator/tsv.go`（ADR-028）、
+`internal/generator/frame.go`（雪碧图边界）、`web/widget/v1.js`（三种输入与雪碧图渲染）、
+`internal/api`/测试夹具（契约回归）。现有生成器、存储 schema 的历史行与 `/siteverify` 响应形状不变。
+
+---
+
+## ADR-026 2026-11-05：风险带、加权抽题与刷新惩罚状态机
+
+### 背景
+
+Phase 1/2 只验证了单题型签发与一次性判定；站点仍只有一个 `generator_id`，没有风险带，
+也没有"连续刷新是否在寻找低成本题"的状态。用户要求按 `docs/CAPTCHA-BANK-DESIGN.md` 模块二
+落地风险调度，同时保留已有站点语义。
+
+约束不变：风险分不是判决；不得因为一个弱信号单独拒绝正确回答；不得把未实现的
+IP 信誉/ASN 数据写成已有能力；题池仍必须按 `generator_id + version + difficulty` 精确领题。
+
+### 决策
+
+1. **站点级生成器池**：`sites` 增加 `generator_pool TEXT NOT NULL DEFAULT ''`（0006 迁移）。
+   空串表示沿用旧的单 `generator_id`；非空时是 JSON 字符串数组（最多 8 个、去重、每个 ≤64 字符）。
+   两者都保留：`generator_id` 是兼容/默认，`generator_pool` 才允许同站多题型调度。
+   `pow_question` 站点必须至少有一个可解析的候选。
+2. **风险带**：分数 0..100，`<25 low`、`<50 medium`、`<75 high`、`>=75 critical`。
+   Phase 3 只使用当前进程内可观测的信号：
+   - 刷新窗口计数（10 分钟）；
+   - 该 source+site 的近期失败次数（最多累计到 5）；
+   - 已校验的遥测摘要的弱异常分（0..20，ADR-027）。
+   IP 信誉/ASN/Tor 等外部名单**没有接入**，不得在报告里写成已使用。
+3. **刷新惩罚**（同一 site+source 的 10 分钟窗口，单调难度地板）：
+   - 0–2 次：无惩罚；
+   - 3–5 次：难度 delta +1、PoW +2 bit；
+   - 6–9 次：delta +2、PoW +4 bit、冷却 3 s、只从强池选；
+   - ≥10 次：delta +3、PoW +6 bit、冷却 15 min、风险分升到 critical。
+   刷新只提高难度地板，绝不降低；冷却返回 429 `rate-limited`，不消耗题池。
+4. **升档预热**：`QuestionBuckets` 会为每个启用的题型（含 `generator_pool` 内题型）
+   额外产出 `d_base+1..d_base+3` 的预热桶；worker 在基础桶达到低水位后才补预热桶，
+   水位约为主水位的 1/3（至少 1 条）。`accessible-choice-v1` 是固定难度，不预热。
+   这样刷新触发升档时池里确实有高难度 ready 行，而不是只能 503。
+5. **加权抽题**：`internal/dispatch` 的纯函数调度器按
+   `base × riskFit[band] × deviceFit[device]` 归一化采样，使用 CSPRNG；无候选时返回
+   `ErrNoCandidate`，由 API 折叠成可重试的 `challenge-unavailable`，**不**回落到低难度或 PoW-only。
+   Phase 3 的 device 输入只有客户端声明的 `pointer: coarse|fine` 与 `reduced_motion`；
+   它是可用性过滤，不是身份或指纹，服务端不据此提高信任。
+6. **高风险不自动封号**：critical 只触发更强题/更高 PoW/更长冷却；如果仍失败才由业务侧
+   step-up。没有自动下线题型、没有永久黑名单。
+   没有 `session` 字段的旧客户端按原有行为处理：仍受限流/来源策略约束，但不启用
+   "连续刷新"难度地板；Widget 总会生成并发送 session。这是兼容边界，不是信任提升。
+7. **尝试次数**：现有 `pow_question` 仍只有 1 次有效作答；刷新惩罚不会增加尝试次数。
+
+### 未做
+
+- IP 信誉、ASN/Tor/代理名单、账号级跨站画像；
+- 自动难度自适应（只做单调地板与风险带）；
+- 同族不连出、题目级冷却（调度器保留了扩展位，但 Phase 3 不写）；
+- 自动淘汰/自动封禁；
+- 刷新地板仍要求对应难度有 ready 行；预热桶覆盖 `d_base+1..+3`，超过 d5 的部分按上限截断。
+  如果预热尚未完成，签发仍可能 503（不回落到低难度）。
+
+### 影响
+
+`internal/store/sites.go` + `0006_sites_pool.sql`、`internal/store/pool.go` 的预热桶、
+`internal/pool` 的轻量水位、`internal/dispatch`、`internal/risk` 的刷新/遥测状态、
+`internal/api` 签发与兑换、`internal/admin` 的站点池字段与页面、`docs/{DESIGN,QUESTION-TYPES,WIDGET}.md`。
+现有单 `generator_id` 站点行为不变。
+
+---
+
+## ADR-027 2026-11-05：轻量行为遥测的字段、保留期与隐私边界
+
+### 背景
+
+Phase 1 的 Widget 已有状态机与输入事件，但没有上报行为摘要；服务端也没有风险修正。
+用户要求轻量遥测只作为弱证据，不持久化原始高频坐标流，且不能单独拒绝正确回答。
+
+### 决策
+
+1. **只采集摘要**，字段固定为：
+   `total_ms`、`first_input_ms`、`event_count`、`pointer_events`、`key_events`、`focus_blur`。
+   不采集坐标序列、按键内容、页面内容、设备指纹、跨站标识；`pointermove` 只计数，不存点。
+2. **边界校验**：`total_ms 0..300000`、`first_input_ms 0..total_ms`、
+   `event_count 0..10000`、`pointer_events+key_events ≤ event_count`、`focus_blur 0..20`。
+   畸形遥测在**任何状态消费之前**返回 400，不消耗作答机会；缺失遥测合法（不补分）。
+3. **弱证据**：服务端只把它折算成 0..20 的风险修正（短总时长、首动过早、零事件、
+   全无指针/键盘、频繁切窗），与刷新/失败信号合并；**不进入 `generator.Verify`**，
+   不改变显式判定。正确回答不会因为遥测被拒绝；错误回答也不会因为遥测被放行。
+4. **保留期**：Phase 3 只在进程内保存该 source+site 的聚合分数与时间戳，**不落库、不写日志**；
+   进程重启即丢失（这是可接受的：遥测不是权威状态）。后续若要持久化，必须另立 ADR 并写明
+   保留期、删除路径与合规依据。
+5. **无障碍例外**：辅助技术用户的事件数量/输入形态可能显著不同；不得把"键盘/开关操作"
+   当作异常。风险修正只在同设备画像内比较，且永不单独拒绝。
+6. **透明性**：Widget 文档说明会发送这些摘要；不发送原始轨迹；不设置跨站 Cookie。
+
+### 未做
+
+- 原始轨迹/眼动/设备指纹/跨站画像；
+- 机器学习模型；Phase 3 只有可解释的规则分；
+- 服务端持久化遥测；
+- 真实人群阈值标定（**NOT_RUN**）。
+
+### 影响
+
+`web/widget/v1.js`、`internal/risk/telemetry.go`、`internal/api` 的 `/api/redeem` 请求结构、
+`docs/WIDGET.md`。遥测字段不得出现在日志或响应中。
+
+---
+
+## ADR-028 2026-11-05：Tag-Set Verifier、verifier/payload 上限与多帧资产预算
+
+### 背景
+
+ADR-026（风险调度）与 ADR-027（行为遥测）在同一 Phase 3 已落地；本条只处理 verifier/体积上限。
+
+现有 verifier 路径是 48B 精确 HMAC（`nonce || tag`）与 208B 逐字标签（ADR-024），
+库侧 `MaxVerifierBytes=512`、`MaxPayloadBytes=4096`；`0003` 迁移把 `payload_json` 的 CHECK
+写死为 `length(payload_json) <= 4096`。交互式题的连续容差需要更大的接受域：
+不能把答案明文或可推导答案的种子存进 verifier，也不能把容差实现成"客户端自报"。
+
+用户已批准：`MaxVerifierBytes` 512→4096、Challenge 公开 payload 4096→8192，
+以及用 TSV 支持连续容差的离散化。ADR-025 定义 `angle`/`point`/`timing` 契约。
+
+### 决策
+
+1. **TSV 线格式**（`internal/generator/tsv.go`）：
+
+   ```text
+   magic   "ETSV"            4B
+   version 0x01              1B
+   nonce                     16B
+   count                     uint16 big-endian
+   tags                      count × 32B
+   ```
+
+   `tag = HMAC-SHA256(K_qver, "epocha/v1|qver-tsv|" || nonce || feature_id_u16 || value_u32)`；
+   `feature_id` 用于区分同一题的多维约束（如目标格/干扰格），`value` 是**量化后的候选值**。
+   不存答案明文，不存可逆的答案种子；只能测试"候选是否命中集合"。
+2. **上限与边界**：`MaxVerifierBytes=4096`；TSV 头 23B，单 tag 32B，最多 **127** 个 tag
+   （`TSVMaxBytes=4087`，留 9B 余量）。空 TSV 拒绝构建；重复的 `(feature_id,value)` 拒绝；
+   超过 127 个 tag 拒绝；截断/多余字节/错误 magic/错误 version/错误 count 一律 fail closed。
+3. **常数时间**：候选 tag 与集合内每个 tag 用 `crypto/subtle.ConstantTimeCompare` 比较，
+   所有 tag 都比较完，不提前返回。候选枚举由题型限定上界（≤4096），不得由客户端指定网格。
+4. **payload 上限**：`MaxPayloadBytes=8192`。因为 `0003` 的 CHECK 不能原地修改，新增
+   `0005_payload_8k.sql` 重建 `pool` 表（保留全部行、索引、资产列与 challenge 绑定），
+   CHECK 改为 `length(payload_json) <= 8192`。`schemaVersion` 4→5；旧库升级必须保留旧行。
+5. **资产预算**：Phase 1 保持 `MaxAssetBytes=65536` 不变；多帧用一张 PNG 雪碧图，
+   因此时序题也受单资产 64KB 限制。设计文档中的 320KB/384KB 分族预算**没有**在本轮启用；
+   启用它需要新的迁移/ADR，并重新做 1 vCPU/1 GB 目标机的资源测量。
+6. **测试**：TSV 必须有边界容差命中、容差外拒绝、篡改/截断拒绝、跨 feature/key 拒绝、
+   127/128 tag 边界与 `TSVMaxBytes <= MaxVerifierBytes` 的测试；store 必须有
+   8192 接受/8193 拒绝、4096 接受/4097 拒绝与 0005 迁移保留旧行的测试。
+
+### 安全性质与限制
+
+- 无 qver 密钥时，TSV 只暴露 nonce、tag 数量与 tag 值；tag 数量会暴露接受域大小（这是设计信息，
+  不是秘密）。有 qver 密钥的人可离线枚举候选，这与 ADR-011 的残余风险同级；TSV **不**声称
+  比精确 HMAC 更强。
+- TSV 不改变"客户端的任何自报都不可信"：`feature_id`/`value` 的量化必须由服务端题型固定；
+  不能把客户端提交的网格或容差写回 verifier 查询。
+- 本 ADR 不授权 `path`/`polygon` 的大 verifier 或分族资产预算；它们仍需要独立设计与测试。
+
+### 影响
+
+`internal/generator/tsv.go`、`internal/generator/answer.go`、`internal/store/{store.go,pool.go}`、
+`internal/store/migrations/0005_payload_8k.sql`、`docs/DESIGN.md` 的 schema/体积表、
+`docs/QUESTION-TYPES.md` 与 `docs/WIDGET.md` 的契约说明。现有 48B/208B verifier 不变；
+不新增依赖；不改变 `/siteverify` 契约。
+
+---
+
+## ADR-029 2026-11-05：无障碍等价通道的准入与限次
+
+### 背景
+
+Phase 1/2 的题型全部依赖视觉或运动精度；没有等价通道时，视觉/运动受限用户无法完成验证。
+但"更简单的题"本身会变成攻击者的降维入口，因此通道必须有明确准入、限次与一次性绑定。
+
+### 决策
+
+1. **新增 `accessible-choice-v1`**：纯文本单选题（12 个选项，选唯一满足简单数值判据的一项），
+   `media:"text"`、`answer_type:"text"`、长度 1（A–L）。它不是强安全题型：M3 单次 1/12 ≈ 8.3%，仍只给 1 次尝试；
+   M4/人工可读性/辅助技术实测均 **NOT_RUN**；只作为无障碍通道，不进入生产可用声明。
+2. **显式请求**：`/api/challenge` 只有 `accessibility:true` 时才允许调度到 accessible 候选；
+   站点必须在 `generator_pool` 中显式包含 `accessible-choice-v1`。没有候选时返回
+   `challenge-unavailable`，**绝不**回落到 PoW-only 或普通视觉题后声称"已经无障碍"。
+3. **限次与绑定**：同一 `site + source`（按现有 `risk.Key` 聚合）每 **24 小时**最多签发
+   **1 次** accessible challenge；冷却期返回 429。challenge 本身仍是一次性消费；
+   成功 token 仍只在 `/siteverify` 消费。没有账号体系时不声称"账号绑定"。
+4. **风险带限制**：`critical` 风险不开放 accessible 通道（候选 riskFit=0 ⇒ 503/冷却），
+   避免高风险管理面被降维；`high` 只在有强约束时由后续阶段评估，Phase 3 不放开。
+5. **一次失败后的处置**：不提供无限重试；用户可以走业务侧人工/账号验证。无障碍通道的
+   失败不是"证明用户是机器人"。
+6. **可访问性 UI**：Widget 对 `media:"text"` 渲染文本选项按钮 + 文本输入，不加载图片；
+   键盘可完成；不使用颜色作为唯一判据。真机屏幕阅读器/开关设备实测仍 **NOT_RUN**。
+
+### 未做
+
+- 音频通道、开关扫描、语义列表的完整实现（Phase 3 只交付 accessible-choice）；
+- 账号/联系方式绑定（当前没有账号模型）；
+- 24h 限额的运营配置项（当前是服务端常量）；
+- 无障碍队列的真实通过率与误用率测量。
+
+### 影响
+
+`internal/generator/accessible.go`、`internal/api` 的 accessibility 分支、`internal/risk` 的 gate、
+`internal/dispatch` 的 accessible 候选、`web/widget/v1.js` 的 text-media 选项，以及
+`docs/{QUESTION-TYPES,WIDGET}.md`。现有 8 个题型行为不变。

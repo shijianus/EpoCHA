@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/shijianus/EpoCHA/internal/config"
+	"github.com/shijianus/EpoCHA/internal/dispatch"
 	"github.com/shijianus/EpoCHA/internal/generator"
 	"github.com/shijianus/EpoCHA/internal/pow"
 	"github.com/shijianus/EpoCHA/internal/risk"
@@ -72,6 +73,9 @@ type Server struct {
 	now       func() time.Time
 	caps      store.Caps
 	demoPage  bool
+	tracker   *risk.Tracker
+	access    *risk.AccessibilityGate
+	scheduler *dispatch.Scheduler
 }
 
 // New 组装服务。限流器与代理裁决来自配置。
@@ -96,9 +100,18 @@ func New(cfg *config.Config, db *store.DB, signer *token.Signer, gens *generator
 	if err != nil {
 		return nil, err
 	}
+	tracker, err := risk.NewTracker(risk.MaxTrackedSources, time.Now)
+	if err != nil {
+		return nil, err
+	}
+	access, err := risk.NewAccessibilityGate(risk.MaxTrackedSources, risk.AccessibilityLimit, risk.AccessibilityWindow, time.Now)
+	if err != nil {
+		return nil, err
+	}
 	return &Server{
 		db: db, signer: signer, gens: gens, src: src, ipLimit: ipLimit, siteLimit: siteLimit,
 		log: log, now: time.Now, demoPage: cfg.DemoPage,
+		tracker: tracker, access: access, scheduler: dispatch.NewScheduler(),
 		caps: store.Caps{MaxTotal: cfg.MaxLedgerRows, MaxActive: cfg.MaxActiveChallenges, MaxActivePerSite: cfg.MaxActivePerSite},
 	}, nil
 }

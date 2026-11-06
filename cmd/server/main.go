@@ -472,6 +472,36 @@ func knownGenerators(qKey []byte) ([]generator.Generator, error) {
 		return nil, fmt.Errorf("视觉题型 v2: %w", err)
 	}
 	out = append(out, imgV2)
+	imgV3, err := generator.NewTextImageV3(qKey)
+	if err != nil {
+		return nil, fmt.Errorf("抽象文字题型 v3: %w", err)
+	}
+	out = append(out, imgV3)
+	grid, err := generator.NewShapeGrid(qKey)
+	if err != nil {
+		return nil, fmt.Errorf("图形点选题型: %w", err)
+	}
+	out = append(out, grid)
+	count, err := generator.NewShapeCount(qKey)
+	if err != nil {
+		return nil, fmt.Errorf("图形计数题型: %w", err)
+	}
+	out = append(out, count)
+	parallax, err := generator.NewParallax(qKey)
+	if err != nil {
+		return nil, fmt.Errorf("时序视差题型: %w", err)
+	}
+	out = append(out, parallax)
+	bank, err := generator.NewBankShot(qKey)
+	if err != nil {
+		return nil, fmt.Errorf("物理反弹题型: %w", err)
+	}
+	out = append(out, bank)
+	accessible, err := generator.NewAccessibleChoice(qKey)
+	if err != nil {
+		return nil, fmt.Errorf("无障碍文本题型: %w", err)
+	}
+	out = append(out, accessible)
 	return out, nil
 }
 

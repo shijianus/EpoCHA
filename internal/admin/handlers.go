@@ -23,15 +23,16 @@ type siteView struct {
 	Version int64  `json:"version"`
 	PowBits uint8  `json:"pow_bits"`
 	// 验证模式与题目策略（阶段 3A）。generator_id 是公开标识，不含任何凭据。
-	VerifyMode         string `json:"verify_mode"`
-	GeneratorID        string `json:"generator_id,omitempty"`
-	Difficulty         int    `json:"difficulty"`
-	ChallengeTTL       int64  `json:"challenge_ttl_sec"`
-	ResponseTTL        int64  `json:"response_ttl_sec"`
-	RateIPRPM          int    `json:"rate_ip_rpm"`
-	RateSiteRPM        int    `json:"rate_site_rpm"`
-	AllowMissingOrigin bool   `json:"allow_missing_origin"`
-	CreatedAt          string `json:"created_at"`
+	VerifyMode         string   `json:"verify_mode"`
+	GeneratorID        string   `json:"generator_id,omitempty"`
+	GeneratorPool      []string `json:"generator_pool,omitempty"`
+	Difficulty         int      `json:"difficulty"`
+	ChallengeTTL       int64    `json:"challenge_ttl_sec"`
+	ResponseTTL        int64    `json:"response_ttl_sec"`
+	RateIPRPM          int      `json:"rate_ip_rpm"`
+	RateSiteRPM        int      `json:"rate_site_rpm"`
+	AllowMissingOrigin bool     `json:"allow_missing_origin"`
+	CreatedAt          string   `json:"created_at"`
 }
 
 func viewSite(s *store.Site) siteView {
@@ -40,6 +41,7 @@ func viewSite(s *store.Site) siteView {
 		PowBits:            s.PowBits,
 		VerifyMode:         s.Policy.VerifyMode,
 		GeneratorID:        s.Policy.GeneratorID,
+		GeneratorPool:      append([]string(nil), s.Policy.GeneratorPool...),
 		Difficulty:         s.Policy.Difficulty,
 		ChallengeTTL:       int64(s.Policy.ChallengeTTL / time.Second),
 		ResponseTTL:        int64(s.Policy.ResponseTTL / time.Second),
@@ -127,18 +129,19 @@ func decodeAdmin(w http.ResponseWriter, r *http.Request, dst any) bool {
 }
 
 type createSiteRequest struct {
-	Name               string   `json:"name"`
-	VerifyMode         *string  `json:"verify_mode"`
-	GeneratorID        *string  `json:"generator_id"`
-	Difficulty         *int     `json:"difficulty"`
-	SiteKey            string   `json:"site_key"`
-	Origins            []string `json:"origins"`
-	PowBits            *uint8   `json:"pow_bits"`
-	ChallengeTTL       *int64   `json:"challenge_ttl_sec"`
-	ResponseTTL        *int64   `json:"response_ttl_sec"`
-	RateIPRPM          *int     `json:"rate_ip_rpm"`
-	RateSiteRPM        *int     `json:"rate_site_rpm"`
-	AllowMissingOrigin *bool    `json:"allow_missing_origin"`
+	Name               string    `json:"name"`
+	VerifyMode         *string   `json:"verify_mode"`
+	GeneratorID        *string   `json:"generator_id"`
+	GeneratorPool      *[]string `json:"generator_pool"`
+	Difficulty         *int      `json:"difficulty"`
+	SiteKey            string    `json:"site_key"`
+	Origins            []string  `json:"origins"`
+	PowBits            *uint8    `json:"pow_bits"`
+	ChallengeTTL       *int64    `json:"challenge_ttl_sec"`
+	ResponseTTL        *int64    `json:"response_ttl_sec"`
+	RateIPRPM          *int      `json:"rate_ip_rpm"`
+	RateSiteRPM        *int      `json:"rate_site_rpm"`
+	AllowMissingOrigin *bool     `json:"allow_missing_origin"`
 }
 
 type updateSiteRequest struct {
@@ -146,15 +149,16 @@ type updateSiteRequest struct {
 	Name *string `json:"name"`
 	// SiteKey 故意不可改：它是公开标识，同时是签发时绑定与来源判定的锚点，
 	// 改它等于换站点，而"换站点"会让业务后端里写死的 site_key 静默失效。
-	VerifyMode         *string `json:"verify_mode"`
-	GeneratorID        *string `json:"generator_id"`
-	Difficulty         *int    `json:"difficulty"`
-	PowBits            *uint8  `json:"pow_bits"`
-	ChallengeTTL       *int64  `json:"challenge_ttl_sec"`
-	ResponseTTL        *int64  `json:"response_ttl_sec"`
-	RateIPRPM          *int    `json:"rate_ip_rpm"`
-	RateSiteRPM        *int    `json:"rate_site_rpm"`
-	AllowMissingOrigin *bool   `json:"allow_missing_origin"`
+	VerifyMode         *string   `json:"verify_mode"`
+	GeneratorID        *string   `json:"generator_id"`
+	GeneratorPool      *[]string `json:"generator_pool"`
+	Difficulty         *int      `json:"difficulty"`
+	PowBits            *uint8    `json:"pow_bits"`
+	ChallengeTTL       *int64    `json:"challenge_ttl_sec"`
+	ResponseTTL        *int64    `json:"response_ttl_sec"`
+	RateIPRPM          *int      `json:"rate_ip_rpm"`
+	RateSiteRPM        *int      `json:"rate_site_rpm"`
+	AllowMissingOrigin *bool     `json:"allow_missing_origin"`
 }
 
 type originsRequest struct {
@@ -172,10 +176,11 @@ type addAdminKeyRequest struct {
 // updateFrom 把请求里的可选项转成 store 的部分更新（nil 字段原样传下去 = 不改）。
 func updateFrom(req *updateSiteRequest) store.SiteUpdate {
 	u := store.SiteUpdate{
-		Name:        req.Name,
-		VerifyMode:  req.VerifyMode,
-		GeneratorID: req.GeneratorID,
-		Difficulty:  req.Difficulty,
+		Name:          req.Name,
+		VerifyMode:    req.VerifyMode,
+		GeneratorID:   req.GeneratorID,
+		GeneratorPool: req.GeneratorPool,
+		Difficulty:    req.Difficulty,
 	}
 	if req.PowBits != nil {
 		u.PowBits = req.PowBits
@@ -197,6 +202,7 @@ func updateFrom(req *updateSiteRequest) store.SiteUpdate {
 	if req.AllowMissingOrigin != nil {
 		u.AllowMissingOrigin = req.AllowMissingOrigin
 	}
+	u.GeneratorPool = req.GeneratorPool
 	return u
 }
 
@@ -266,9 +272,10 @@ func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request) {
 	policy := applyToUpdate(store.DefaultPolicy(), store.SiteUpdate{
 		PowBits: req.PowBits, ChallengeTTL: reqTTL(req.ChallengeTTL), ResponseTTL: reqTTL(req.ResponseTTL),
 		RateIPRPM: req.RateIPRPM, RateSiteRPM: req.RateSiteRPM, AllowMissingOrigin: req.AllowMissingOrigin,
-		VerifyMode: req.VerifyMode, GeneratorID: req.GeneratorID, Difficulty: req.Difficulty,
+		VerifyMode: req.VerifyMode, GeneratorID: req.GeneratorID,
+		GeneratorPool: req.GeneratorPool, Difficulty: req.Difficulty,
 	})
-	if err := s.checkModePolicy(policy.VerifyMode, policy.GeneratorID, policy.Difficulty); err != nil {
+	if err := s.checkModePolicy(policy.VerifyMode, policy.GeneratorID, policy.GeneratorPool, policy.Difficulty); err != nil {
 		fail(w, http.StatusBadRequest, CodeBadRequest)
 		return
 	}
@@ -337,7 +344,7 @@ func (s *Server) handleUpdateSite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	next := applyToUpdate(cur.Policy, updateFrom(&req))
-	if err := s.checkModePolicy(next.VerifyMode, next.GeneratorID, next.Difficulty); err != nil {
+	if err := s.checkModePolicy(next.VerifyMode, next.GeneratorID, next.GeneratorPool, next.Difficulty); err != nil {
 		fail(w, http.StatusBadRequest, CodeBadRequest)
 		return
 	}
@@ -728,6 +735,9 @@ func applyToUpdate(base store.SitePolicy, u store.SiteUpdate) store.SitePolicy {
 	if u.GeneratorID != nil {
 		base.GeneratorID = *u.GeneratorID
 	}
+	if u.GeneratorPool != nil {
+		base.GeneratorPool = append([]string(nil), (*u.GeneratorPool)...)
+	}
 	if u.Difficulty != nil {
 		base.Difficulty = *u.Difficulty
 	}
@@ -778,11 +788,13 @@ func (s *Server) handleGenerators(w http.ResponseWriter, r *http.Request) {
 
 // generatorLifecycle 返回 (experimental, production_ready)。
 //
-// 两个题型现在都是 false/true 的**反面**：都不生产可用。写在这里的意义是
+// 所有题型现在都是 false/true 的**反面**：都不生产可用。写在这里的意义是
 // "未经评测不得改成 true"——评测通过也只证明"测过"，不等同于生产安全认证（ADR-002）。
 func generatorLifecycle(id string) (experimental, productionReady bool) {
 	switch id {
-	case generator.ArithID, generator.TextImageID, generator.TextImageV2ID:
+	case generator.ArithID, generator.TextImageID, generator.TextImageV2ID, generator.TextImageV3ID,
+		generator.ShapeGridID, generator.ShapeCountID, generator.ParallaxID, generator.BankShotID,
+		generator.AccessibleChoiceID:
 		return true, false
 	default:
 		// 没登记结论的题型：按最保守的一档报，绝不让"忘了写"变成"看起来可用"
@@ -804,6 +816,31 @@ func noteForGenerator(id string) string {
 			"图片中可见字符本来就要给答题者看，不具备密码学保密性；" +
 			"当前候选的 OCR 基线结果以评测收据为准，历史 v1 数字不能外推；" +
 			"跨工具、多模态、真人可读性与抗 AI 仍未验收，production_ready 保持 false"
+	case generator.TextImageV3ID:
+		return "抽象文字题型 v3（6 字符，模糊/正弦位移/擦除点/低对比，允许 1 个字符替换）：" +
+			"逐字容差 verifier 只降低“认错一个字”的误伤，不改变无密钥时的安全边界；" +
+			"图片中可见字符本来就要给答题者看，不具备密码学保密性；" +
+			"M4/OCR 基线、多模态、人工可读性均未验收（NOT_RUN），production_ready 保持 false"
+	case generator.ShapeGridID:
+		return "图形点选题（3×3，点选所有满足判据的格子）：非纯文字输入；" +
+			"图形对机器视觉并不难，M4 未测，不声称抗 AI；" +
+			"人工可读性、辅助技术与真机移动端未验收，production_ready 保持 false"
+	case generator.ShapeCountID:
+		return "图形计数题（两类目标各 1..6 个，另 0..2 个干扰图形）：非文字识别，" +
+			"但机器视觉可以直接数；M4 未测，不声称抗 AI；" +
+			"人工可读性、辅助技术与真机移动端未验收，production_ready 保持 false"
+	case generator.ParallaxID:
+		return "时序运动视差题（4 位数字分散在 8–12 帧中，单帧只有部分笔画）：" +
+			"M1/M2/M3 已计算，M4/OCR/多模态/人工可读性均未验收（NOT_RUN），" +
+			"不声称抗 AI；辅助技术与真机移动端未验收，production_ready 保持 false"
+	case generator.BankShotID:
+		return "一次反弹物理直觉题（0.1° 量化，TSV 角度容差）：" +
+			"M3 单次 ≤1.14%（d1，41/3600），3 次 ≤3.4%；M4 未测，不声称抗 AI；" +
+			"人工可读性、辅助技术与真机移动端未验收，production_ready 保持 false"
+	case generator.AccessibleChoiceID:
+		return "无障碍等价通道的纯文本单选题（12 选 1，唯一偶数）：" +
+			"只允许 accessibility:true + 站点池显式包含 + 24h 1 次；" +
+			"M4/人工可读性/辅助技术实测均 NOT_RUN，不声称抗 AI；production_ready 保持 false"
 
 	default:
 		return ""
@@ -857,22 +894,31 @@ func (s *Server) handlePoolStatus(w http.ResponseWriter, r *http.Request) {
 
 // checkModePolicy 在写入前验证模式与题型的组合：
 // 库里存一个本进程没登记的 generator_id，等于给站点配了一条只会返回 503 的策略。
-func (s *Server) checkModePolicy(mode, genID string, difficulty int) error {
+func (s *Server) checkModePolicy(mode, genID string, pool []string, difficulty int) error {
 	if mode == "" || mode == store.ModePowOnly {
 		return nil
 	}
 	if mode != store.ModePowQuestion {
 		return errors.New("admin: 未知验证模式")
 	}
-	g, err := s.gens.Lookup(genID)
-	if err != nil {
-		return err
+	ids := pool
+	if len(ids) == 0 && genID != "" {
+		ids = []string{genID}
+	}
+	if len(ids) == 0 {
+		return errors.New("admin: pow_question 缺少生成器")
+	}
+	for _, id := range ids {
+		g, err := s.gens.Lookup(id)
+		if err != nil {
+			return err
+		}
+		if g.Version() == "" {
+			return errors.New("admin: 生成器缺少协议版本")
+		}
 	}
 	if difficulty < 1 || difficulty > generator.MaxDifficulties {
 		return errors.New("admin: 难度档越界")
-	}
-	if g.Version() == "" {
-		return errors.New("admin: 生成器缺少协议版本")
 	}
 	return nil
 }

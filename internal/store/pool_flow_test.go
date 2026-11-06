@@ -206,16 +206,35 @@ func TestQuestionBucketsUsesEnabledTTL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(buckets) != 2 {
-		t.Fatalf("expected two enabled question buckets, got %+v", buckets)
-	}
+	var base []QuestionBucket
 	for _, b := range buckets {
+		if !b.Prewarm {
+			base = append(base, b)
+		}
+	}
+	if len(base) != 2 {
+		t.Fatalf("expected two enabled base buckets, got %+v", buckets)
+	}
+	for _, b := range base {
 		want := time.Hour
 		if b.Difficulty == 3 {
 			want = 5 * time.Minute
 		}
 		if b.GeneratorID != testSpec.GeneratorID || b.MaxChallengeTTL != want {
 			t.Fatalf("bucket max TTL includes inactive or unrelated policy: %+v want=%v", b, want)
+		}
+	}
+	// 升档预热桶必须继承各自基础桶的 TTL，而不是取全表最大值。
+	for _, b := range buckets {
+		if !b.Prewarm {
+			continue
+		}
+		want := time.Hour
+		if b.BaseDifficulty == 3 {
+			want = 5 * time.Minute
+		}
+		if b.MaxChallengeTTL != want {
+			t.Fatalf("预热桶 TTL 错: %+v want=%v", b, want)
 		}
 	}
 }

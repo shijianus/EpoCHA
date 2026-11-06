@@ -18,7 +18,10 @@ URL 是**版本化**的：改协议或有不兼容变更就发 `v2.js`，不要�
 
 ## 1. 最小接入
 
-当前 `v1.js` 只渲染 `text-image-v1` 图片题。管理 API 与控制台创建站点的默认模式仍为 `pow_only`；接入本 widget 前，需要显式设置 `verify_mode=pow_question`、`generator_id=text-image-v1`，选择中档或更高难度，并确认后台图片题池已有可领取题目。默认设置未完成这一步时，widget 会拒绝不支持的题面，不能把页面加载成功当成接入成功。
+当前 `v1.js` 支持 `text-image-v1/v2/v3`、`shape-grid-v1`、`shape-count-v1`（ADR-024）。
+管理 API 与控制台创建站点的默认模式仍为 `pow_only`；接入本 widget 前，需要显式设置
+`verify_mode=pow_question` 与一个本进程登记的 `generator_id`，选择难度，并确认后台题池已有可领取题目。
+默认设置未完成这一步时，widget 会拒绝不支持的题面，不能把页面加载成功当成接入成功。
 
 将业务页面的完整 Origin（协议、主机、非默认端口）写入站点来源列表；验证服务自身的地址不能代替业务页面的 Origin。浏览器只持有公开的 `site_key`，站点 secret 仅留在业务服务器。图片题仍为 `experimental:true`、`production_ready:false`；非视觉等价通道尚未交付。
 
@@ -122,7 +125,36 @@ EpoCHA.render(el, { …, form: "order" })                          // 或传同�
 | `fetchTimeoutMs` | `10000` | 单次 HTTP 超时（AbortController） |
 | `maxAutoRetry` | `2` | **仅**对 `503 challenge-unavailable` 的自动重试次数（尊重 `Retry-After`），其他错误一律人工重试 |
 | `showExperimentalNote` | `true` | 组件内的"实验性题型"标注；关掉它不等于这道题变得生产可用 |
+| `accessibility` | `false` | 显式申请纯文本无障碍通道；服务端仍要求站点池包含 `accessible-choice-v1`，且 24h 限额 |
 | `onState(state, id)` | — | 状态观测回调 |
+
+### 2.1 题型与输入控件（ADR-024 / ADR-025）
+
+widget 按服务端 `question.answer_type` 选择控件；接入方不需要、也不能指定题型：
+
+| `answer_type` | 控件 | 提交串 | 边界 |
+|---|---|---|---|
+| `text` | 文本输入（`text-image-v1/v2/v3`） | 规范化后的 6/8 字符 | v3 的题面带 `tolerant:1`，组件会显示"允许 1 个字符认错"的说明 |
+| `cells` | 图片上的可聚焦格子按钮（`shape-grid-v1`） | 1-based 序号排序去重后的逗号串（`3,7`） | 按钮位置只取自题面 `grid_*` 几何；几何越界即 fail closed |
+| `pairs` | 两个数字输入（`shape-count-v1`） | `a,b` | 两个字段都有值才允许提交 |
+| `angle` | 角度滑块 + 图片拖拽辅助线（Phase 1/2） | 0.1° 整数（`0..3599`） | 题面给 `angle_min/angle_max/angle_step`；有 `cue_x/cue_y/aim_len` 时显示可拖拽瞄准线，键盘仍可用滑块微调 |
+| `point` | 图片点击/键盘移动（Phase 1 契约） | `x,y`，各 `0..999` | 坐标按图片宽高归一化；点击或方向键设置，不读取图片内容 |
+| `timing` | 雪碧图动画 + “记录时机”（Phase 1 契约） | 毫秒 `0..60000` | 必须 `render_mode:"sprite_sheet"`；减少动态时 fail closed；时序题不提供暂停 |
+| 任意 `sprite_sheet` 题型 | 暂停/继续、重播 | — | 仅非 timing 模式显示；时间轴由 Web Animations 驱动 |
+| `media:"text"` + `options` | 文本选项按钮 | 选项字母 | 无障碍通道；不加载图片，键盘可直接选择 |
+
+Widget 会上报只含 `total_ms/first_input_ms/event_count/pointer_events/key_events/focus_blur` 的摘要；
+不采集原始坐标/按键内容。服务端只把它当弱证据，不改变显式判定。
+
+当前 Phase 2 的 `parallax-code-v1` 使用 `text` + `render_mode:"sprite_sheet"`，并由播放条提供暂停/继续/重播；
+`bank-shot-v1` 使用 `angle` + `cue_x/cue_y/aim_len`，图片上的拖拽层与滑块共享同一个角度值。
+
+`cells` 的按钮用百分比定位，随图片缩放；`aria-pressed` 反映选中，Space/Enter 可切换，
+再次点击取消。`pairs` 的标签取自题面的 `labels_zh/labels_en`，只进 `textContent`。
+`angle`/`point`/`timing` 是 ADR-025 的 Phase 1 契约输入：**当前没有生产生成器登记**，
+现有 6 个题型仍只用 `text`/`cells`/`pairs`。所有模式最终都写入同一个 `answer` 串并按
+`/api/redeem` 提交；widget 不做判定，也不持有答案或物理碰撞终点。
+主题型清单与 M1–M4 见 `docs/QUESTION-TYPES.md`。
 
 ## 3. 状态机
 

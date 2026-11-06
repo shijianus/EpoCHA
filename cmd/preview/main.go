@@ -178,7 +178,9 @@ func parseFlags(args []string, getenv func(string) string) (*options, error) {
 		return nil, fmt.Errorf("%w: pow_bits 须在 12..24（与站点表的 CHECK 一致）", errBadConfig)
 	}
 	switch opt.Generator {
-	case generator.TextImageID, generator.ArithID:
+	case generator.TextImageID, generator.TextImageV2ID, generator.TextImageV3ID,
+		generator.ShapeGridID, generator.ShapeCountID, generator.ArithID,
+		generator.ParallaxID, generator.BankShotID, generator.AccessibleChoiceID:
 	default:
 		return nil, fmt.Errorf("%w: 预览不支持题型 %q", errBadConfig, opt.Generator)
 	}

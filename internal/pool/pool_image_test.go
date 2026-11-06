@@ -48,6 +48,7 @@ func newImageHarness(t *testing.T, tune func(*Config)) *harness {
 	cfg.LowWatermark = 4
 	cfg.HighWatermark = 8
 	cfg.BatchPerTick = 8
+	cfg.Prewarm = false
 	cfg.PollInterval = 120 * time.Millisecond
 	cfg.YieldPause = 0
 	cfg.YieldEvery = 100

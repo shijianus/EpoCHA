@@ -13,6 +13,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -205,28 +206,81 @@ func (d *DB) PoolCount(ctx context.Context) (int, error) {
 type QuestionBucket struct {
 	PoolSpec
 	MaxChallengeTTL time.Duration
+	// Prewarm 表示这是刷新惩罚升档的轻量备货桶；BaseDifficulty 是站点的基础难度。
+	Prewarm        bool
+	BaseDifficulty int
 }
 
 // QuestionBuckets 只聚合启用的 pow_question 站点，站点数由 MaxSites 封顶。
 func (d *DB) QuestionBuckets(ctx context.Context) ([]QuestionBucket, error) {
 	rows, err := d.h.QueryContext(ctx, `
-SELECT generator_id, difficulty, max(challenge_ttl_sec) FROM sites
+SELECT generator_id, generator_pool, difficulty, max(challenge_ttl_sec) FROM sites
 WHERE enabled=1 AND verify_mode=? AND generator_id <> ''
-GROUP BY generator_id, difficulty
+GROUP BY generator_id, generator_pool, difficulty
 ORDER BY generator_id, difficulty`, ModePowQuestion)
 	if err != nil {
 		return nil, fmt.Errorf("store: 读备题分桶: %w", err)
 	}
 	defer rows.Close()
 	out := []QuestionBucket{}
+	index := map[string]int{}
 	for rows.Next() {
-		var b QuestionBucket
-		var ttlSeconds int64
-		if err := rows.Scan(&b.GeneratorID, &b.Difficulty, &ttlSeconds); err != nil {
+		var (
+			b          QuestionBucket
+			legacyID   string
+			poolRaw    string
+			ttlSeconds int64
+		)
+		if err := rows.Scan(&legacyID, &poolRaw, &b.Difficulty, &ttlSeconds); err != nil {
 			return nil, fmt.Errorf("store: 扫描备题分桶: %w", err)
 		}
-		b.MaxChallengeTTL = time.Duration(ttlSeconds) * time.Second
-		out = append(out, b)
+		pool, err := parseGeneratorPool(poolRaw)
+		if err != nil {
+			return nil, err
+		}
+		ids := pool
+		if len(ids) == 0 {
+			ids = []string{legacyID}
+		}
+		for _, id := range ids {
+			key := id + "|" + strconv.Itoa(b.Difficulty)
+			if idx, ok := index[key]; ok {
+				// 同一难度既是某站基础题、又是另一站预热题时，按基础桶的全水位处理。
+				ttl := time.Duration(ttlSeconds) * time.Second
+				if out[idx].Prewarm {
+					out[idx].Prewarm = false
+					out[idx].BaseDifficulty = 0
+					out[idx].MaxChallengeTTL = ttl
+				} else if ttl > out[idx].MaxChallengeTTL {
+					out[idx].MaxChallengeTTL = ttl
+				}
+			} else {
+				index[key] = len(out)
+				out = append(out, QuestionBucket{
+					PoolSpec:        PoolSpec{GeneratorID: id, Difficulty: b.Difficulty},
+					MaxChallengeTTL: time.Duration(ttlSeconds) * time.Second,
+				})
+			}
+			// 刷新惩罚最多 +3；为可能被触发的升档维护轻量备货桶。
+			// 无障碍文本题是固定难度，不参与升档备货（worker 还会再按 ID 跳过一次）。
+			for delta := 1; delta <= 3; delta++ {
+				d := b.Difficulty + delta
+				if d > MaxDifficulty {
+					break
+				}
+				key := id + "|" + strconv.Itoa(d)
+				if _, ok := index[key]; ok {
+					continue
+				}
+				index[key] = len(out)
+				out = append(out, QuestionBucket{
+					PoolSpec:        PoolSpec{GeneratorID: id, Difficulty: d},
+					MaxChallengeTTL: time.Duration(ttlSeconds) * time.Second,
+					Prewarm:         true,
+					BaseDifficulty:  b.Difficulty,
+				})
+			}
+		}
 	}
 	return out, rows.Err()
 }

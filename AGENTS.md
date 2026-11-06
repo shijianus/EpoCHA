@@ -119,6 +119,16 @@ manifest **无签名** ⇒ 不得宣称抵御恶意替换（备份目录的可�
 "能取到页面"永远不得被写成"能读到数据"；(3) 403/5xx 两支错误文案、剪贴板写入、真机移动端、
 辅助技术实测都是 **NOT_RUN**（无对应端点或无权限，不是通过），题池/审计/凭据轮换的页面**不存在**。
 
+**2026-11-05 题型扩展新增**（ADR-024，不是新的阶段完成）：`shape-grid-v1`（3×3 图形点选，
+`answer_type=cells`，非纯文字输入）、`shape-count-v1`（两类图形计数，`answer_type=pairs`，
+两个数字输入）、`text-image-v3`（6 字符抽象文字：字形层加权模糊/正弦位移/擦除点/低对比，
+逐字 HMAC verifier 允许最多 1 个字符替换，verifier 208B）。三者一律 `experimental:true` /
+`production_ready:false`；M4、人工可读性、辅助技术、真机移动端、抗 AI/抗 OCR 全部 **NOT_RUN**，
+不得把图形题写成"机器解不了"或把 v3 的覆盖守卫写成"人能读出来"。widget 增至三种输入
+（`text`/`cells`/`pairs`），gzip 实测 22,740B（预算 30KiB）；逐字 verifier 的"有密钥时离线枚举"
+边界见 ADR-024。站点**仍只选一个** `generator_id`，按权重混合多题型仍未实现。
+操作与 M1–M4 见 `docs/QUESTION-TYPES.md`。
+
 **尚未实现**：题型权重与多生成器选择、风险打分、自动淘汰、非视觉等价通道（音频等）、
 widget 的 `fallback_base` 与多站点配置面、阶段 4 的人工验收项（"题型人工各过 5 次"、辅助技术实测）、
 真机移动端验证（本轮窄屏是 headless 真实视口，不是真设备）、

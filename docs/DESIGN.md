@@ -271,13 +271,14 @@ ALTER TABLE sites      ADD COLUMN verify_mode TEXT NOT NULL DEFAULT 'pow_only'
   CHECK (verify_mode IN ('pow_only','pow_question'));
 ALTER TABLE sites      ADD COLUMN generator_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE sites      ADD COLUMN difficulty INTEGER NOT NULL DEFAULT 1 CHECK (difficulty BETWEEN 1 AND 5);
+ALTER TABLE sites      ADD COLUMN generator_pool TEXT NOT NULL DEFAULT ''; -- 0006：JSON 候选池（ADR-026）
 ALTER TABLE challenges ADD COLUMN mode TEXT NOT NULL DEFAULT 'pow_only';
 ALTER TABLE challenges ADD COLUMN generator_id TEXT NOT NULL DEFAULT '';
 CREATE TABLE pool (
   id TEXT PRIMARY KEY, generator_id TEXT NOT NULL, version TEXT NOT NULL,
   difficulty INTEGER NOT NULL CHECK (difficulty BETWEEN 1 AND 5),
   status TEXT NOT NULL CHECK (status IN ('ready','assigned','terminal')),
-  payload_json TEXT NOT NULL CHECK (length(payload_json) <= 4096),   -- 公开题面
+  payload_json TEXT NOT NULL CHECK (length(payload_json) <= 8192),   -- 公开题面（ADR-028）
   verifier_blob BLOB NOT NULL,                                      -- 私有判分数据，永不下发
   created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
   challenge_id TEXT REFERENCES challenges(id), assigned_at TEXT, terminal_at TEXT);
@@ -325,6 +326,11 @@ CREATE INDEX pool_expire ON pool(status, expires_at);
 `K(qver)` 由 §6 的域分隔派生按 `purpose="qver"` 得到，与 `chal`/`resp` 两把密钥互不可替代。
 答案明文不落库、不进日志、不进响应（红线 5、11）；判分是"对候选答案做同一条 HMAC 再常数时间比"，
 所以**没有**任何接口能把已存答案读出来。`nonce` 让同一答案在不同题目行里的摘要不同，避免"摘要相同 ⇒ 题面相同"的旁路观察。
+
+**2026-11-05 的第二种形态（ADR-024）**：`text-image-v3` 用逐字标签
+`nonce(16B) || tag_0 || … || tag_{L-1}`（每标签 32B，L=6 ⇒ 208B），以支持"最多 1 个字符替换"的容差判分。
+它只用于 v3；`arithmetic-baseline-v1`、`text-image-v1/v2`、`shape-grid-v1`、`shape-count-v1`
+仍使用上面的 48B 精确构造。两种形态都满足"答案不落库明文"，逐字构造的额外边界见 §8.7.3 与 ADR-024。
 
 **清理顺序**（`Purge`，响应 `PurgeCounts`）：`responses` → `pool` → `challenges`。
 必须先删 response 行再删 pool 行、最后删 challenge 行，否则外键把清理永久卡死（阶段 1 复核就是这个 bug，ADR-009）。
@@ -671,6 +677,76 @@ worker         = 单个后台 goroutine，priority=让出 CPU（每补 10 题 sl
 - 生命周期与并发语义见 §11；接入面与 CSP 见 `docs/WIDGET.md`；实测与验收见 `docs/STAGE4A.md`。
 - **仍然只有视觉通道**：非视觉等价通道（音频等）未实现，PoW-only 降级不是等效替代（§8.5 的结论不变）。
 
+### 8.7 2026-11-05 题型扩展：图形点选、图形计数与抽象文字（ADR-024）
+
+这一节记录三个**新增**题型；它们不替换 v1/v2/算术基线，站点按 `generator_id` 显式选择。
+三个题型一律 `experimental:true` / `production_ready:false`：本轮没有新的 M4 实测，也没有人工可读性验收。
+
+#### 8.7.1 `shape-grid-v1`（非纯文字输入的图形点选）
+
+- 画布 340×340（115,600 像素，仍在 §13 的 120,000 上限内），3×3 网格，格 100px、间距 8px、边距 12px；
+  每格一个几何图形：圆/三角/正方形/五边形/六边形，实心或空心。
+- 判据是**公开题面**的一部分，三选一：按种类（"所有三角形"）、按填充（"所有实心图形"）、
+  按两者组合（"所有空心正方形"）。生成器保证恰好 `k ∈ {2,3}` 个格子满足判据，其余格子放**不可能**满足判据的图形。
+- **交互是点选，不是文字输入**：widget 在图片上覆盖 9 个可聚焦按钮（百分比定位，随图片缩放；
+  `aria-pressed` 表示选中；键盘 Space/Enter 可切换）。
+- 答案编码：1-based 格子序号排序去重后的逗号串（`3,7`）。规范化接受 `3, 7` 与 `7,3`，
+  重复序号去重（`3,3,7` ⇒ `3,7`）；空、0、越界、非十进制一律**畸形**（不消耗作答机会）。
+  规范化不扩大接受域：一个 challenge 只接受唯一一个规范化集合。
+- M1–M4：M1 = 判据组合 × 图形种类/填充 × 格子排列；M2 = 唯一规范化集合；答案空间 `C(9,2)=36`
+  或 `C(9,3)=84`；M3 = 最坏单次 `1/36`，3 次上界 `1-(35/36)^3 ≈ 8.1%`；M4 **未测**。
+  图形题对机器视觉并不难，它交付的是交互多样性，**不是抗 AI 证明**。
+
+#### 8.7.2 `shape-count-v1`（图形计数）
+
+- 画布 480×240（115,200 像素）。场景里只有两类**目标**图形（六个类别中选两个：实心/空心 × 圆/三角/正方形/
+  五边形/六边形），每类数量 1..6，另有 0..2 个不属于任何目标类别的干扰图形；图形放在 4×4 的槽位里，
+  槽位内做有界抖动，避免重叠——不存在"图形叠在一起导致数不清"这条路径。
+- 题面同时问两类各有多少个；widget 渲染两个带标签的数字输入（不需要文字作答）。
+- 答案编码：`a,b`，两个 ASCII 十进制数，剥前导零；负数、小数、多余字段一律畸形。
+- M1–M4：M1 = 类别组合 × 数量 × 干扰排列；M2 = 唯一 `a,b` 串；答案空间 `6×6=36`；
+  M3 = 单次 `1/36`，3 次 ≈8.1%；M4 **未测**。
+
+#### 8.7.3 `text-image-v3`（抽象文字 + 单字容差）
+
+- 固定 6 字符、32 字符集、480×160、灰度 PNG。在 v2 的逐字形变（旋转/剪切/缩放/重叠/波浪/穿字线/加粗）之上，
+  再对**字形层**做后处理：
+  1. 低对比墨色/纸色（五档墨 44..52、纸 238..242，差值必须 ≥96）；
+  2. 1..2 遍 3×3 加权模糊（核 1-2-1，只模糊字形层，不糊背景）；
+  3. 两条平滑正弦位移（水平位移随 y、垂直位移随 x；位移幅度 ≤6px，周期 24..80px）；
+  4. 稀疏擦除点（≤32 个，只落在字形包围盒并集内）；
+  5. 纸面低频纹理（幅度 ≤16）。
+- 布局边距按 `warp + blur + 2` 放大，字形不会因为后处理被画布裁切。渲染后计算字墨覆盖率：
+  后处理保留的 alpha 总量必须 ≥ 原始的 55%，否则**有界重排**（不重抽答案）。这条守卫证明的是
+  "字没有被擦掉"，**不是**"人能读出来"；人工可读性仍为 NOT_RUN。
+- 判分允许**最多 1 个字符替换**：私有 verifier 是逐字 HMAC 标签
+  `nonce(16B) || tag_0..tag_5`（每标签 32B，共 208B），`Verify` 对每个位置重算标签并常数时间比较，
+  累计不匹配数 ≤1 才通过。没有读回答案的接口；答案明文仍不落库/不下发/不写日志。
+  v1/v2 继续使用 48B 的精确匹配 verifier，路径不变。
+- **接受域与 M3**：答案空间 32^6 = 1,073,741,824；接受域 = 精确答案 + 6 个位置 × 其余 31 个字符 = 187 个规范化串；
+  单次随机猜中率 187/32^6 ≈ 1.74e-7，3 次累计 ≈5.2e-7。M4 **未测**（v3 没有 OCR 基线）。
+- 逐字标签的边界必须写明：拿到判分密钥的人本就能离线枚举 verifier；逐字标签把"有密钥时的离线枚举"
+  从 32^6 降到 6×32，**不改变无密钥时的安全边界**。
+- 容差同时降低 OCR 的整串门槛（读错一个字符仍可能通过）：这是为"人认错一个字仍能过"付出的代价，
+  **不是**抗 OCR 措施；v3 的 M4 未测，不得据此声称抗 OCR/抗 AI。
+- 人工可读性目标（"可能认错但基本能认出"）目前只有参数设计与覆盖率守卫；**没有**人工验收证据。
+
+#### 8.7.4 新题型的公开 DTO 与 widget 映射
+
+- `shape-grid-v1` 的公开字段：`kind:"shape-grid"`、`answer_type:"cells"`、`image_width/image_height`、
+  `grid_cols/grid_rows/grid_x/grid_y/grid_cell/grid_gap`、`prompt_zh/prompt_en`、`max_answer_len`。
+  `SanitizePublic` 逐键白名单；任何未知键让整次出网失败。
+- `shape-count-v1` 的公开字段：`kind:"shape-count"`、`answer_type:"pairs"`、`image_width/image_height`、
+  `labels_zh/labels_en`（恰好 2 个）、`min/max`、`prompt_zh/prompt_en`、`max_answer_len`。
+- `text-image-v3` 沿用 `text-image` 的公开字段，并增加可选的 `tolerant:1`（只允许 0 或 1，且必须与 profile 一致）。
+- widget 对 `answer_type` 的处理：
+  - `text`：现有文本输入（v1/v2/v3）；
+  - `cells`：图片上覆盖可聚焦按钮，选中集合写入同一个 `answer` 串；
+  - `pairs`：两个带标签的数字输入，`a,b` 写入同一个 `answer` 串。
+  widget 不解释答案、不做判定；服务端仍是唯一权威。服务端文本只进 `textContent`，不拼 HTML。
+- 站点仍只选一个 `generator_id`：本轮**不**实现按权重混合多题型（§8.2 的"题型权重与多生成器选择"
+  仍未实现），"多样性"指可选题型增加与题型内变化。
+
 ## 9. 风险打分层（第三层，阶段 3+ 实现）
 
 `score ∈ [0,1]`，加权求和。**下表权重全部是 `[目标]` 初值，无任何一条经过测量**；阈值与权重的定稿必须依赖 `[实测]` 的
@@ -768,6 +844,33 @@ TTL 有 `[1s, 1h]` 上下界——有效期长度直接决定防重放账本必�
 媒体声明与资产**必须成对**：`media=image` 而库里没有资产（或 MIME 不是 `image/png`）时，
 `questionDTO` 返回错误 ⇒ 作废该 challenge + 503 可重试，**绝不**下发一道看不见的题，
 也**绝不**退化成 `pow_only`（§14-14）。图片只随这一次响应出去，之后任何路径都不再读它。
+
+**2026-11-05 追加的图形题 DTO**（ADR-024；同样是 `media=image` + 内联 PNG）：
+```json
+{ "question": { "kind": "shape-grid", "answer_type": "cells", "max_answer_len": 32,
+                "image_width": 340, "image_height": 340,
+                "grid_cols": 3, "grid_rows": 3, "grid_x": 12, "grid_y": 12,
+                "grid_cell": 100, "grid_gap": 8,
+                "prompt_zh": "选出图中所有的三角形。", "prompt_en": "Select every triangle.",
+                "generator": "shape-grid-v1", "generator_version": "v1",
+                "media": "image", "image_mime": "image/png", "image_base64": "iVBORw0KG…" } }
+```
+```json
+{ "question": { "kind": "shape-count", "answer_type": "pairs", "max_answer_len": 16,
+                "image_width": 480, "image_height": 240,
+                "labels_zh": ["实心三角形", "空心圆形"], "labels_en": ["filled triangles", "hollow circles"],
+                "min": 1, "max": 6,
+                "prompt_zh": "数一数：图中有多少个实心三角形、多少个空心圆形？",
+                "prompt_en": "Count the filled triangles and the hollow circles.",
+                "generator": "shape-count-v1", "generator_version": "v1",
+                "media": "image", "image_mime": "image/png", "image_base64": "iVBORw0KG…" } }
+```
+`answer_type` 是**输入形态**，不是判定依据：`text` 是字符输入，`cells` 是格子点选，
+`pairs` 是两个数字输入。三种最终都归一成一个字符串提交：
+`text` 用 6/8 字符串；`cells` 用 1-based 格子序号的排序逗号串（`3,7`）；
+`pairs` 用两个十进制数的逗号串（`4,2`）。服务端的 `NormalizeAnswer` 是唯一裁决者，
+widget 只是把它渲染成合适的控件（§8.7.4、§11）。`text-image-v3` 的题面额外带 `"tolerant":1`，
+表示服务端接受最多一个字符替换；v1/v2 不带这个字段。
 
 给不出题时（题池空、或站点配的生成器本进程没登记）是**可重试的资源状态**，不是验证失败：
 `503` + `Retry-After: 2` + `{ "error-codes": ["challenge-unavailable"] }`，且响应里**没有** `pow`/`token`。
@@ -923,7 +1026,21 @@ scheme 只允许 `http`/`https`，host 小写化、IPv6 保留方括号形式、
 当前交付是 `web/widget/v1.js` + `web/widget/v1.worker.js` 的原生 JS API：
 `EpoCHA.render/getResponse/reset/refresh/destroy`。widget 通过版本化公共 URL 提供，Shadow DOM 只用于组件样式与内部 UI；表单隐藏字段必须落在 light DOM，见 `docs/WIDGET.md`。
 
-当前 v1 只支持 `text-image-v1` 图片题。管理面默认的 `pow_only` 站点不会下发题目，图片题仍保持 `experimental:true`、`production_ready:false`。非视觉等价通道、`fallback_base`/多端点、无 JS 服务端表单和完整辅助技术验证仍是未交付/未验收项目，不能把 PoW-only 降级写成等价无障碍路径。
+widget 最初只支持 `text-image-v1` 图片题；2026-11-05 起支持 §8.7 的三种新题型（见下表）。
+管理面默认的 `pow_only` 站点不会下发题目，图片题仍保持 `experimental:true`、`production_ready:false`。非视觉等价通道、`fallback_base`/多端点、无 JS 服务端表单和完整辅助技术验证仍是未交付/未验收项目，不能把 PoW-only 降级写成等价无障碍路径。
+
+**2026-11-05（ADR-024）**：widget 除 `text-image-v1/v2/v3` 外还支持 `shape-grid-v1` 与 `shape-count-v1`，
+按服务端 `answer_type` 选择输入控件：
+
+| `answer_type` | 控件 | 提交串 |
+|---|---|---|
+| `text` | 文本输入，`letter-spacing` 提升可读性 | 规范化后的字符答案 |
+| `cells` | 图片上覆盖的 9 个可聚焦按钮（百分比定位、随图片缩放、`aria-pressed`、键盘可切换） | 1-based 格子序号排序逗号串（`3,7`） |
+| `pairs` | 两个带标签的数字输入（`type=number`、`inputmode=numeric`） | `a,b` |
+
+三种控件最终都写入同一个 `answer` 字符串并按现有 `/api/redeem` 提交；widget 不解释答案、不做判定，
+服务端仍是唯一权威。`cells` 的按钮只覆盖服务端声明并校验过的网格几何（`grid_*` 字段），
+不按图片内容猜测位置；`pairs` 的标签取自题面的 `labels_zh/labels_en`，只进 `textContent`。
 
 已实现并受 Node/部分真实浏览器用例约束的工程边界包括：请求/响应超时、世代隔离、reset/refresh/destroy 取消迟到回调、重复兑换保护、过期清空 token、CSP/Worker 两条资源路径、键盘焦点和 `aria-live`。这些工程行为不等于真人可读性、抗 OCR/AI 或真机辅助技术效果认证。
 
@@ -987,7 +1104,8 @@ compose **只**发布 `127.0.0.1:8080`，管理口 8081 不发布——容器内
 |---|---|---|---|
 | 常驻 RSS | `[目标]` <100MB（Go 基线 + 字体光栅 + SQLite page cache + 池缓冲，阶段 3 后才有光栅项） | `[实测]` **真实服务进程**（`cmd/server` 二进制、`-trimpath -ldflags -s -w`）在"池里 200 道 ready 题 + 20 次完整 challenge→redeem→siteverify 闭环"下 `/proc/<pid>/status` 的 **VmRSS = VmHWM = 15,488 kB（15.1MB）、Threads=9**（2026-10-17，linux/arm64，go1.24.5）。这是**功能闭环形状**的采样、不是持续负载下的稳态，也没有压过 20000 行满载；基准确另见测试进程 VmRSS 9.6MB(100 题)/13.1MB(1000 题)，**含测试框架、不得混引** | `GOMEMLIMIT`；测试读 `/proc/self/status` 断言峰值 |
 | 二进制体积 | `[目标]` ≤35MB（含 modernc/sqlite） | `[实测]` 9.44MiB（9,896,228 字节；2026-10-17，linux/arm64，go1.24.5，`-trimpath -ldflags "-s -w"`，含 modernc SQLite 驱动与**三条**内嵌迁移）。同一天用**完全相同的 flag** 把 HEAD（阶段 2）与工作树（阶段 3A）各构建一次，两者字节数相同 —— 体积未随 3A 的新代码增长，这是实测对比；**原因未做符号级分析，本文不解释** | `make size` |
-| 单题数据体积 | `[目标]` payload ≤4096B / verifier ≤512B（库内 CHECK 强制） | `[实测]` `arithmetic-baseline-v1` 较大块 **62–63 字节**（verifier 恒为 16B nonce + 32B HMAC = 48B）；库内**净增 ≈432 字节/题**（1000 题与 100 题两次 checkpoint 后大小之差 ÷ 900 行；SQLite 4KB 页填充率决定了它远大于裸字段和） | `store.MaxPayloadBytes`/`MaxVerifierBytes` + 有测试 |
+| 单题数据体积 | `[目标]` payload ≤8192B / verifier ≤4096B（ADR-028；payload 由库内 CHECK 强制，verifier 由 Go 常量强制） | `[实测]` `arithmetic-baseline-v1` 较大块 **62–63 字节**（verifier 恒为 16B nonce + 32B HMAC = 48B）；库内**净增 ≈432 字节/题**（1000 题与 100 题两次 checkpoint 后大小之差 ÷ 900 行；SQLite 4KB 页填充率决定了它远大于裸字段和）。**该 432B 是旧上限下的实测，不是新预算的满载测量** | `store.MaxPayloadBytes`/`MaxVerifierBytes` + 有测试；0005 迁移重建 CHECK |
+| 新题型单题体积（ADR-024） | — | `[实测]` 本地渲染样本：`shape-grid-v1` PNG 5.1–7.0KB、`shape-count-v1` 2.9–6.4KB、`text-image-v3` 11.7–19.0KB；v3 逐字 verifier **208B**（仍 <512B）。这是**样本**不是稳态分布，也未压满题池 | 生成器测试 + 本地渲染 |
 | 有限批次生成耗时 | — | `[实测]` 补 100 题：纯生成+写入 **29ms**（0.29ms/题）；补 1000 题：**339–391ms**（0.34–0.39ms/题）。总墙钟 1.03s / 10.3s 里**主动让出 CPU 占 1s / 10s**（`YieldEvery=10`/`YieldPause=100ms`，是设计意图不是开销）。测量条件：本机 4 核可见但 `BatchPerTick=n` 单轮补满、`t.TempDir()` 独立库、2026-10-17 | `BenchmarkPoolFill`（需显式 `-bench`） |
 | 题池磁盘占用 | `[目标]` 20000 行上限 | `[估算]` 按上行的 432 B/题 ⇒ 上限约 **8.4MB**（**外推值，未实测到 20000 行**；50GB 磁盘下不构成约束）。WAL 在写入进行中额外占 ~4.7MB（自动 checkpoint 阈值 1000 页） | `MaxRows` 同语句判定 |
 | widget 体积 | `gzip [目标]` <30KB（`make widget-size`） | `[实测]` **v1.js 原文 48,412 B / gzip 16,687 B**；与 `v1.worker.js` 合计 gzip 21,121 B（2026-10-18，同一构建口径） | 浏览器只下载 v1.js（worker 源码内嵌其中）；方案 B 另取 worker 文件 |
@@ -1339,6 +1457,20 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
 | R12 | 池容量不足时公共请求直接吃 503（不降级是正确的，但对调用方表现为"暂时不可用"） | 默认水位 50/100 与 20000 行上限都是 `[目标]`，**未经真实流量校准** | 3B/阶段 5 按 `[实测]` 到达率重设水位；运维侧先用 `/api/admin/pool` 观测 |
 
 ## 19. 变更日志
+
+- 2026-11-05 **风险调度/弱遥测/无障碍（ADR-026/027/029）**：`sites` 增加 `generator_pool`（0006），签发按风险带/设备/刷新惩罚在池内加权选型，pool worker 为 `d_base+1..+3` 维护轻量预热水位；Widget 只上报量化遥测摘要，服务端仅作风险修正，不改变显式判定；新增 `accessible-choice-v1` 纯文本无障碍通道（显式请求、池内显式包含、24h 一次）。调度、遥测与无障碍的 M4/真机辅助技术仍为 NOT_RUN。
+
+- 2026-11-05 **首批标杆题型 Phase 2（parallax-code / bank-shot）**：新增 `parallax-code-v1`（4 位数字分帧视差，单帧只有部分笔画）与 `bank-shot-v1`（一次反弹，0.1° 量化 + TSV 41 桶容差）。两者 `experimental:true` / `production_ready:false`；M1–M3 已计算，M4/人工可读性/辅助技术/真机移动端均 NOT_RUN。Widget 增加雪碧图播放/暂停/重播与角度拖拽辅助线，主文件 gzip 仍 <30KB。
+
+- 2026-11-05 **交互底座 Phase 1（ADR-025/028）**：新增 `angle`/`point`/`timing` 答案编码、雪碧图多帧契约与哑渲染器输入；新增 TSV（tag-set HMAC）连续容差 verifier，`MaxVerifierBytes` 512→4096、`MaxPayloadBytes` 4096→8192，并用 `0005` 迁移重建 `pool.payload_json` CHECK；现有 6 个题型与 48B/208B verifier 不变。实际生产题型、风险调度、遥测、无障碍通道与 M4 评测仍未实现。
+
+- 2026-11-05 **题型扩展（ADR-024）**：新增 `shape-grid-v1`（3×3 图形点选，非纯文字输入）、
+  `shape-count-v1`（两类图形计数，两个数字输入）与 `text-image-v3`（6 字符抽象文字，字形层模糊/正弦位移/擦除点/
+  纸面纹理，允许最多 1 个字符替换）。新增逐字 HMAC 容差 verifier（`nonce || 每字 tag`，v3 专用）；
+  v1/v2 的 48B 精确 verifier 与渲染路径不变。§8.7 记录三种题型的 M1–M4、资源上界与 NOT_RUN 清单；
+  §10.1/§11 记录 `answer_type`（`text`/`cells`/`pairs`）与 widget 控件映射。三个题型均为
+  `experimental:true` / `production_ready:false`；人工可读性、M4、非视觉通道与按权重混合题型仍未实现。
+  `docs/QUESTION-TYPES.md` 是操作与验收边界说明。
 
 - 2026-11-02 **本轮修复冻结证据索引**：`docs/reviews/REPAIR-FREEZE-2026-11-02.md` 记录审计项处置、真实 challenge/浏览器验证与未完成项；对应 `release-artifacts/repair-freeze-2026-11-02-ae546e9c/freeze-receipt.json` 保存最终源码指纹、原始产物及执行状态。源码快照不等于正式发布候选，Linux/race/容器与真人验收未自动通过。
 

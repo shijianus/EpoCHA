@@ -570,6 +570,41 @@
     return opts;
   }
 
+  // 生成器池是多选，不是第二个 generator_id。旧版表单不带这个字段时，
+  // 服务端会保留原值；这里也只在用户真的改动时才发送 generator_pool。
+  function poolPicker(gens, selected) {
+    var chosen = {};
+    (selected || []).forEach(function (id) { chosen[id] = true; });
+    var ids = [];
+    var seen = {};
+    ((gens && gens.generators) || []).forEach(function (g) {
+      if (!seen[g.id]) { seen[g.id] = g; ids.push(g.id); }
+    });
+    (selected || []).forEach(function (id) {
+      if (!seen[id]) { seen[id] = { id: id, media: "本进程未登记" }; ids.push(id); }
+    });
+    var boxes = [];
+    var root = div({ class: "poolbox" });
+    ids.forEach(function (id) {
+      var box = el("input", { type: "checkbox", value: id, checked: !!chosen[id] });
+      boxes.push(box);
+      var g = seen[id];
+      root.appendChild(el("label", { class: "poolitem" }, [
+        box, " " + (g.version ? genLabel(g) : id + " · 本进程未登记")
+      ]));
+    });
+    function get() {
+      var out = [];
+      boxes.forEach(function (b) { if (b.checked) out.push(b.value); });
+      return out.sort();
+    }
+    return {
+      root: root,
+      get: get,
+      base: JSON.stringify((selected || []).slice().sort())
+    };
+  }
+
   function findGen(gens, id) {
     var list = (gens && gens.generators) || [];
     for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
@@ -667,7 +702,8 @@
     var box = div({ class: "panel" });
     var idName = nextID("new-name"), idKey = nextID("new-sitekey"),
       idPow = nextID("new-pow"), idMode = nextID("new-mode"),
-      idGen = nextID("new-gen"), idDiff = nextID("new-diff");
+      idGen = nextID("new-gen"), idDiff = nextID("new-diff"),
+      idPool = nextID("new-pool");
 
     var name = el("input", {
       type: "text", id: idName, name: "name", maxlength: BOUNDS.nameMax,
@@ -686,6 +722,7 @@
     var gen = el("select", { id: idGen, name: "generator_id" },
       genOptions(gens, first));
     var diff = el("select", { id: idDiff, name: "difficulty" }, diffOptions(gens, 1));
+    var pool = poolPicker(gens, []);
     var genNote = div({ class: "note", id: idGen + "-note", text: noteOf(gens, gen.value) });
     var genLife = div({ class: "pills", "aria-label": "题型自我声明" });
     paintLifecycle(genLife, gens, gen.value);
@@ -710,6 +747,11 @@
         field(idDiff, "难度档（1–" + BOUNDS.diffMax + "）", diff)
       ]),
       genLife,
+      el("fieldset", { class: "legend-box", id: idPool }, [
+        el("legend", { text: "生成器池 generator_pool（可多选；留空则只用 generator_id）" }),
+        pool.root,
+        p("仅池内题型会参与风险/设备加权调度；无障碍题型必须显式加入池。", "hint")
+      ]),
       genNote,
       p("pow_only 不下发题目，题型与难度档不生效；选 pow_question 时必须有一个本进程登记的题型。", "hint"),
       div({ class: "panel-actions" }, [
@@ -744,6 +786,7 @@
       };
       if (siteKey.value.trim()) payload.site_key = siteKey.value.trim();
       if (mode.value === "pow_question") payload.generator_id = gen.value;
+      if (mode.value === "pow_question" && pool.get().length) payload.generator_pool = pool.get();
       var res;
       try { res = await call("POST", API_PREFIX + "sites", payload); }
       finally { finish(); }
@@ -759,6 +802,7 @@
           ["site_key", s.site_key],
           ["验证模式", s.verify_mode],
           ["题型", s.generator_id || "未设置"],
+          ["生成器池", (s.generator_pool || []).join(", ") || "（回落到 generator_id）"],
           ["难度档", String(s.difficulty)],
           ["状态", s.enabled ? "启用" : "停用"]
         ]));
@@ -954,6 +998,7 @@
       el("option", { value: "pow_question", text: "pow_question", selected: s.verify_mode === "pow_question" })
     ]);
     var gen = el("select", { id: idGen }, genOptions(gens, s.generator_id || ""));
+    var pool = poolPicker(gens, s.generator_pool || []);
     var diff = el("select", { id: idDiff }, diffOptions(gens, s.difficulty));
     var pow = numberInput(idPow, s.pow_bits, BOUNDS.powMin, BOUNDS.powMax);
     var chal = numberInput(idChal, s.challenge_ttl_sec, BOUNDS.ttlMin, BOUNDS.ttlMax);
@@ -969,6 +1014,7 @@
       { key: "name", node: name, get: function () { return name.value.trim(); }, base: s.name },
       { key: "verify_mode", node: mode, get: function () { return mode.value; }, base: s.verify_mode },
       { key: "generator_id", node: gen, get: function () { return gen.value; }, base: s.generator_id || "" },
+      { key: "generator_pool", node: pool.root, get: function () { return JSON.stringify(pool.get()); }, base: pool.base },
       { key: "difficulty", node: diff, get: function () { return String(Number(diff.value)); }, base: String(s.difficulty) },
       { key: "pow_bits", node: pow, get: function () { return String(Number(pow.value)); }, base: String(s.pow_bits) },
       { key: "challenge_ttl_sec", node: chal, get: function () { return String(Number(chal.value)); }, base: String(s.challenge_ttl_sec) },
@@ -991,6 +1037,11 @@
         el("legend", { text: "验证模式与题型" }),
         div({ class: "row" }, [field(idMode, "verify_mode", mode), field(idGen, "generator_id", gen)]),
         genLife,
+        el("fieldset", { class: "legend-box", id: idPool }, [
+          el("legend", { text: "生成器池 generator_pool（可多选；留空则只用 generator_id）" }),
+          pool.root,
+          p("旧版单字段表单不会清空此列表；只有勾选变化才会发送 generator_pool。", "hint")
+        ]),
         genNote,
         field(idDiff, "难度档（1–" + BOUNDS.diffMax + "）", diff)
       ]),
@@ -1072,6 +1123,7 @@
         if (f.key === "name") payload.name = f.get();
         else if (f.key === "verify_mode") payload.verify_mode = f.get();
         else if (f.key === "generator_id") payload.generator_id = f.get();
+        else if (f.key === "generator_pool") payload.generator_pool = JSON.parse(f.get());
         else if (f.key === "difficulty") payload.difficulty = Number(f.get());
         else if (f.key === "pow_bits") payload.pow_bits = Number(f.get());
         else if (f.key === "challenge_ttl_sec") payload.challenge_ttl_sec = Number(f.get());
@@ -1160,6 +1212,9 @@
       });
     if (map.verify_mode.get() === "pow_question" && !map.generator_id.get()) {
       out.push("pow_question 必须选一个已登记的题型。");
+    }
+    if (map.generator_pool && JSON.parse(map.generator_pool.get()).length > BOUNDS.diffMax + 3) {
+      out.push("生成器池最多 8 项。");
     }
     return out;
   }

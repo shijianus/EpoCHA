@@ -587,10 +587,12 @@ import json, sys
 b = json.load(open(sys.argv[1]))["buckets"]
 img = [x for x in b if x["generator_id"] == "text-image-v1"]
 assert img and img[0]["ready"] >= 20, img
+arith = [x for x in b if x["generator_id"] == "arithmetic-baseline-v1"]
+assert arith and arith[0]["ready"] >= 20, arith
 ' 2>/dev/null; then IMG_FILLED=1; break; fi
   sleep 0.25
 done
-(( IMG_FILLED == 1 )) || fail "图片桶没有在 50s 内补到 20 条"
+(( IMG_FILLED == 1 )) || fail "图片/算术桶没有在 50s 内都补到 20 条"
 LOOP_ERR=0
 for i in $(seq 1 10); do
   EPOCHA_SITE_SECRET="$MIX_SECRET" "$DEV" --base "$BASE" --site-key pk_mixarith --origin "$ORIGIN" \

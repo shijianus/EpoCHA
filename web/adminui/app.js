@@ -985,9 +985,9 @@
 
   function buildPolicyForm(s, gens, ticket, policyConfirmed) {
     var idName = nextID("pol-name"), idMode = nextID("pol-mode"), idGen = nextID("pol-gen"),
-      idDiff = nextID("pol-diff"), idPow = nextID("pol-pow"), idChal = nextID("pol-chal"),
-      idResp = nextID("pol-resp"), idIP = nextID("pol-ip"), idSite = nextID("pol-site"),
-      idMiss = nextID("pol-miss");
+      idPool = nextID("pol-pool"), idDiff = nextID("pol-diff"), idPow = nextID("pol-pow"),
+      idChal = nextID("pol-chal"), idResp = nextID("pol-resp"), idIP = nextID("pol-ip"),
+      idSite = nextID("pol-site"), idMiss = nextID("pol-miss");
 
     var name = el("input", {
       type: "text", id: idName, value: s.name, maxlength: BOUNDS.nameMax, autocomplete: "off",

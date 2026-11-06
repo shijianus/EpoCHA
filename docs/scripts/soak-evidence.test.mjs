@@ -9,15 +9,15 @@ const rules = () => import('./soak-evidence.mjs');
 const good = '负载形状 concurrency=1 requests=450 base=http://127.0.0.1:18182（凭据不回显）\n节流 pace=660ms（每 worker）→ 目标速率≈1.52 闭环/秒（并发 1）\nwall=4m58s flows=450 ok=450 吞吐=1.51 闭环/秒\nchallenge  n=450 p50=1ms p95=2ms max=3ms\nredeem     n=450 p50=1ms p95=2ms max=3ms\nsiteverify n=450 p50=1ms p95=2ms max=3ms\npow-tool   n=450 p50=1ms p95=2ms max=3ms\n';
 const pool = { buckets: [{ generator_id: 'text-image-v1', difficulty: 5, ready: 20, ready_asset_bytes: 1024, total_asset_bytes: 1024 }], image: { asset_bytes: 1024, budget_bytes: 4194304 } };
 
-test('450/450 requires exact counts, all stage samples and actual zero exit inside 300 seconds', async () => {
-  const { checkLoad } = await rules();
+test('450/450 requires exact counts, all stage samples and actual zero exit inside the watchdog', async () => {
+  const { checkLoad, SOAK_LIMIT_MS } = await rules();
   const input = { text: good, exit_code: 0, elapsed_ms: 298000, timed_out: false };
   assert.equal(checkLoad(input).ok, 450);
   for (const patch of [
     { text: '' }, { text: good.replace('ok=450', 'ok=4500') }, { text: good.replace('flows=450', 'flows=449') },
     { text: good.replace('requests=450', 'requests=500') }, { text: good.replace('ok=450', 'ok=449') },
     { text: good.replace('siteverify n=450', 'siteverify n=449') }, { text: good + '失败类别：challenge=1\n' },
-    { text: good + good }, { exit_code: 1 }, { exit_code: 124 }, { elapsed_ms: 300001 }, { timed_out: true },
+    { text: good + good }, { exit_code: 1 }, { exit_code: 124 }, { elapsed_ms: SOAK_LIMIT_MS + 1 }, { timed_out: true },
     { text: good.replace('pace=660ms', 'pace=0s') }, { text: good.replace('wall=4m58s', 'wall=9m0s') },
   ]) assert.throws(() => checkLoad({ ...input, ...patch }), undefined, JSON.stringify(patch));
 });

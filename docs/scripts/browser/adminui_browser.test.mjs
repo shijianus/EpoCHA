@@ -425,7 +425,9 @@ test(caseTitle("adminui.edit-policy-origin"), async () => {
 
   // 对账（二）：页面重新读取后显示的也是这些值（保存后组件会重画）
   await openPage();
-  await bidi.waitUntil(ctx, `document.body.innerText.includes("站点")`, { label: "重开页面回到登录面" });
+  // 未登录时导航是 hidden 的，innerText 里没有"站点"二字：等登录框出现才是
+  // "回到登录面"的可靠判据（app.js 的 nav.hidden = !logged）。
+  await bidi.waitUntil(ctx, `!!document.getElementById("admin-key")`, { label: "重开页面回到登录面" });
   assert.equal(await bidi.evaluate(ctx, `document.getElementById("login").hidden`), false,
     "重新加载后凭据不在了：必须重新登录（内存态凭据的预期行为）");
   await login(ADMIN_KEY);
@@ -433,10 +435,18 @@ test(caseTitle("adminui.edit-policy-origin"), async () => {
   await clickText("查看");
   await bidi.waitUntil(ctx, `document.body.innerText.includes("允许来源")`, { label: "详情页" });
   const detail = await text();
-  assert.match(detail, /gate-site-renamed/);
-  assert.match(detail, /420/, `详情页应显示限流：${detail.slice(0, 200)}`);
-  assert.match(detail, /20/, "详情页应显示 PoW bits");
   assert.ok(!detail.includes(createdSecret), "改完一轮后详情页仍不得出现 secret");
+  // 名称/限流/PoW 都在**表单控件**里（概览不放名称行，innerText 取不到 input value）：
+  // 按 label 锚定读控件值——断言的仍是页面上人能看到的当前值。
+  const detailVals = await bidi.evaluateJSON(ctx, `(()=>{const byLabel=(sel,re)=>{
+      const el=[...document.querySelectorAll(sel)].find(e=>re.test((document.querySelector('label[for="'+e.id+'"]')||{}).textContent||""));
+      return el?el.value:null;};
+    return {name: byLabel("input[type=text]", /站点名称/),
+            pow: byLabel("input[type=number]", /PoW bits/),
+            rpm: byLabel("input[type=number]", /按站点|rate_site_rpm/)};})()`, true);
+  assert.equal(detailVals.name, "gate-site-renamed", `详情页应显示改名后的站点名称，实得 ${JSON.stringify(detailVals)}`);
+  assert.equal(detailVals.pow, "20", "详情页应显示 PoW bits=20");
+  assert.equal(detailVals.rpm, "420", "详情页应显示按站点限流=420");
 
   // 越界值：前端会挡，但这里要证明**服务端才是权威**（直接把 99 发给 API）
   const bad = await api("PUT", `/api/admin/sites/${createdSiteID}`, { pow_bits: 99 });

@@ -183,23 +183,29 @@ async function statusText(c, container = "#widget") {
 }
 
 // 动画控件（暂停/重播/记录时机，6a4e5a8 起随 parallax/bank-shot 加入）排在提交/换一张
-// 之前，静态题下不可见（rect 0×0）——固定 nth-of-type(1/2) 会把真实点击打到 (0,0)，
-// 组件于是永远停在 ready。按可见文案解析按钮位次（示例页面语言固定 zh-CN），再真实点击。
-async function widgetButtonSelector(c, which, container = "#widget") {
+// 之前，静态题下不可见（rect 0×0）——按元素次序定位会把真实点击打到 (0,0)。
+// 按可见文案找到按钮后直接取中心坐标真实点击：不用 nth-of-type，因为各按钮
+// 分属 shadow root 里不同的容器，:nth-of-type 的计数范围与全局序号对不上。
+// 示例页面语言固定 zh-CN，文案匹配是稳定的。
+async function widgetButtonCenter(c, which, container = "#widget") {
   const label = which === "submit" ? "提交答案" : "换一张";
-  const idx = await bidi.evaluateJSON(c, `(()=>{
+  const pos = await bidi.evaluateJSON(c, `(()=>{
     const host=document.querySelector(${JSON.stringify(hostOf(container))});
-    const btns=host&&host.shadowRoot?[...host.shadowRoot.querySelectorAll('button')]:[];
-    return btns.findIndex((b)=>b.textContent.trim()===${JSON.stringify(label)});
+    const btns=host&&host.shadowRoot?[...host.shadowRoot.querySelectorAll("button")]:[];
+    const el=btns.find((b)=>b.textContent.trim()===${JSON.stringify(label)});
+    if(!el) return null;
+    el.scrollIntoView({block:"center"});
+    const r=el.getBoundingClientRect();
+    return [Math.round(r.left+r.width/2), Math.round(r.top+r.height/2)];
   })()`, true);
-  if (typeof idx !== "number" || idx < 0) throw new Error(`shadow DOM 里找不到按钮：${label}`);
-  return `button:nth-of-type(${idx + 1})`;
+  if (!pos) throw new Error(`shadow DOM 里找不到按钮：${label}`);
+  return pos;
 }
 
 async function clickWidgetButton(c, which, container = "#widget") {
-  // which: "submit" | "refresh" —— 按可见文案定位位次（见 widgetButtonSelector），然后**真实鼠标点击**。
-  const sel = await widgetButtonSelector(c, which, container);
-  return bidi.clickDeep(c, container, sel);
+  // which: "submit" | "refresh" —— 按可见文案定位（见 widgetButtonCenter），然后**真实鼠标点击**。
+  const pos = await widgetButtonCenter(c, which, container);
+  return bidi.pointerClick(c, pos[0], pos[1]);
 }
 
 // 窄屏布局度量表达式：全部在**真实窄视口**下取。
@@ -603,10 +609,9 @@ test("计算超时是真实约束：预算到点即明确失败，不去兑换",
     const sel = `#${host} [data-epocha-widget]`;
     await bidi.evaluate(c, `(()=>{const hs=document.querySelector(${JSON.stringify(sel)});
       hs.shadowRoot.querySelector('input.ans').value='ABCDEF';})()`);
-    const bsel = await widgetButtonSelector(c, "submit", `#${host}`);
-    const pos = await bidi.deepCenter(c, `#${host}`, bsel);
-    assert.ok(pos && (pos[0] !== 0 || pos[1] !== 0), `第 ${attempt} 次：预算实例的提交按钮坐标异常（${JSON.stringify(pos)}）`);
-    await bidi.pointerClick(c, pos[0], pos[1]);
+    const bpos = await widgetButtonCenter(c, "submit", `#${host}`);
+    assert.ok(bpos && (bpos[0] !== 0 || bpos[1] !== 0), `第 ${attempt} 次：预算实例的提交按钮坐标异常（${JSON.stringify(bpos)}）`);
+    await bidi.pointerClick(c, bpos[0], bpos[1]);
     await bidi.waitUntil(c, `(()=>{const s=EpoCHA.state(${JSON.stringify(id)});
       return s==='error' || s==='verified';})()`,
       { timeoutMs: 90000, label: `第 ${attempt} 次：预算实例走到终态` });

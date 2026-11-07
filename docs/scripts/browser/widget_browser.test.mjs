@@ -182,9 +182,23 @@ async function statusText(c, container = "#widget") {
     return s?s.textContent:null;})()`);
 }
 
+// 动画控件（暂停/重播/记录时机，6a4e5a8 起随 parallax/bank-shot 加入）排在提交/换一张
+// 之前，静态题下不可见（rect 0×0）——固定 nth-of-type(1/2) 会把真实点击打到 (0,0)，
+// 组件于是永远停在 ready。按可见文案解析按钮位次（示例页面语言固定 zh-CN），再真实点击。
+async function widgetButtonSelector(c, which, container = "#widget") {
+  const label = which === "submit" ? "提交答案" : "换一张";
+  const idx = await bidi.evaluateJSON(c, `(()=>{
+    const host=document.querySelector(${JSON.stringify(hostOf(container))});
+    const btns=host&&host.shadowRoot?[...host.shadowRoot.querySelectorAll('button')]:[];
+    return btns.findIndex((b)=>b.textContent.trim()===${JSON.stringify(label)});
+  })()`, true);
+  if (typeof idx !== "number" || idx < 0) throw new Error(`shadow DOM 里找不到按钮：${label}`);
+  return `button:nth-of-type(${idx + 1})`;
+}
+
 async function clickWidgetButton(c, which, container = "#widget") {
-  // which: "submit" | "refresh" —— 按 shadow DOM 里的顺序定位，然后**真实鼠标点击**。
-  const sel = which === "submit" ? "button:nth-of-type(1)" : "button:nth-of-type(2)";
+  // which: "submit" | "refresh" —— 按可见文案定位位次（见 widgetButtonSelector），然后**真实鼠标点击**。
+  const sel = await widgetButtonSelector(c, which, container);
   return bidi.clickDeep(c, container, sel);
 }
 
@@ -589,8 +603,9 @@ test("计算超时是真实约束：预算到点即明确失败，不去兑换",
     const sel = `#${host} [data-epocha-widget]`;
     await bidi.evaluate(c, `(()=>{const hs=document.querySelector(${JSON.stringify(sel)});
       hs.shadowRoot.querySelector('input.ans').value='ABCDEF';})()`);
-    const pos = await bidi.deepCenter(c, `#${host}`, "button:nth-of-type(1)");
-    assert.ok(pos, `第 ${attempt} 次：找不到预算实例的提交按钮`);
+    const bsel = await widgetButtonSelector(c, "submit", `#${host}`);
+    const pos = await bidi.deepCenter(c, `#${host}`, bsel);
+    assert.ok(pos && (pos[0] !== 0 || pos[1] !== 0), `第 ${attempt} 次：预算实例的提交按钮坐标异常（${JSON.stringify(pos)}）`);
     await bidi.pointerClick(c, pos[0], pos[1]);
     await bidi.waitUntil(c, `(()=>{const s=EpoCHA.state(${JSON.stringify(id)});
       return s==='error' || s==='verified';})()`,

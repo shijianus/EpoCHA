@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -539,5 +540,88 @@ func TestAdminUISitsOnlyOnAdminListener(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("管理端口未鉴权 /whoami 应 401，got %d", resp.StatusCode)
+	}
+}
+
+// 池禁用（EPOCHA_POOL_ENABLED=false）是合法运维形状：管理台的只读池观测必须仍然可用，
+// 并如实报告 worker.enabled=false。这里的陷阱是 typed-nil：*pool.Worker(nil) 装进
+// PoolObserver 接口后接口 != nil，Stats() 在 nil 接收者上 w.mu.Lock() 直接 panic
+// （2026-11-07 Linux 门禁实测：admin-ui-check 的隔离实例正是池禁用启动，
+// 浏览器套件一扫 /api/admin/pool 就是 500）。
+func TestPoolStatusWorksWhenPoolDisabled(t *testing.T) {
+	env := testEnv(t)
+	env["EPOCHA_POOL_ENABLED"] = "false"
+	cfg, err := config.Load(nil, getenvOf(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	aln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer aln.Close()
+	cfg.Listen = ln.Addr().String()
+	cfg.AdminListen = aln.Addr().String()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, cfg, ln, aln, &syncWriter{}) }()
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	var body []byte
+	var lastCode int
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+			"http://"+cfg.AdminListen+"/api/admin/pool", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+sentinelAdminKey)
+		res, err := client.Do(req)
+		if err == nil {
+			body, _ = io.ReadAll(res.Body)
+			res.Body.Close()
+			lastCode = res.StatusCode
+			if lastCode == http.StatusOK {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("池禁用时 /api/admin/pool 未在期限内返回 200（最后一次 code=%d err=%v body=%s）",
+				lastCode, err, body)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	var got struct {
+		Buckets []any `json:"buckets"`
+		Worker  struct {
+			Enabled bool `json:"enabled"`
+		} `json:"worker"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("响应不是合法 JSON：%s", body)
+	}
+	if got.Worker.Enabled {
+		t.Fatalf("池禁用应报告 worker.enabled=false：%s", body)
+	}
+	if got.Buckets == nil {
+		t.Fatalf("buckets 应是数组（可为空）：%s", body)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("优雅关闭返回错误：%v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("优雅关闭超时")
 	}
 }

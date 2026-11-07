@@ -212,7 +212,14 @@ func serve(ctx context.Context, cfg *config.Config, ln, adminLn net.Listener, st
 
 	var adminSrv *http.Server
 	if adminLn != nil {
-		adminHandler, err := admin.New(cfg, db, log, pw, gens)
+		// PoolObserver 是接口：把 typed-nil（*pool.Worker(nil)）装进去后接口 != nil，
+		// handlePoolStatus 的"池禁用"分支永远走不到，Stats() 会在 nil 接收者上 panic。
+		// 池禁用时必须传真正的 nil，让管理台如实报告 worker.enabled=false。
+		var poolObserver admin.PoolObserver
+		if pw != nil {
+			poolObserver = pw
+		}
+		adminHandler, err := admin.New(cfg, db, log, poolObserver, gens)
 		if err != nil {
 			return fmt.Errorf("初始化管理 API: %w", err)
 		}

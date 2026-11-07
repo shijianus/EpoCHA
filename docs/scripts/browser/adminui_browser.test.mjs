@@ -262,6 +262,9 @@ test(caseTitle("adminui.create-site"), async () => {
   await bidi.evaluate(ctx, `document.querySelector(".create-site select").focus()`);
   await press("ArrowDown");
   await bidi.evaluate(ctx, `document.activeElement.blur()`);
+  // Firefox 153 headless 实测（2026-11-07）：ArrowDown 会打开 select 的下拉弹层，
+  // 弹层会吞掉下一次真实指针点击（blur 关不掉）；Escape 能确定性关闭。FF147 无此行为。
+  await press("Escape");
   const modeVal = await bidi.evaluate(ctx,
     `(()=>{const s=[...document.querySelectorAll(".create-site select")];return s[0].value;})()`);
   assert.equal(modeVal, "pow_question", `验证模式应被改成 pow_question，got ${modeVal}`);
@@ -343,6 +346,8 @@ test(caseTitle("adminui.edit-policy-origin"), async () => {
   await bidi.evaluate(ctx, `document.querySelector('#${diffSel}').focus()`);
   await press("ArrowDown");
   await bidi.evaluate(ctx, `document.activeElement.blur()`);
+  // 同上：Escape 关掉 ArrowDown 打开的 select 弹层，否则下一次真实指针点击被弹层吞掉。
+  await press("Escape");
 
   // PoW bits：选中已有内容再真实敲入新值
   const powID = mustID(await bidi.evaluate(ctx,

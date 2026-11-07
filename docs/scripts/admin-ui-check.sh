@@ -203,14 +203,59 @@ for u in /admin /admin/app.js /admin/app.css; do
 done
 [[ $leak -eq 0 ]] && pass "三个静态资源的源代码里没有管理密钥/站点 secret 形状（且都非空）"
 
-log "第 8 步：真实写入一轮，确认只读接口不回显 secret"
+# 浏览器套件断言"初始空列表"（库里还没有站点），所以必须跑在 API 写入轮**之前**：
+# 两者共用同一个库，写入轮先建站会让空状态断言必败（f1cf3fb 引入时的顺序缺陷）。
+log "第 8 步：真实浏览器交互验收（Firefox BiDi + node --test，零第三方依赖）"
+if ! command -v firefox >/dev/null 2>&1; then
+  blocked "浏览器交互验收：本机没有 Firefox ⇒ 十项交互用例整批未执行（本轮不算验收通过）"
+elif ! node --version >/dev/null 2>&1; then
+  fail "没有 node，无法运行 BiDi 测试（工程项，不是外部条件）"
+else
+  FF_PROFILE="$WORK/ffprofile"
+  mkdir -p "$FF_PROFILE"
+  firefox --headless --no-remote --profile "$FF_PROFILE" --remote-debugging-port "$BIDI_PORT" about:blank \
+    >"$WORK/firefox.log" 2>&1 &
+  FF_PID=$!
+  bidi_up=0
+  for _ in $(seq 1 100); do
+    if grep -q "WebDriver BiDi listening" "$WORK/firefox.log" 2>/dev/null; then bidi_up=1; break; fi
+    kill -0 "$FF_PID" 2>/dev/null || break
+    sleep 0.2
+  done
+  if [[ $bidi_up -eq 0 ]]; then
+    blocked "浏览器交互验收：Firefox 远程端点没起来（日志：$(tail -n 3 "$WORK/firefox.log")）⇒ 本轮不算验收通过"
+  else
+    log "  Firefox BiDi：$(grep -o 'WebDriver BiDi listening.*' "$WORK/firefox.log" | head -n1)"
+    set +e
+    BIDI_WS="ws://127.0.0.1:$BIDI_PORT/session" \
+    ADMIN_UI_URL="http://127.0.0.1:$ADMIN_PORT/admin" \
+    ADMIN_API="http://127.0.0.1:$ADMIN_PORT" \
+    ADMIN_KEY_FILE="$WORK/keys/admin" \
+    BAD_ADMIN_KEY="$BAD_KEY_VAL" \
+    ADMIN_SERVER_PID="$SERVER_PID" \
+      node --test --test-reporter=tap docs/scripts/browser/adminui_browser.test.mjs 2>&1 | tee "$WORK/browser.log"
+    browser_rc=${PIPESTATUS[0]}
+    set -e
+    [[ $browser_rc -eq 0 ]] || { tail -n 60 "$WORK/browser.log"; fail "浏览器交互验收未通过（node --test 退出码 $browser_rc）"; }
+
+    manifest_rc=0
+    node docs/scripts/release-check.mjs --check-browser-manifest docs/scripts/browser/cases.mjs docs/scripts/browser/adminui_browser.test.mjs "$WORK/browser.log" || manifest_rc=$?
+    case "$manifest_rc" in
+      0) [[ $browser_rc -eq 0 ]] && pass "管理台真实浏览器用例全部通过，TAP 与统一 manifest 逐项一致" ;;
+      3) blocked "管理台浏览器必需用例包含 SKIP/TODO/cancelled，本轮未完整执行" ;;
+      *) fail "管理台浏览器 manifest 对账失败（退出码 $manifest_rc）" ;;
+    esac
+  fi
+fi
+
+log "第 9 步：真实写入一轮，确认只读接口不回显 secret"
 created="$(curl -s -o "$WORK/http/create.json" -w '%{http_code}' -X POST \
   -H "Authorization: Bearer $ADMIN_KEY_VAL" -H 'Content-Type: application/json' \
   -d '{"name":"门禁站点","verify_mode":"pow_question","generator_id":"arithmetic-baseline-v1","difficulty":3}' \
   "http://127.0.0.1:$ADMIN_PORT/api/admin/sites" 2>/dev/null || echo 000)"
 [[ "$created" == "201" ]] || fail "创建站点应 201，实得 $created：$(cat "$WORK/http/create.json" 2>/dev/null)"
 # 提取失败（例如创建就没成功）会得到空串：这里刻意 `|| true` 让流程继续走到
-# "前提不成立 ⇒ FAIL"的显式分支，而不是被 set -e 掐死在第 8 步中间。
+# "前提不成立 ⇒ FAIL"的显式分支，而不是被 set -e 掐死在第 9 步中间。
 SECRET_VAL="$(tr -d '\n' <"$WORK/http/create.json" | grep -o '"secret":"[^"]*"' | sed 's/^"secret":"//; s/"$//' || true)"
 SITE_ID="$(tr -d '\n' <"$WORK/http/create.json" | sed -n 's/.*"site":{\("id":[0-9]*\).*/\1/p' | cut -d: -f2 || true)"
 if [[ -z "$SECRET_VAL" || -z "$SITE_ID" ]]; then
@@ -296,49 +341,6 @@ else
   [[ "$en" == "200" ]] || fail "启用应 200，实得 $en：$(cat "$WORK/http/en.json" 2>/dev/null)"
   if [[ "$dis" == "200" && "$en" == "200" ]] && grep -q '"enabled":false' "$WORK/http/dis.json"; then
     pass "停用/启用走真实端点且状态可见"
-  fi
-fi
-
-log "第 9 步：真实浏览器交互验收（Firefox BiDi + node --test，零第三方依赖）"
-if ! command -v firefox >/dev/null 2>&1; then
-  blocked "浏览器交互验收：本机没有 Firefox ⇒ 十项交互用例整批未执行（本轮不算验收通过）"
-elif ! node --version >/dev/null 2>&1; then
-  fail "没有 node，无法运行 BiDi 测试（工程项，不是外部条件）"
-else
-  FF_PROFILE="$WORK/ffprofile"
-  mkdir -p "$FF_PROFILE"
-  firefox --headless --no-remote --profile "$FF_PROFILE" --remote-debugging-port "$BIDI_PORT" about:blank \
-    >"$WORK/firefox.log" 2>&1 &
-  FF_PID=$!
-  bidi_up=0
-  for _ in $(seq 1 100); do
-    if grep -q "WebDriver BiDi listening" "$WORK/firefox.log" 2>/dev/null; then bidi_up=1; break; fi
-    kill -0 "$FF_PID" 2>/dev/null || break
-    sleep 0.2
-  done
-  if [[ $bidi_up -eq 0 ]]; then
-    blocked "浏览器交互验收：Firefox 远程端点没起来（日志：$(tail -n 3 "$WORK/firefox.log")）⇒ 本轮不算验收通过"
-  else
-    log "  Firefox BiDi：$(grep -o 'WebDriver BiDi listening.*' "$WORK/firefox.log" | head -n1)"
-    set +e
-    BIDI_WS="ws://127.0.0.1:$BIDI_PORT/session" \
-    ADMIN_UI_URL="http://127.0.0.1:$ADMIN_PORT/admin" \
-    ADMIN_API="http://127.0.0.1:$ADMIN_PORT" \
-    ADMIN_KEY_FILE="$WORK/keys/admin" \
-    BAD_ADMIN_KEY="$BAD_KEY_VAL" \
-    ADMIN_SERVER_PID="$SERVER_PID" \
-      node --test --test-reporter=tap docs/scripts/browser/adminui_browser.test.mjs 2>&1 | tee "$WORK/browser.log"
-    browser_rc=${PIPESTATUS[0]}
-    set -e
-    [[ $browser_rc -eq 0 ]] || { tail -n 60 "$WORK/browser.log"; fail "浏览器交互验收未通过（node --test 退出码 $browser_rc）"; }
-
-    manifest_rc=0
-    node docs/scripts/release-check.mjs --check-browser-manifest docs/scripts/browser/cases.mjs docs/scripts/browser/adminui_browser.test.mjs "$WORK/browser.log" || manifest_rc=$?
-    case "$manifest_rc" in
-      0) [[ $browser_rc -eq 0 ]] && pass "管理台真实浏览器用例全部通过，TAP 与统一 manifest 逐项一致" ;;
-      3) blocked "管理台浏览器必需用例包含 SKIP/TODO/cancelled，本轮未完整执行" ;;
-      *) fail "管理台浏览器 manifest 对账失败（退出码 $manifest_rc）" ;;
-    esac
   fi
 fi
 

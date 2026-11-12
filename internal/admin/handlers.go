@@ -795,7 +795,9 @@ func generatorLifecycle(id string) (experimental, productionReady bool) {
 	case generator.ArithID, generator.TextImageID, generator.TextImageV2ID, generator.TextImageV3ID,
 		generator.ShapeGridID, generator.ShapeCountID, generator.ParallaxID, generator.BankShotID,
 		generator.AccessibleChoiceID, generator.EnergyWindowID, generator.PipeConnectID,
-		generator.IntersectionPointID:
+		generator.IntersectionPointID,
+		generator.TileRotationID, generator.SymbolPathID, generator.CrowdFindID,
+		generator.VisualRankID:
 		return true, false
 	default:
 		// 没登记结论的题型：按最保守的一档报，绝不让"忘了写"变成"看起来可用"
@@ -854,6 +856,22 @@ func noteForGenerator(id string) string {
 		return "交点外推题（两条虚线，点击延长线交点；point 量化 + 3×3 邻格 TSV，交点不画标记）：" +
 			"M3 单次 d1 9/351≈2.56%、3 次≈7.5%，d5 9/1404≈0.64%；" +
 			"M4/人工可读性/辅助技术 NOT_RUN，不声称抗 AI；production_ready 保持 false"
+	case generator.TileRotationID:
+		return "路径块旋转题（3×3，每格独立旋转；生成器枚举证明唯一解，答案提交最终 edge mask 向量）：" +
+			"有效旋转候选空间 ≥64，3 次随机猜测上界 <10%；M4/人工可读性/辅助技术 NOT_RUN，" +
+			"不声称抗 AI；production_ready 保持 false"
+	case generator.SymbolPathID:
+		return "符号路径题（6×6，按目标符号序列连接相邻格；唯一匹配路径由 DFS 证明）：" +
+			"合法位置路径 ≥128，3 次随机猜测上界 <10%；M4/人工可读性/辅助技术 NOT_RUN，" +
+			"不声称抗 AI；production_ready 保持 false"
+	case generator.CrowdFindID:
+		return "找相同角色题（36 个程序化非人形角色，目标签名恰好出现一次）：" +
+			"单次随机猜中 1/36，3 次上界约 8.3%；M4/人工可读性/辅助技术 NOT_RUN，" +
+			"不声称抗 AI；production_ready 保持 false"
+	case generator.VisualRankID:
+		return "视觉排序题（5 张折线卡，按线段数从少到多排列；卡片 ID 随机）：" +
+			"单次 1/120，3 次 2.5%；M4/人工可读性/辅助技术 NOT_RUN，不声称抗 AI；" +
+			"production_ready 保持 false"
 
 	default:
 		return ""

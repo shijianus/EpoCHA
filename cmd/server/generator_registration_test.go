@@ -22,6 +22,8 @@ func TestKnownGeneratorsIncludeTextImageV2(t *testing.T) {
 		generator.ParallaxID, generator.BankShotID, generator.AccessibleChoiceID,
 		generator.EnergyWindowID, generator.PipeConnectID,
 		generator.IntersectionPointID,
+		generator.TileRotationID, generator.SymbolPathID,
+		generator.CrowdFindID, generator.VisualRankID,
 	} {
 		if !seen[id] {
 			t.Fatalf("knownGenerators 未登记 %q（已登记：%v）", id, seen)

@@ -1814,4 +1814,19 @@ tag_i = HMAC(K_qver,
 - 部署与资源：`docs/DESIGN.md` §13；`docs/DEPLOYMENT.md`。
 - 本设计需要的新 ADR：§7.2。未批准前，本文只是提案，不改变任何生产行为。
 
+## 附录 E：2026-11-12 题库整改（Wave 1 已实施，Wave 2 跟踪中）
 
+用户要求把少数经过筛选的交互原语实现为实验型 CAPTCHA，并明确禁止照搬外部游戏（包括 Neal.fun）
+的源码、图片、角色、品牌、音乐、视频、文字表达或页面布局。整改不采用「47 个游戏关卡」整包移植：
+
+- **淘汰**：摄像头/麦克风、节奏/音乐、数学计算、品牌/文化常识、主观判断、聊天/自由文本、
+  真实人脸/车牌/地标/人物角色、需要外部素材或在线模型的关卡。理由不是「难实现」，而是
+  这些关卡无法在纯 Go + 无外部素材 + 现有 verifier 契约下做确定判分，且有隐私、许可与无障碍风险。
+- **Wave 1 已实施**：`tile-rotation-v1`（3×3 路径块旋转，唯一解枚举）、`symbol-path-v1`
+  （6×6 符号路径，DFS 唯一匹配）、`crowd-find-v1`（36 选 1 程序化非人形角色）、
+  `visual-rank-v1`（5 卡线段数排序）。全部 `experimental:true` / `production_ready:false`，
+  默认不加入任何站点；M4、人工可读性、辅助技术、真机移动端均 NOT_RUN。
+- **Wave 2 跟踪**：`progressive-target-v1`、`shell-track-v1`（服务端预生成动画，禁止下发 swap
+  sequence）、`silhouette-assembly-v1`；shape-grid 的 negative polarity 修饰器；`pipe-connect-v1`
+  完整管道整改（现状 verifier 只表达 2 个断点格 ⇒ BLOCKED，需要新 version/ID 与逐格 edge mask）。
+- **审计记录**：`docs/reviews/CAPTCHA-BANK-REMEDIATION-2026-11-12.md`；决策：ADR-030。

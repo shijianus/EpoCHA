@@ -747,6 +747,37 @@ worker         = 单个后台 goroutine，priority=让出 CPU（每补 10 题 sl
 - 站点仍只选一个 `generator_id`：本轮**不**实现按权重混合多题型（§8.2 的"题型权重与多生成器选择"
   仍未实现），"多样性"指可选题型增加与题型内变化。
 
+### 8.8 2026-11-12 交互原语 Wave 1（ADR-030）
+
+本轮把少数「程序化、可离散判分、键盘可完成」的交互原语实现为实验题型，**不照搬外部游戏关卡**：
+不复制 Neal.fun 的源码、图片、角色、品牌、音乐、视频、文字表达或页面布局；不使用真实人脸、车牌、
+品牌 logo、地标照片或人物角色；所有题面由代码 + 已批准的 `golang.org/x/image` 生成。
+
+Wave 1 已登记：
+
+| ID | 交互 | canonical answer | verifier | 唯一解证明 | 3 次随机猜测上界 |
+|---|---|---|---|---|---|
+| `tile-rotation-v1` | 3×3 路径块旋转 | `v1:<9 hex masks>` | 48B 精确 HMAC | 枚举每格不同旋转，只接受解数 ==1；节点上限 2^20 | 候选空间 ≥64 ⇒ ≤1/64（≈4.7%） |
+| `symbol-path-v1` | 6×6 符号路径 | `v1:NN.NN…` | 48B 精确 HMAC | 目标符号序列的匹配路径 DFS 恰好 1 条；合法位置路径 ≥128 | ≤1/128（≈2.34%） |
+| `crowd-find-v1` | 36 选 1 非人形角色 | `v1:<0..35>` | 48B 精确 HMAC | 目标 6 特征签名在 36 个角色中恰好 1 个 | ≤3/36（8.33%） |
+| `visual-rank-v1` | 5 卡按线段数排序 | `v1:A.B.C.D.E` | 48B 精确 HMAC | 5 个线段数互异、间距 ≥2；答案唯一排列 | 1/120（3 次 2.5%） |
+
+共同边界：
+
+- 公开 payload 不含答案、目标索引、目标 masks、solution path、piece-slot mapping、swap sequence
+  或可推导私有答案的 seed；`SanitizePublic` 逐键白名单，未知键整次报错。
+- 新增离散编码 `masks/path/select/order/sequence/placements`（`internal/generator/answer.go`）：
+  固定 `v1:` 前缀、固定字段顺序/分隔符、严格 ASCII、严格长度与范围；畸形不消耗作答机会。
+- 客户端只提交原始操作结果；不提交 `solved`、`targetIndex`、`expectedAnswer`、私有 seed 或 RNG 状态。
+- 所有题型 `experimental:true` / `production_ready:false`；默认不加入任何站点，必须由运营者在
+  `generator_id` / `generator_pool` 显式选择。M4、人工可读性、辅助技术、真机移动端均 **NOT_RUN**。
+- 资源：payload ≤8KB、verifier ≤4KB、单资产 ≤64KB；网格/帧数/路径长度/DFS 节点均有上限；
+  重计算只在题池 worker，不在 redeem 热路径。
+- Wave 2（`progressive-target-v1`、`shell-track-v1`、`silhouette-assembly-v1`）与 negative polarity
+  修饰器、`pipe-connect` 完整管道整改见 `docs/reviews/CAPTCHA-BANK-REMEDIATION-2026-11-12.md`。
+  `pipe-connect-v1` 的现状 verifier 只能表达 2 个断点格，无法表达整张图的逐格 edge mask；
+  在不动已签发 verifier 语义的前提下标记 **BLOCKED**，不得用客户端 `solved=true` 代替服务端验证。
+
 ## 9. 风险打分层（第三层，阶段 3+ 实现）
 
 `score ∈ [0,1]`，加权求和。**下表权重全部是 `[目标]` 初值，无任何一条经过测量**；阈值与权重的定稿必须依赖 `[实测]` 的
@@ -794,8 +825,9 @@ TTL 有 `[1s, 1h]` 上下界——有效期长度直接决定防重放账本必�
 | GET | `/healthz` | 无 | 1 | 存活探针，只返回 `{"status":"ok"}`，不含版本/路径/计数/依赖信息，不做健康即放行的语义 |
 | GET | `/readyz` | 无 | 5A | **就绪探针**（阶段 5A）：存储层有界自检——连得上、`meta.schema_version` 与本程序一致、**写路径可用**（主文件可写 + 数据目录可创建临时文件）。就绪 ⇒ `{"status":"ready"}`；否则 **503** `{"status":"unavailable"}`。三条边界：不分配题目也不消费 token（有测试逐表对账行数）；自带 2s 上限并沿用请求 ctx（探针不得成为故障源）；只回一个词，不外泄路径/SQL/驱动文本/站点数/失败原因（原因只进日志的类别字段）。题池水位低**不是**未就绪，那是容量信号（§8.3） |
 | ~~GET~~ | ~~`/asset/<pool_id>/<sig>`~~ | — | **未采用（3B）** | 草稿里的签名媒体端点没有实现：它会凭空造出一个需要防枚举、防跨 challenge 引用的面，而题目是一次性的。图片改为**内联在 `/api/challenge` 的公开 DTO 里**（§10.1 下方、ADR-012） |
-| GET | `/widget/v1.js` | 公开 | **4A** | widget 主脚本（go:embed）。实测 gzip **16,687 B** [实测]（预算 30KB [目标]） |
+| GET | `/widget/v1.js` | 公开 | **4A** | widget 主脚本（go:embed）。实测 gzip **28,909 B** [实测 2026-11-12]（预算 30KB [目标]） |
 | GET | `/widget/v1.worker.js` | 公开 | **4A** | PoW worker 的**同源副本**（接入方选方案 B 时用）。内容与 v1.js 内嵌那份逐字节相同，由测试钉住 |
+| GET | `/widget/v1.interactive.js` | 公开 | **2026-11-12** | 实验型交互题渲染器（ADR-025 第 5 条的按需模块）：只在 `answer_type` 为 `masks/path/order/select/sequence/placements` 时由 v1.js 同源加载；不含答案或判分逻辑。实测 gzip **10,311 B** [实测 2026-11-12] |
 
 阶段 1 的公开端点**只有 PoW**：响应里不存在 `challenge` 对象，也不接受 `answer`/`behavior`。文档与实现都必须如实反映这一点，
 不得用空字段伪装成完整三层（ADR-005）。**3A 之后这段话只适用于 `pow_only` 站点**：`mode` 由站点配置决定，
@@ -1108,7 +1140,7 @@ compose **只**发布 `127.0.0.1:8080`，管理口 8081 不发布——容器内
 | 新题型单题体积（ADR-024） | — | `[实测]` 本地渲染样本：`shape-grid-v1` PNG 5.1–7.0KB、`shape-count-v1` 2.9–6.4KB、`text-image-v3` 11.7–19.0KB；v3 逐字 verifier **208B**（仍 <512B）。这是**样本**不是稳态分布，也未压满题池 | 生成器测试 + 本地渲染 |
 | 有限批次生成耗时 | — | `[实测]` 补 100 题：纯生成+写入 **29ms**（0.29ms/题）；补 1000 题：**339–391ms**（0.34–0.39ms/题）。总墙钟 1.03s / 10.3s 里**主动让出 CPU 占 1s / 10s**（`YieldEvery=10`/`YieldPause=100ms`，是设计意图不是开销）。测量条件：本机 4 核可见但 `BatchPerTick=n` 单轮补满、`t.TempDir()` 独立库、2026-10-17 | `BenchmarkPoolFill`（需显式 `-bench`） |
 | 题池磁盘占用 | `[目标]` 20000 行上限 | `[估算]` 按上行的 432 B/题 ⇒ 上限约 **8.4MB**（**外推值，未实测到 20000 行**；50GB 磁盘下不构成约束）。WAL 在写入进行中额外占 ~4.7MB（自动 checkpoint 阈值 1000 页） | `MaxRows` 同语句判定 |
-| widget 体积 | `gzip [目标]` <30KB（`make widget-size`） | `[实测]` **v1.js 原文 48,412 B / gzip 16,687 B**；与 `v1.worker.js` 合计 gzip 21,121 B（2026-10-18，同一构建口径） | 浏览器只下载 v1.js（worker 源码内嵌其中）；方案 B 另取 worker 文件 |
+| widget 体积 | `gzip [目标]` <30KB（`make widget-size`） | `[实测 2026-11-12]` **v1.js 原文 110,402 B / gzip 28,909 B**；交互模块 48,751 B / gzip 10,311 B（仅交互题型按需加载）；core+interactive gzip **39,220 B**；与 `v1.worker.js` 合计 gzip 33,618 B | 核心始终 <30KB；模块单独 <30KB、合计 <40KB，由 `release-check.mjs --widget-size` 守护 |
 | 浏览器 PoW 吞吐 | 未设线（先测再说） | `[实测]` **422,833 次/秒**（Firefox 147 headless、linux/arm64、Dedicated Worker 内纯 JS SHA-256） | bits=12 求解 4–6ms；bits=20 提交→verified 五次采样 309–8,991ms（几何分布 + 负载差异，别当常量，也别据此抬难度） |
 | 内嵌字体 | `[估算]` Latin 1–3MB；CJK 子集 4–6MB | `[实测]` **Go Regular 单档 148,672 字节**（`goregular.TTF`，3B 只用这一档，不子集化：字符集只有 32 个字形，收益远小于复杂度）；二进制因此从 9,896,228 → **10,813,732 字节** | `docs/NOTICE.md` + `make size` |
 | 单题图片资产 | `[目标]` PNG ≤65,536B（库内 CHECK 强制） | `[实测]` d1 **1,126–2,557B**（均值 1,911）；d5 **5,648–6,902B**（均值 6,315）；base64 后 d5 一张约 8KB 响应（2026-10-18，60 样本） | `0004` CHECK + `store.MaxAssetBytes` + `TestAssetColumnChecksAreReal` |
@@ -1457,6 +1489,13 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
 | R12 | 池容量不足时公共请求直接吃 503（不降级是正确的，但对调用方表现为"暂时不可用"） | 默认水位 50/100 与 20000 行上限都是 `[目标]`，**未经真实流量校准** | 3B/阶段 5 按 `[实测]` 到达率重设水位；运维侧先用 `/api/admin/pool` 观测 |
 
 ## 19. 变更日志
+
+- 2026-11-12 **交互原语 Wave 1（ADR-030）**：新增 `tile-rotation-v1`（3×3 路径块旋转，唯一解枚举）、
+  `symbol-path-v1`（6×6 符号路径，DFS 唯一匹配路径）、`crowd-find-v1`（36 选 1 程序化非人形角色）、
+  `visual-rank-v1`（5 卡线段数排序）；新增 `masks/path/select/order/sequence/placements` 六种严格
+  `v1:` 离散编码与 widget 输入模式。全部 `experimental:true` / `production_ready:false`；M4、人工可读性、
+  辅助技术、真机移动端、抗 AI/抗 OCR 均 NOT_RUN。`pipe-connect-v1` 完整管道整改标记 BLOCKED（现有
+  verifier 无法表达逐格 edge mask）。`docs/reviews/CAPTCHA-BANK-REMEDIATION-2026-11-12.md` 是审计记录。
 
 - 2026-11-06 **Phase 4.5**：`energy-window-v1` 增加跨周期相位取模（`ms % 2880`）与 <200ms 零思考拒绝，d1–d5 容差 6→2 桶（36 帧/2880ms 周期，M3 分母按 400 个可行桶算）；`pipe-connect-v1` 死路数 d1–d5 为 7→12，并把 M3 口径修正为按空候选格 `C(E,2)`（断点与死路外观相同，d1 3 次≈8.1%）；新增 `intersection-point-v1`（两条虚线延长线交点，`point` 量化 + 3×3 邻格 TSV；目标格有 50px 边距，M3 最坏 9/351≈2.56%，3 次≈7.5%，d5 9/1404≈0.64%）。三者 `experimental:true` / `production_ready:false`；M4、人工可读性、辅助技术仍 NOT_RUN。
 

@@ -137,6 +137,8 @@ func TestKnownAnswerType(t *testing.T) {
 	for _, typ := range []string{
 		AnswerTypeText, AnswerTypeInteger, AnswerTypeCells, AnswerTypePairs,
 		AnswerTypeAngle, AnswerTypePoint, AnswerTypeTiming,
+		AnswerTypeMasks, AnswerTypePath, AnswerTypeSelect, AnswerTypeOrder,
+		AnswerTypeSequence, AnswerTypePlacements,
 	} {
 		if !KnownAnswerType(typ) {
 			t.Fatalf("KnownAnswerType(%q) = false", typ)
@@ -145,7 +147,7 @@ func TestKnownAnswerType(t *testing.T) {
 			t.Fatalf("ValidateAnswerType(%q): %v", typ, err)
 		}
 	}
-	for _, typ := range []string{"", "path", "order", "polygon", "float"} {
+	for _, typ := range []string{"", "polygon", "float"} {
 		if KnownAnswerType(typ) {
 			t.Fatalf("KnownAnswerType(%q) = true（未实现类型不得被当成已知）", typ)
 		}

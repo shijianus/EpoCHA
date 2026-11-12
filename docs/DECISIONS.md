@@ -1331,3 +1331,65 @@ Phase 1/2 的题型全部依赖视觉或运动精度；没有等价通道时，�
 `internal/generator/accessible.go`、`internal/api` 的 accessibility 分支、`internal/risk` 的 gate、
 `internal/dispatch` 的 accessible 候选、`web/widget/v1.js` 的 text-media 选项，以及
 `docs/{QUESTION-TYPES,WIDGET}.md`。现有 8 个题型行为不变。
+
+---
+
+## ADR-030 2026-11-12：从外部游戏关卡收敛到可审计交互原语（Wave 1）
+
+### 背景与授权
+
+用户要求把少数经过筛选的交互原语实现为 EpoCHA 的实验型 CAPTCHA，并为后续 M1–M4 与人工验收
+建立可审计基础；明确禁止照搬 Neal.fun 的源代码、图片、角色、品牌、音乐、视频、文字表达或页面布局。
+本轮不是制作小游戏，也不是宣告题型安全；所有新题型必须复用现有 generator/verifier/题池/widget 契约。
+
+### 决策
+
+1. **不实现「47 个游戏关卡」的整包移植**。外部游戏中有大量关卡依赖摄像头、麦克风、节奏/音乐、
+   主观判断、品牌/文化常识、真实人脸/车牌/地标或第三方素材；这些既无法在纯 Go + 无外部素材的
+   约束下合规交付，也无法用现有 verifier 做确定判分。Wave 1 只选 **4 个**可程序化生成、答案可离散化、
+   键盘可完成的原语：`tile-rotation-v1`、`symbol-path-v1`、`crowd-find-v1`、`visual-rank-v1`。
+   Wave 2 再评估 `progressive-target-v1`、`shell-track-v1`、`silhouette-assembly-v1`；
+   摄像头、节奏、数学、品牌、主观判断和聊天题**一律淘汰**。
+2. **离散答案优先**：新题型只提交最终 edge masks、格子索引序列、单索引、卡片 ID 排列或
+   slot→piece+rotation 映射；不提交浮点轨迹、`solved`、`targetIndex`、`expectedAnswer`、
+   私有 seed 或可重算答案的 RNG 状态。新增 `masks/path/select/order/sequence/placements`
+   六种 `v1:` 严格 ASCII 编码（`internal/generator/answer.go`），固定版本/字段顺序/分隔符、
+   无空白、无浮点、严格长度与范围；畸形不消耗作答机会。
+3. **verifier 复用现有构造**：离散题一律转成唯一 canonical answer 后走 48B 精确 HMAC
+   （`answerVerifier/verifyAnswer`）；不为新题型发明新的密码学协议，也不把答案明文或可逆种子
+   存进 verifier。多解 seed 必须拒绝并重新生成；唯一解由生成器枚举/DFS 证明，搜索有节点上限。
+4. **服务端渲染与公开/私有分离**：图片资产只在题池 worker 预生成；公开 payload 只含渲染/交互
+   所需字段与公开随机 ID，不含答案、目标索引、目标 masks、solution path、piece-slot mapping、
+   swap sequence 或私有 seed。动画题（Wave 2）必须由服务端预生成帧或 GIF，禁止把交换序列
+   下发给浏览器再用 CSS/JS 动画。
+5. **实验边界**：全部新题型 `experimental:true` / `production_ready:false`；默认不加入任何站点，
+   必须由运营者显式选择 `generator_id` / `generator_pool`。dispatch catalog 只给低权重与低风险带，
+   不是生产可用声明。M4、人工可读性、辅助技术、真机移动端、抗 AI/抗 OCR 全部 **NOT_RUN**。
+6. **资源纪律**：payload ≤8KB、verifier ≤4KB、单资产 ≤64KB；网格尺寸、帧数、路径长度、
+   piece 数、DFS 回溯节点均有上限；生成失败达到重试上限返回可重试失败，绝不降级成固定题。
+7. **可访问性**：所有新控件与 pointer 共享同一状态；键盘可完成（Enter/Space、方向键、Backspace、
+   Undo/Reset）；设计目标 44×44 CSS px；不靠颜色单独表达状态；不强制摄像头/麦克风/声音/传感器；
+   指令一句话，否定词显式突出；success/failed/expired 使用 `aria-live`。这些是工程目标，
+   不是辅助技术实测通过。
+8. **negative polarity 只作为指令修饰器**：只在 `shape-grid-v1` 这类已有、可审计的网格选择题上
+   增加 `polarity=positive|negative`；至少 2 个应选与 2 个不应选，不允许全选/全不选、双重否定或
+   「除了……以外不……」句式；positive/negative 的错误率必须分开记录。它只增加指令变化，
+   不得描述为显著提高安全性。
+9. **`pipe-connect-v1` 原地整改为 BLOCKED**：现状 verifier 只能表达 2 个断点格，无法表达
+   「多对端点 / 路径不重叠 / 每格被占用 / 唯一解 / 逐格 edge mask」。在不动已签发 verifier 语义
+   的前提下不能原地改成完整管道拼图；整改需要新 generator/version，并先写唯一解、端点形状/纹理
+   配对、路径覆盖与不交叉、键盘逐格绘制/撤销的测试。不得用客户端 `solved=true` 或「看起来连上了」
+   代替服务端验证。
+
+### 未做
+
+- Wave 2 三个题型与 negative polarity 的最终实现（同一审计文档继续跟踪）；
+- M4（每次尝试成本）、人工可读性、辅助技术、真机移动端；
+- 按权重混合多题型、风险评分决策、自动淘汰、音频等价通道；
+- 任何「抗 AI / 抗 OCR / 抗多模态 / 可生产使用」结论。
+
+### 影响
+
+`internal/generator/{tilerotation,symbolpath,crowdfind,visualrank}.go`、`internal/generator/answer.go`、
+`internal/dispatch`、`internal/admin`、`cmd/{server,preview,devseed}`、`web/widget/v1.js`、
+`docs/{DESIGN,QUESTION-TYPES}.md` 与审计文档。不新增依赖；不改变现有题型的判分路径与历史结果。

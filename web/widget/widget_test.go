@@ -111,6 +111,7 @@ func TestHandlerServesAssets(t *testing.T) {
 	}{
 		{URLJS, "/*! epocha widget v1"},
 		{URLWorker, "/*! epocha widget PoW worker v1"},
+		{URLInteractive, "/*! epocha widget interactive primitives v1"},
 	} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.path, nil))

@@ -263,5 +263,28 @@ func Catalog() map[string]Candidate {
 			RiskFit:   fit(BandLow, 1, BandMedium, 0.6, BandHigh, 0, BandCritical, 0),
 			DeviceFit: dev(DeviceDesktop, 1, DeviceTouch, 1, DeviceKeyboard, 1),
 		},
+		// 2026-11-12 新题型：BaseWeight 刻意很低，且没有高风险档的 RiskFit。
+		// 它们不会进入任何现有站点（站点必须显式配置 generator_id/generator_pool）；
+		// 这里非零只是让"运营者显式选择后"能领到题，不是生产可用声明。
+		generator.TileRotationID: {
+			ID: generator.TileRotationID, Family: "spatial-topology", BaseWeight: 0.2,
+			RiskFit:   fit(BandLow, 0.4, BandMedium, 0.3, BandHigh, 0, BandCritical, 0),
+			DeviceFit: dev(DeviceDesktop, 1, DeviceTouch, 1, DeviceKeyboard, 1),
+		},
+		generator.SymbolPathID: {
+			ID: generator.SymbolPathID, Family: "spatial-path", BaseWeight: 0.2,
+			RiskFit:   fit(BandLow, 0.4, BandMedium, 0.3, BandHigh, 0, BandCritical, 0),
+			DeviceFit: dev(DeviceDesktop, 1, DeviceTouch, 1, DeviceKeyboard, 1),
+		},
+		generator.CrowdFindID: {
+			ID: generator.CrowdFindID, Family: "visual-search", BaseWeight: 0.2,
+			RiskFit:   fit(BandLow, 0.4, BandMedium, 0.3, BandHigh, 0, BandCritical, 0),
+			DeviceFit: dev(DeviceDesktop, 1, DeviceTouch, 1, DeviceKeyboard, 0.8),
+		},
+		generator.VisualRankID: {
+			ID: generator.VisualRankID, Family: "visual-order", BaseWeight: 0.2,
+			RiskFit:   fit(BandLow, 0.4, BandMedium, 0.3, BandHigh, 0, BandCritical, 0),
+			DeviceFit: dev(DeviceDesktop, 1, DeviceTouch, 1, DeviceKeyboard, 1),
+		},
 	}
 }

@@ -1,10 +1,12 @@
 # WIDGET.md — 生产 widget 接入（阶段 4A）
 
-对象：`web/widget/v1.js`（主脚本）+ `web/widget/v1.worker.js`（PoW worker 副本）。
-两者由 `cmd/server` 以 `go:embed` 内嵌并在**公共端口**提供（DESIGN D10、§10.1）：
+对象：`web/widget/v1.js`（主脚本）+ `web/widget/v1.worker.js`（PoW worker 副本）+
+`web/widget/v1.interactive.js`（实验型交互题渲染器，按需加载）。三者由 `cmd/server` 以 `go:embed`
+内嵌并在**公共端口**提供（DESIGN D10、§10.1）：
 
 ```
 GET /widget/v1.js          GET /widget/v1.worker.js
+GET /widget/v1.interactive.js
 Content-Type: text/javascript; charset=utf-8
 Cache-Control: public, max-age=3600
 X-Content-Type-Options: nosniff
@@ -18,7 +20,14 @@ URL 是**版本化**的：改协议或有不兼容变更就发 `v2.js`，不要�
 
 ## 1. 最小接入
 
-当前 `v1.js` 支持 `text-image-v1/v2/v3`、`shape-grid-v1`、`shape-count-v1`（ADR-024）。
+当前 `v1.js` 支持 `text-image-v1/v2/v3`、`shape-grid-v1`、`shape-count-v1`、`parallax-code-v1`、
+`bank-shot-v1`、`accessible-choice-v1`、`energy-window-v1`、`pipe-connect-v1`、`intersection-point-v1`，
+以及实验型交互题 `tile-rotation-v1`、`symbol-path-v1`、`crowd-find-v1`、`visual-rank-v1`（Wave 1）。
+Wave 2 的 `progressive-target-v1`、`shell-track-v1`、`silhouette-assembly-v1` 复用同一批
+`sequence`/`placements` 控件；它们仍为 `experimental:true` / `production_ready:false`。
+`masks/path/order/select/sequence/placements` 六种输入由 `v1.interactive.js` 提供：核心只在领到
+这些题型时才从**核心脚本所在位置**同源加载该模块（`script-src` 已允许核心脚本的接入方无需额外配置），
+加载失败进入 `error` 的 `interactive-unavailable`，不会渲染半成品或自行判分。
 管理 API 与控制台创建站点的默认模式仍为 `pow_only`；接入本 widget 前，需要显式设置
 `verify_mode=pow_question` 与一个本进程登记的 `generator_id`，选择难度，并确认后台题池已有可领取题目。
 默认设置未完成这一步时，widget 会拒绝不支持的题面，不能把页面加载成功当成接入成功。

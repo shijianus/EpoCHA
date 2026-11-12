@@ -13,6 +13,7 @@ const caseTitle = (id) => {
   return title;
 };
 const source = readFileSync(new URL("../../../web/widget/v1.js", import.meta.url), "utf8");
+const interactiveSource = readFileSync(new URL("../../../web/widget/v1.interactive.js", import.meta.url), "utf8");
 const flush = () => setImmediate();
 
 class Events {
@@ -46,6 +47,7 @@ class Element extends Events {
   }
   setAttribute(name, value) { this.attributes.set(name, String(value)); }
   getAttribute(name) { return this.attributes.get(name) ?? null; }
+  removeAttribute(name) { this.attributes.delete(name); }
   appendChild(child) {
     if (child.parentNode) child.parentNode.removeChild(child);
     this.children.push(child);
@@ -120,18 +122,18 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function challenge(token = "challenge-1", expires = 0) {
+function challenge(token = "challenge-1", expires = 0, question = null) {
   return {
     token, mode: "pow_question", expires_in: expires,
     pow: { algo: "sha256-prefix", bits: 12, seed: "AAECAwQFBgcICQoLDA0ODw" },
-    question: {
+    question: question || {
       media: "image", image_mime: "image/png", image_base64: "AQIDBA==",
       image_width: 120, image_height: 60, length: 6, charset: "ABCDEF",
     },
   };
 }
 
-function harness(t, { honorAbort = false, options = {} } = {}) {
+function harness(t, { honorAbort = false, options = {}, interactive = true } = {}) {
   const time = clock();
   const requests = [], workers = [], successes = [], errors = [], states = [], expired = [];
   const urls = new Set();
@@ -139,6 +141,8 @@ function harness(t, { honorAbort = false, options = {} } = {}) {
   const document = new Events();
   document.visibilityState = "visible";
   document.createElement = (tag) => new Element(tag, document);
+  document.head = document.createElement("head");
+  document.documentElement = document.createElement("html");
   // Phase 2 起 widget 会用 SVG 画角度辅助线；Node 工装只需要同样的元素外壳。
   document.createElementNS = (_ns, tag) => new Element(tag, document);
   const form = document.createElement("form");
@@ -163,7 +167,7 @@ function harness(t, { honorAbort = false, options = {} } = {}) {
     terminate() { this.terminated = true; }
   }
   const sandbox = {
-    document, navigator: { language: "en" }, location: new URL("https://page.invalid/"),
+    document, console, navigator: { language: "en" }, location: new URL("https://page.invalid/"),
     URL: BrowserURL, Blob, Worker, AbortController, atob,
     Date: class extends Date { static now() { return time.now(); } },
     setTimeout: time.setTimeout, clearTimeout: time.clearTimeout,
@@ -190,6 +194,9 @@ function harness(t, { honorAbort = false, options = {} } = {}) {
     },
   };
   vm.runInNewContext(source, sandbox, { filename: "web/widget/v1.js" });
+  if (interactive) {
+    vm.runInNewContext(interactiveSource, sandbox, { filename: "web/widget/v1.interactive.js" });
+  }
   const api = sandbox.EpoCHA;
   const id = api.render(container, {
     apiBase: "https://captcha.invalid", siteKey: "pk_lifecycle", fetchTimeoutMs: 1000,
@@ -210,8 +217,8 @@ function harness(t, { honorAbort = false, options = {} } = {}) {
     document, container, host, field, answer, buttons, status,
     calls: (path) => requests.filter((request) => request.path === "/api/" + path),
     clickSubmit() { buttons[0].emit("click"); },
-    async ready(request = requests.at(-1), token = "challenge-1", expires = 0) {
-      request.respond(challenge(token, expires));
+    async ready(request = requests.at(-1), token = "challenge-1", expires = 0, question = null) {
+      request.respond(challenge(token, expires, question));
       await flush();
       assert.equal(api.state(id), "ready", "fixture must use real challenge loading");
     },
@@ -743,4 +750,282 @@ test("cells 几何越界（Node 工装）：fail closed，不渲染可点击区�
   assert.equal(h.api.state(h.id), "error");
   const cells = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell");
   assert.equal(cells.length, 0, "越界几何不得渲染任何格子按钮");
+});
+
+// --- ADR-030：tile-rotation / symbol-path / visual-rank / crowd-find 输入 ---
+
+function ids36() {
+  const out = [];
+  for (let i = 0; i < 36; i++) out.push(i.toString(16).padStart(4, "0"));
+  return out;
+}
+
+function interactiveChallenge(question) {
+  return {
+    token: "interactive-1", mode: "pow_question", expires_in: 0,
+    pow: { algo: "sha256-prefix", bits: 12, seed: "AAECAwQFBgcICQoLDA0ODw" },
+    question: Object.assign({
+      media: "image", image_mime: "image/png", image_base64: "AQIDBA==",
+    }, question),
+  };
+}
+
+function rotateChallenge() {
+  return interactiveChallenge({
+    image_width: 320, image_height: 320,
+    answer_type: "masks", max_answer_len: 16,
+    grid_cols: 3, grid_rows: 3, grid_x: 10, grid_y: 10, grid_cell: 96, grid_gap: 4,
+    initial_masks: "1a2b3c4d5", style: "network-v1", input_mode: "rotate",
+    prompt_zh: "旋转路径块。", prompt_en: "Rotate the tiles.",
+  });
+}
+
+function pathChallenge() {
+  return interactiveChallenge({
+    image_width: 320, image_height: 360,
+    answer_type: "path", max_answer_len: 32,
+    grid_cols: 6, grid_rows: 6, grid_x: 20, grid_y: 70, grid_cell: 44, grid_gap: 3,
+    target_len: 6, target_y: 12, target_h: 48, cell_ids: ids36(), input_mode: "path",
+    prompt_zh: "连接符号。", prompt_en: "Trace the symbols.",
+  });
+}
+
+function rankChallenge() {
+  return interactiveChallenge({
+    image_width: 500, image_height: 280,
+    answer_type: "order", max_answer_len: 16, input_mode: "rank",
+    cards: [
+      { id: "C", x: 12, y: 12, w: 150, h: 120 },
+      { id: "A", x: 172, y: 12, w: 150, h: 120 },
+      { id: "D", x: 332, y: 12, w: 150, h: 120 },
+      { id: "E", x: 95, y: 142, w: 150, h: 120 },
+      { id: "B", x: 255, y: 142, w: 150, h: 120 },
+    ],
+    prompt_zh: "按线段数排序。", prompt_en: "Order by segments.",
+  });
+}
+
+function selectChallenge() {
+  return interactiveChallenge({
+    image_width: 340, image_height: 420,
+    answer_type: "select", max_answer_len: 8,
+    grid_cols: 6, grid_rows: 6, grid_x: 18, grid_y: 104, grid_cell: 48, grid_gap: 3,
+    sample_x: 138, sample_y: 16, sample_w: 64, sample_h: 64,
+    cell_ids: ids36(), input_mode: "select",
+    prompt_zh: "找出相同角色。", prompt_en: "Find the matching character.",
+  });
+}
+
+test("tile-rotation 输入：旋转后才有答案，Reset 清空本地操作", async (t) => {
+  const h = harness(t);
+  h.requests[0].respond(rotateChallenge());
+  await flush();
+  assert.equal(h.api.state(h.id), "ready", JSON.stringify(h.errors) + " / " + h.status.textContent);
+  assert.equal(h.buttons[0].disabled, true, "未旋转时 Verify 必须 disabled");
+  const cells = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell");
+  assert.equal(cells.length, 9);
+  assert.equal(cells[0].firstChild.getAttribute("class"), "tileimg");
+
+  cells[0].emit("click");
+  assert.equal(h.answer.value, "v1:2a2b3c4d5", "只有被点击的 tile 旋转；其余保持初始 mask");
+  assert.equal(h.buttons[0].disabled, false);
+  cells[0].emit("click");
+  assert.equal(h.answer.value, "v1:2a2b3c4d5", "旋转动画未结束时同一 tile 不得重入");
+  h.time.jump(200);
+  cells[0].emit("keydown", { key: "Enter", shiftKey: true });
+  assert.equal(h.answer.value, "v1:1a2b3c4d5", "Shift+Enter 必须逆时针转回");
+
+  const aux = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "aux")[0];
+  const btns = findAll(aux, (node) => node.tagName === "BUTTON");
+  btns[1].emit("click");
+  assert.equal(h.answer.value, "", "Reset 必须清空本地旋转");
+  assert.equal(h.buttons[0].disabled, true);
+});
+
+test("交互模块加载失败：明确失败，不渲染半成品", async (t) => {
+  const h = harness(t, { interactive: false });
+  h.requests[0].respond(rotateChallenge());
+  await flush();
+  assert.equal(h.api.state(h.id), "loading", "模块未加载时不能进入 ready");
+  const script = find(h.document.head, (node) => node.tagName === "SCRIPT");
+  assert.ok(script, "核心应当尝试加载交互模块");
+  script.onerror();
+  await flush();
+  assert.equal(h.api.state(h.id), "error");
+  assert.equal(h.errors.length, 1);
+  assert.equal(h.errors[0].code, "interactive-unavailable");
+  assert.equal(h.buttons[0].disabled, true);
+  assert.equal(findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell").length, 0,
+    "模块失败时不得渲染可点击格子");
+});
+
+test("symbol-path 输入：相邻点击组成固定两位索引串，Backspace 撤销", async (t) => {
+  const h = harness(t);
+  h.requests[0].respond(pathChallenge());
+  await flush();
+  assert.equal(h.api.state(h.id), "ready", JSON.stringify(h.errors) + " / " + h.status.textContent);
+  const cells = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell");
+  assert.equal(cells.length, 36);
+  const order = [0, 1, 2, 8, 14, 15];
+  for (const i of order) cells[i].emit("click");
+  assert.equal(h.answer.value, "v1:00.01.02.08.14.15");
+  assert.equal(h.buttons[0].disabled, false);
+  cells[15].emit("keydown", { key: "Backspace" });
+  assert.equal(h.answer.value, "", "未完成目标长度时不得提交部分路径");
+  assert.equal(h.buttons[0].disabled, true);
+});
+
+test("visual-rank 输入：五张卡按选择顺序合成排列，Undo 撤销最后一张", async (t) => {
+  const h = harness(t);
+  h.requests[0].respond(rankChallenge());
+  await flush();
+  assert.equal(h.api.state(h.id), "ready", JSON.stringify(h.errors) + " / " + h.status.textContent);
+  const cards = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell");
+  assert.equal(cards.length, 5);
+  const ids = cards.map((card) => card.getAttribute("data-card"));
+  for (const card of cards) card.emit("click");
+  assert.equal(h.answer.value, "v1:" + ids.join("."));
+  assert.equal(h.buttons[0].disabled, false);
+  const aux = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "aux")[0];
+  const btns = findAll(aux, (node) => node.tagName === "BUTTON");
+  btns[0].emit("click");
+  assert.equal(h.answer.value, "");
+  assert.equal(h.buttons[0].disabled, true);
+});
+
+test("crowd-find 输入：单格选择，改选只保留最后一个索引", async (t) => {
+  const h = harness(t);
+  h.requests[0].respond(selectChallenge());
+  await flush();
+  assert.equal(h.api.state(h.id), "ready", JSON.stringify(h.errors) + " / " + h.status.textContent);
+  const cells = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell");
+  assert.equal(cells.length, 36);
+  cells[7].emit("click");
+  assert.equal(h.answer.value, "v1:7");
+  cells[20].emit("click");
+  assert.equal(h.answer.value, "v1:20");
+  assert.equal(h.buttons[0].disabled, false);
+});
+
+// --- ADR-030 Wave 2：progressive-target / shell-track / silhouette-assembly 输入 ---
+
+function progressiveChallenge() {
+  return interactiveChallenge({
+    image_width: 320, image_height: 466,
+    answer_type: "sequence", max_answer_len: 8,
+    grid_cols: 3, grid_rows: 3, round_count: 3,
+    round_y: 8, round_h: 150,
+    sample_x: 12, sample_y: 47, sample_w: 56, sample_h: 56,
+    grid_x: 168, grid_y: 5, grid_cell: 44, grid_gap: 4,
+    input_mode: "progressive",
+    prompt_zh: "三轮定位。", prompt_en: "Three progressive rounds.",
+  });
+}
+
+function shellChallenge() {
+  return interactiveChallenge({
+    image_width: 280, image_height: 100,
+    answer_type: "sequence", max_answer_len: 8,
+    render_mode: "sprite_sheet", frame_count: 33,
+    frame_cols: 6, frame_rows: 6, frame_ms: 170, frame_loop: false,
+    rounds: 3, frames_per_round: 11,
+    boxes: [
+      { x: 14, y: 28, w: 52, h: 62 },
+      { x: 84, y: 28, w: 52, h: 62 },
+      { x: 154, y: 28, w: 52, h: 62 },
+      { x: 224, y: 28, w: 52, h: 62 },
+    ],
+    input_mode: "shell",
+    prompt_zh: "跟踪目标容器。", prompt_en: "Track the target container.",
+  });
+}
+
+function placementsChallenge() {
+  return interactiveChallenge({
+    image_width: 400, image_height: 260,
+    answer_type: "placements", max_answer_len: 32,
+    pieces: [
+      { id: "3", x: 45, y: 18, w: 54, h: 54 },
+      { id: "0", x: 109, y: 18, w: 54, h: 54 },
+      { id: "4", x: 173, y: 18, w: 54, h: 54 },
+      { id: "1", x: 237, y: 18, w: 54, h: 54 },
+      { id: "2", x: 301, y: 18, w: 54, h: 54 },
+    ],
+    slots: [
+      { x: 20, y: 160, w: 64, h: 64 },
+      { x: 94, y: 160, w: 64, h: 64 },
+      { x: 168, y: 160, w: 64, h: 64 },
+      { x: 242, y: 160, w: 64, h: 64 },
+      { x: 316, y: 160, w: 64, h: 64 },
+    ],
+    input_mode: "placements",
+    prompt_zh: "装配部件。", prompt_en: "Assemble the pieces.",
+  });
+}
+
+test("progressive-target 输入：三轮逐轮推进，第三轮后才合成答案", async (t) => {
+  const h = harness(t);
+  h.requests[0].respond(progressiveChallenge());
+  await flush();
+  assert.equal(h.api.state(h.id), "ready", JSON.stringify(h.errors) + " / " + h.status.textContent);
+  assert.equal(h.buttons[0].disabled, true);
+  let cells = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell");
+  assert.equal(cells.length, 9);
+  cells[2].emit("click");
+  assert.equal(h.answer.value, "", "第一轮选择后不得提前合成答案");
+  assert.equal(h.buttons[0].disabled, true);
+  cells = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell");
+  assert.equal(cells.length, 9);
+  cells[5].emit("click");
+  assert.equal(h.answer.value, "");
+  cells = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell");
+  cells[7].emit("click");
+  assert.equal(h.answer.value, "v1:2.5.7");
+  assert.equal(h.buttons[0].disabled, false);
+});
+
+test("shell-track 输入：动画结束前不可选，三轮后合成答案", async (t) => {
+  const h = harness(t);
+  h.requests[0].respond(shellChallenge());
+  await flush();
+  assert.equal(h.api.state(h.id), "ready", JSON.stringify(h.errors) + " / " + h.status.textContent);
+  let boxes = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell shellbox");
+  assert.equal(boxes.length, 4);
+  assert.equal(boxes[0].disabled, true, "动画结束前容器必须不可选");
+  await h.time.advance(170 * 11);
+  boxes = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell shellbox");
+  assert.equal(boxes[0].disabled, false, "动画结束后容器必须可选");
+  boxes[1].emit("click");
+  assert.equal(h.answer.value, "");
+  boxes = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell shellbox");
+  assert.equal(boxes[0].disabled, true, "下一轮动画期间再次不可选");
+  await h.time.advance(170 * 11);
+  boxes = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell shellbox");
+  boxes[2].emit("click");
+  await h.time.advance(170 * 11);
+  boxes = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell shellbox");
+  boxes[1].emit("click");
+  assert.equal(h.answer.value, "v1:1.2.1");
+  assert.equal(h.buttons[0].disabled, false);
+});
+
+test("silhouette-assembly 输入：选择/旋转/放置，五格填满才合成答案", async (t) => {
+  const h = harness(t);
+  h.requests[0].respond(placementsChallenge());
+  await flush();
+  assert.equal(h.api.state(h.id), "ready", JSON.stringify(h.errors) + " / " + h.status.textContent);
+  const pieces = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell piece");
+  const slots = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell slot");
+  assert.equal(pieces.length, 5);
+  assert.equal(slots.length, 5);
+  assert.equal(h.buttons[0].disabled, true);
+  const ids = pieces.map((p) => p.getAttribute("data-piece"));
+  for (let i = 0; i < 5; i++) {
+    pieces[i].emit("click");
+    const rotate = findAll(h.host.shadowRoot, (node) => node.tagName === "BUTTON" && node.textContent === "Rotate")[0];
+    if (i === 0) rotate.emit("click");
+    slots[i].emit("click");
+  }
+  assert.equal(h.answer.value, "v1:" + ids.map((id, i) => id + ":" + (i === 0 ? 1 : 0)).join(","));
+  assert.equal(h.buttons[0].disabled, false);
 });

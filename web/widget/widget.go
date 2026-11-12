@@ -13,18 +13,20 @@ import (
 	"strings"
 )
 
-//go:embed v1.js v1.worker.js
+//go:embed v1.js v1.worker.js v1.interactive.js
 var assets embed.FS
 
 // 资源名与 URL 都是**白名单常量**：不存在"按请求参数拼路径"这件事，
 // 所以目录穿越与枚举在结构上不可能（测试仍然探一遍——结构不可能不等于没被测过）。
 const (
-	JSPath       = "v1.js"
-	WorkerPath   = "v1.worker.js"
-	URLJS        = "/widget/v1.js"
-	URLWorker    = "/widget/v1.worker.js"
-	contentType  = "text/javascript; charset=utf-8"
-	cacheControl = "public, max-age=3600"
+	JSPath          = "v1.js"
+	WorkerPath      = "v1.worker.js"
+	InteractivePath = "v1.interactive.js"
+	URLJS           = "/widget/v1.js"
+	URLWorker       = "/widget/v1.worker.js"
+	URLInteractive  = "/widget/v1.interactive.js"
+	contentType     = "text/javascript; charset=utf-8"
+	cacheControl    = "public, max-age=3600"
 )
 
 // ErrUnknownAsset 是"要的资源名不在白名单里"。
@@ -33,7 +35,7 @@ var ErrUnknownAsset = errors.New("widget: 未知资源")
 // AssetBytes 读出内嵌资源。
 func AssetBytes(name string) ([]byte, error) {
 	switch name {
-	case JSPath, WorkerPath:
+	case JSPath, WorkerPath, InteractivePath:
 	default:
 		return nil, ErrUnknownAsset
 	}
@@ -65,6 +67,9 @@ func Handler() http.Handler {
 	})
 	mux.HandleFunc("GET "+URLWorker, func(w http.ResponseWriter, r *http.Request) {
 		writeAsset(w, r, WorkerPath)
+	})
+	mux.HandleFunc("GET "+URLInteractive, func(w http.ResponseWriter, r *http.Request) {
+		writeAsset(w, r, InteractivePath)
 	})
 	return mux
 }

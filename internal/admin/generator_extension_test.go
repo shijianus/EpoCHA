@@ -15,6 +15,8 @@ func TestExtensionGeneratorsStayExperimental(t *testing.T) {
 		generator.ParallaxID, generator.BankShotID, generator.AccessibleChoiceID,
 		generator.EnergyWindowID, generator.PipeConnectID,
 		generator.IntersectionPointID,
+		generator.TileRotationID, generator.SymbolPathID,
+		generator.CrowdFindID, generator.VisualRankID,
 	} {
 		exp, ready := generatorLifecycle(id)
 		if !exp || ready {

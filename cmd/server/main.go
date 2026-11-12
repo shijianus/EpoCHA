@@ -524,6 +524,26 @@ func knownGenerators(qKey []byte) ([]generator.Generator, error) {
 		return nil, fmt.Errorf("交点外推题型: %w", err)
 	}
 	out = append(out, intersection)
+	tileRot, err := generator.NewTileRotation(qKey)
+	if err != nil {
+		return nil, fmt.Errorf("路径块旋转题型: %w", err)
+	}
+	out = append(out, tileRot)
+	symbolPath, err := generator.NewSymbolPath(qKey)
+	if err != nil {
+		return nil, fmt.Errorf("符号路径题型: %w", err)
+	}
+	out = append(out, symbolPath)
+	crowd, err := generator.NewCrowdFind(qKey)
+	if err != nil {
+		return nil, fmt.Errorf("找相同角色题型: %w", err)
+	}
+	out = append(out, crowd)
+	rank, err := generator.NewVisualRank(qKey)
+	if err != nil {
+		return nil, fmt.Errorf("视觉排序题型: %w", err)
+	}
+	out = append(out, rank)
 	return out, nil
 }
 

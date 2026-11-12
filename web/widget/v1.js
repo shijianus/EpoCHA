@@ -9,6 +9,10 @@
   var MIME_PNG = "image/png";
   var MAX_IMAGE_B64_CHARS = 87384;
   var POW_ALGO = "sha256-prefix";
+  // 交互模块必须从核心脚本所在位置加载：document.currentScript 只在脚本执行期有效，
+  // 等领题响应回来时它已经是 null。模块与核心同源；页面既然允许核心脚本，也允许它。
+  var SCRIPT_SRC = (typeof document !== "undefined" && document.currentScript)
+    ? String(document.currentScript.src || "") : "";
 
 
 var POW_WORKER_SOURCE = String.raw`/*! epocha widget PoW worker v1 — sha256-prefix 工作量证明（DESIGN §7）
@@ -298,6 +302,10 @@ if (typeof self !== "undefined") {
       notePoint: "点击图片设置目标位置；方向键可微调，Shift+方向键步长更小。",
       noteTiming: "观察动画，在目标时机点击“记录时机”；每题一次作答机会。",
       noteAccessible: "这是一个纯文本无障碍题；选择一项后提交，不加载图片。",
+      btnReset: "重新开始本题",
+      btnUndo: "撤销",
+      btnRotate: "旋转",
+      errInteractiveUnavailable: "交互题型模块加载失败（CSP 或网络）。请换一题。",
       errIncompleteOption: "请选择一个选项。",
       cellLabel: "第 {n} 格",
       selectedCount: "已选 {n} 格",
@@ -363,6 +371,10 @@ if (typeof self !== "undefined") {
       notePoint: "Click the image to set the target; arrow keys nudge, Shift+arrow is finer.",
       noteTiming: "Watch the animation and click “Record timing” at the target moment. One attempt per question.",
       noteAccessible: "This is a text-only accessible question. Choose one option and submit; no image is loaded.",
+      btnReset: "Restart this question",
+      btnUndo: "Undo",
+      btnRotate: "Rotate",
+      errInteractiveUnavailable: "The interactive question module could not be loaded (CSP or network). Get another question.",
       errIncompleteOption: "Choose one option.",
       cellLabel: "Cell {n}",
       selectedCount: "{n} selected",
@@ -566,11 +578,26 @@ if (typeof self !== "undefined") {
     ".hidden{display:none!important}",
     ".qimg{position:relative;display:inline-block;max-width:100%;line-height:0}",
     ".qimg img{display:block;max-width:100%;height:auto}",
-    ".cells{position:absolute;inset:0}",
-    ".cell{position:absolute;margin:0;padding:0;min-width:0;border:1px solid transparent;background:transparent;border-radius:3px;cursor:pointer}",
+    ".cells{position:absolute;inset:0;z-index:2}",
+    ".cell{position:absolute;margin:0;padding:0;min-width:0;border:1px solid transparent;background:transparent;border-radius:3px;cursor:pointer;touch-action:none}",
     ".cell[aria-pressed=true]{background:rgba(26,95,180,.30);border-color:#1a5fb4}",
     ".cell:focus-visible{outline:2px solid #1a5fb4;outline-offset:0}",
     ".cellsum{margin:6px 0 0;font-size:12px;color:#555}",
+    ".ordersum{margin:6px 0 0;font-size:12px;color:#555}",
+    ".tileimg{position:absolute;inset:0;background-repeat:no-repeat;pointer-events:none;transition:transform 140ms ease;transform-origin:50% 50%}",
+    ".pieceimg{position:absolute;inset:0;background-repeat:no-repeat;pointer-events:none;transition:transform 120ms ease;transform-origin:50% 50%}",
+    ".pathlayer{position:absolute;inset:0;z-index:1;pointer-events:none}",
+    ".pathline{fill:none;stroke:#1a5fb4;stroke-width:5;stroke-linecap:round;stroke-linejoin:round}",
+    ".pathnum{position:absolute;right:2px;bottom:1px;font-size:11px;font-weight:700;color:#123f78;background:#fff;border:1px solid #1a5fb4;border-radius:8px;min-width:14px;height:14px;line-height:14px;text-align:center;pointer-events:none}",
+    ".rankno{position:absolute;left:2px;top:2px;font-size:12px;font-weight:700;color:#fff;background:#1a5fb4;border-radius:9px;min-width:18px;height:18px;line-height:18px;text-align:center;pointer-events:none}",
+    ".roundcover{position:absolute;left:0;width:100%;z-index:1;background:#e9e9e9;border-top:1px solid #bbb;border-bottom:1px solid #bbb;pointer-events:none}",
+    ".frameview{position:relative;background-repeat:no-repeat;max-width:100%;line-height:0}",
+    ".cell[data-sel=true]{border-color:#1a5fb4;background:rgba(26,95,180,.22);box-shadow:inset 0 0 0 2px #1a5fb4}",
+    ".cell[data-path=true]{border-color:#1a5fb4;background:rgba(26,95,180,.14)}",
+    ".cell[data-used=true]{opacity:.45}",
+    ".cell[data-busy=true]{opacity:.65}",
+    ".aux{margin:6px 0 0}",
+    ".aux button{margin:0 6px 0 0;padding:3px 8px}",
     ".pairs{margin:8px 0 0}",
     ".pairrow{display:flex;gap:8px;align-items:center;margin:4px 0}",
     ".pairrow label{flex:0 0 auto;max-width:55%;font-size:13px}",
@@ -723,6 +750,43 @@ if (typeof self !== "undefined") {
     this._build();
   }
 
+  Widget._interactive = false;
+  var interactiveLoad = { state: "none", promise: null };
+
+  function interactiveScriptURL(apiBase) {
+    if (SCRIPT_SRC) {
+      try { return new URL("v1.interactive.js", SCRIPT_SRC).href; } catch (e) { /* 回落到 apiBase */ }
+    }
+    return String(apiBase || "").replace(/\/+$/, "") + "/widget/v1.interactive.js";
+  }
+
+  // 只加载一次；同一个页面的多个 widget 共用。失败后不无限重试：交互题型明确失败，
+  // 非交互题型仍可继续使用核心状态机。
+  Widget.prototype._ensureInteractive = function () {
+    if (Widget._interactive) return Promise.resolve();
+    if (interactiveLoad.state === "failed") return Promise.reject(new Error("interactive-unavailable"));
+    if (!interactiveLoad.promise) {
+      var src = interactiveScriptURL(this.o.apiBase);
+      interactiveLoad.promise = new Promise(function (resolve, reject) {
+        var doc = global.document;
+        if (!doc || typeof doc.createElement !== "function" || !(doc.head || doc.documentElement)) {
+          reject(new Error("interactive-unavailable")); return;
+        }
+        var script = doc.createElement("script");
+        script.src = src;
+        script.async = true;
+        script.onload = function () {
+          if (Widget._interactive) resolve();
+          else reject(new Error("interactive-unavailable"));
+        };
+        script.onerror = function () { reject(new Error("interactive-unavailable")); };
+        (doc.head || doc.documentElement).appendChild(script);
+      });
+      interactiveLoad.promise.catch(function () { interactiveLoad.state = "failed"; });
+    }
+    return interactiveLoad.promise;
+  };
+
   Widget._ = function () {};
 
   Widget.prototype._build = function () {
@@ -759,6 +823,14 @@ if (typeof self !== "undefined") {
     this.imgBox = el("div", { class: "qimg" });
     this.cellWrap = el("div", { class: "cells hidden", role: "group" });
     this.imgBox.appendChild(this.cellWrap);
+    this.pathLayer = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    this.pathLayer.setAttribute("class", "pathlayer hidden");
+    this.pathLayer.setAttribute("preserveAspectRatio", "none");
+    this.pathLine = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+    this.pathLine.setAttribute("class", "pathline");
+    this.pathLine.setAttribute("points", "");
+    this.pathLayer.appendChild(this.pathLine);
+    this.imgBox.appendChild(this.pathLayer);
     this.pointLayer = el("div", {
       class: "pointlayer hidden", role: "button", tabindex: "-1", id: this.id + "-point",
       "aria-label": tr(o.lang, "pointLabel"), "aria-describedby": noteId + " " + statusId
@@ -810,6 +882,14 @@ if (typeof self !== "undefined") {
       this.pairInputs.push(pairInput);
     }
     this.cellStatus = el("p", { class: "cellsum hidden", "aria-live": "polite" });
+    this.orderBar = el("p", { class: "ordersum hidden", "aria-live": "polite" });
+    this.auxWrap = el("div", { class: "aux hidden" });
+    this.btnUndo = el("button", { type: "button" }, tr(o.lang, "btnUndo"));
+    this.btnReset = el("button", { type: "button" }, tr(o.lang, "btnReset"));
+    this.btnRotate = el("button", { type: "button" }, tr(o.lang, "btnRotate"));
+    this.auxWrap.appendChild(this.btnUndo);
+    this.auxWrap.appendChild(this.btnReset);
+    this.auxWrap.appendChild(this.btnRotate);
     this.angleWrap = el("div", { class: "angle hidden" });
     this.angleInput = el("input", {
       type: "range", id: this.id + "-angle", min: "0", max: "3599", step: "1", value: "0",
@@ -841,6 +921,28 @@ if (typeof self !== "undefined") {
     this.answerMode = "text";
     this.selection = {};
     this.cellButtons = [];
+    this.tileMasks = [];
+    this.tileTurns = [];
+    this.tileBusyUntil = [];
+    this.pathCells = [];
+    this.pathTargetLen = 0;
+    this.rankOrder = [];
+    this.selectIndex = -1;
+    this.gridCols = 0;
+    this.pathDragging = false;
+    this.progressiveRound = 0;
+    this.progressiveSelections = [];
+    this.roundCovers = [];
+    this.shellRound = 0;
+    this.shellSelections = [];
+    this.shellAnimating = false;
+    this.shellTimer = 0;
+    this.shellFrame = 0;
+    this.placeState = [];
+    this.placeSelected = "";
+    this.placeRotation = 0;
+    this.placeHistory = [];
+    this.pieceRects = {};
     this.btnSubmit = el("button", { type: "button" }, tr(o.lang, "submit"));
     this.btnRefresh = el("button", { type: "button" }, tr(o.lang, "refresh"));
     this.status = el("p", { class: "st", id: statusId, role: "status", "aria-live": "polite" }, "…");
@@ -856,6 +958,8 @@ if (typeof self !== "undefined") {
     box.appendChild(this.pairWrap);
     box.appendChild(this.timingWrap);
     box.appendChild(this.cellStatus);
+    box.appendChild(this.orderBar);
+    box.appendChild(this.auxWrap);
     box.appendChild(this.btnSubmit);
     box.appendChild(this.btnRefresh);
     box.appendChild(this.status);
@@ -886,9 +990,14 @@ if (typeof self !== "undefined") {
     this._on(this.angleDragLayer, "pointercancel", function (e) { self._anglePointerUp(e); });
     this._on(this.frameToggle, "click", function (e) { e.preventDefault(); self._toggleFrames(); });
     this._on(this.frameReplay, "click", function (e) { e.preventDefault(); self._replayFrames(); });
+    this._on(this.btnReset, "click", function (e) { e.preventDefault(); self._resetCurrent(); });
+    this._on(this.btnUndo, "click", function (e) { e.preventDefault(); self._undoCurrent(); });
+    this._on(this.btnRotate, "click", function (e) { e.preventDefault(); self._placeRotate(); });
     this._on(this.host, "pointerdown", function () { self._telEvent("pointer"); });
     this._on(this.host, "pointermove", function () { self._telEvent("pointer"); });
     this._on(this.host, "keydown", function () { self._telEvent("key"); });
+    this._on(this.host, "pointerup", function () { self.pathDragging = false; });
+    this._on(this.host, "pointercancel", function () { self.pathDragging = false; });
   };
 
   Widget.prototype._on = function (node, type, fn) {
@@ -908,13 +1017,55 @@ if (typeof self !== "undefined") {
     for (var i = 0; i < this.cellButtons.length; i++) {
       var b = this.cellButtons[i];
       if (b._epochaClick) this._off(b, "click", b._epochaClick);
+      if (b._epochaKey) this._off(b, "keydown", b._epochaKey);
+      if (b._epochaDown) this._off(b, "pointerdown", b._epochaDown);
+      if (b._epochaEnter) this._off(b, "pointerenter", b._epochaEnter);
     }
     this.cellButtons = [];
     this.selection = {};
+    this.tileMasks = [];
+    this.tileTurns = [];
+    this.tileBusyUntil = [];
+    this.pathCells = [];
+    this.pathTargetLen = 0;
+    this.rankOrder = [];
+    this.selectIndex = -1;
+    this.gridCols = 0;
+    this.pathDragging = false;
+    this.progressiveRound = 0;
+    this.progressiveSelections = [];
+    this.shellRound = 0;
+    this.shellSelections = [];
+    this.shellAnimating = false;
+    this.shellFrame = 0;
+    this.placeState = [];
+    this.placeSelected = "";
+    this.placeRotation = 0;
+    this.placeHistory = [];
+    this.pieceRects = {};
+    this._stopShell();
+    if (this.roundCovers) {
+      for (var ci = 0; ci < this.roundCovers.length; ci++) {
+        if (this.roundCovers[ci] && this.roundCovers[ci].parentNode) {
+          this.roundCovers[ci].parentNode.removeChild(this.roundCovers[ci]);
+        }
+      }
+    }
+    this.roundCovers = [];
+    if (this.btnRotate) this.btnRotate.setAttribute("class", "hidden");
     clear(this.cellWrap);
     this.cellWrap.setAttribute("class", "cells hidden");
     this.cellStatus.setAttribute("class", "cellsum hidden");
     this.cellStatus.textContent = "";
+    if (this.pathLayer) {
+      this.pathLayer.setAttribute("class", "pathlayer hidden");
+      if (this.pathLine) this.pathLine.setAttribute("points", "");
+    }
+    if (this.orderBar) {
+      this.orderBar.setAttribute("class", "ordersum hidden");
+      this.orderBar.textContent = "";
+    }
+    if (this.auxWrap) this.auxWrap.setAttribute("class", "aux hidden");
   };
 
   Widget.prototype._resetInputs = function () {
@@ -1041,6 +1192,94 @@ if (typeof self !== "undefined") {
       this.cellStatus.textContent = tr(this.o.lang, "cellSelected", { n: n });
     }
     this._syncCells();
+  };
+
+
+  Widget.prototype._updateSubmit = function () {
+    if (this.state !== STATES.READY) return;
+    var incomplete = false;
+    if (this.answerMode === "rotate" || this.answerMode === "path" ||
+        this.answerMode === "rank" || this.answerMode === "select" ||
+        this.answerMode === "progressive" || this.answerMode === "shell" ||
+        this.answerMode === "placements") {
+      incomplete = !String(this.answer.value || "");
+    }
+    this.btnSubmit.disabled = incomplete;
+  };
+
+
+  Widget.prototype._resetCurrent = function () {
+    if (this.destroyed || this.state !== STATES.READY) return;
+    if (this.answerMode === "rotate") {
+      for (var i = 0; i < this.tileTurns.length; i++) {
+        this.tileTurns[i] = 0;
+        this.tileBusyUntil[i] = 0;
+        var tile = this.cellButtons[i] && this.cellButtons[i].firstChild;
+        if (tile) tile.style.transform = "rotate(0deg)";
+      }
+      this.answer.value = "";
+      this.cellStatus.textContent = tr(this.o.lang, "rotateReset");
+    } else if (this.answerMode === "path") {
+      this.pathCells = [];
+      this._syncPathAnswer(this.pathChallenge, this.pathIW, this.pathIH);
+      this.cellStatus.textContent = tr(this.o.lang, "localReset");
+    } else if (this.answerMode === "rank") {
+      this.rankOrder = [];
+      for (var k = 0; k < this.cellButtons.length; k++) {
+        this.cellButtons[k].setAttribute("data-sel", "false");
+        var badge = this.cellButtons[k].firstChild;
+        badge.textContent = "";
+        badge.setAttribute("class", "rankno hidden");
+      }
+      this._syncRank();
+      this.cellStatus.textContent = tr(this.o.lang, "localReset");
+    } else if (this.answerMode === "select") {
+      this.selectIndex = -1;
+      for (var j = 0; j < this.cellButtons.length; j++) this.cellButtons[j].setAttribute("data-sel", "false");
+      this.answer.value = "";
+      this.cellStatus.textContent = tr(this.o.lang, "localReset");
+    } else if (this.answerMode === "progressive") {
+      this.progressiveSelections = [-1, -1, -1];
+      this.answer.value = "";
+      this._progressiveShowRound(0);
+      this.cellStatus.textContent = tr(this.o.lang, "localReset");
+    } else if (this.answerMode === "shell") {
+      this.answer.value = "";
+      this._renderShell(this.shellChallenge, this.shellIW, this.shellIH);
+      this._setInputsEnabled(true);
+      this._updateSubmit();
+      return;
+    } else if (this.answerMode === "placements") {
+      this.placeState = [null, null, null, null, null];
+      this.placeSelected = "";
+      this.placeRotation = 0;
+      this.placeHistory = [];
+      this._syncPlacements();
+      this.cellStatus.textContent = tr(this.o.lang, "localReset");
+    }
+    this._updateSubmit();
+  };
+
+
+  Widget.prototype._undoCurrent = function () {
+    if (this.destroyed || this.state !== STATES.READY) return;
+    if (this.answerMode === "path" && this.pathCells.length) {
+      this._pathUndo();
+    } else if (this.answerMode === "rank" && this.rankOrder.length) {
+      this._rankToggle(this.rankOrder[this.rankOrder.length - 1]);
+    } else if (this.answerMode === "placements" && this.placeHistory.length) {
+      this._placeUndo();
+    }
+  };
+
+  // 只移除格子按钮与监听，不重置 progressive/shell/placements 的业务状态。
+
+  Widget.prototype._stopShell = function () {
+    if (this.shellTimer) {
+      global.clearTimeout(this.shellTimer);
+      this.shellTimer = 0;
+    }
+    this.shellAnimating = false;
   };
 
   Widget.prototype._renderCells = function (q, iw, ih) {
@@ -1471,8 +1710,14 @@ if (typeof self !== "undefined") {
     for (var i = 0; i < this.pairInputs.length; i++) {
       this.pairInputs[i].disabled = !(enabled && this.answerMode === "pairs");
     }
+    var gridMode = this.answerMode === "cells" || this.answerMode === "rotate" ||
+      this.answerMode === "path" || this.answerMode === "rank" || this.answerMode === "select" ||
+      this.answerMode === "progressive" || this.answerMode === "shell" ||
+      this.answerMode === "placements";
     for (var j = 0; j < this.cellButtons.length; j++) {
-      this.cellButtons[j].disabled = !(enabled && this.answerMode === "cells");
+      var gridDisabled = !(enabled && gridMode);
+      if (this.answerMode === "shell" && this.shellAnimating) gridDisabled = true;
+      this.cellButtons[j].disabled = gridDisabled;
     }
     this.angleInput.disabled = !(enabled && this.answerMode === "angle");
     this.timingBtn.disabled = !(enabled && this.answerMode === "timing");
@@ -1486,6 +1731,11 @@ if (typeof self !== "undefined") {
     var pointOn = enabled && this.answerMode === "point";
     this.pointLayer.setAttribute("tabindex", pointOn ? "0" : "-1");
     this.pointLayer.setAttribute("aria-disabled", pointOn ? "false" : "true");
+    if (this.btnReset) this.btnReset.disabled = !(enabled && gridMode);
+    if (this.btnUndo) this.btnUndo.disabled = !(enabled && (this.answerMode === "path" || this.answerMode === "rank" || this.answerMode === "placements"));
+    if (this.btnRotate) {
+      this.btnRotate.disabled = !(enabled && this.answerMode === "placements" && this.placeSelected !== "");
+    }
   };
 
   Widget.prototype._enable = function (busy) {
@@ -1619,7 +1869,9 @@ if (typeof self !== "undefined") {
           self._fail("bad-response", "errBadResponse", { why: "media" }, false); return;
         }
         if (at !== "text" && at !== "cells" && at !== "pairs"
-            && at !== "angle" && at !== "point" && at !== "timing") {
+            && at !== "angle" && at !== "point" && at !== "timing"
+            && at !== "masks" && at !== "path" && at !== "order" && at !== "select"
+            && at !== "sequence" && at !== "placements") {
           self._fail("bad-response", "errBadResponse", { why: "answer_type" }, false); return;
         }
         var rm = q.render_mode === undefined ? "static" : String(q.render_mode);
@@ -1665,6 +1917,7 @@ if (typeof self !== "undefined") {
             return;
           }
         }
+        var proceed = function () {
         if (at === "text") {
           if (media === "text") {
             self._renderTextOptions(q);
@@ -1683,6 +1936,49 @@ if (typeof self !== "undefined") {
           self.heading.textContent = promptText(q, o.lang);
           self.heading.setAttribute("for", self.answer.getAttribute("id"));
           self.note.textContent = tr(o.lang, "noteCells");
+        } else if (at === "masks") {
+          if (!self._renderQuestionMedia(q, iw, ih, tr(o.lang, "imageAltRotate"))) return;
+          self._renderRotate(q, iw, ih);
+          self.heading.textContent = promptText(q, o.lang);
+          self.heading.setAttribute("for", self.answer.getAttribute("id"));
+          self.note.textContent = tr(o.lang, "noteRotate");
+        } else if (at === "path") {
+          if (!self._renderQuestionMedia(q, iw, ih, tr(o.lang, "imageAltPath"))) return;
+          self._renderPath(q, iw, ih);
+          self.heading.textContent = promptText(q, o.lang);
+          self.heading.removeAttribute("for");
+          self.note.textContent = tr(o.lang, "notePath");
+        } else if (at === "order") {
+          if (!self._renderQuestionMedia(q, iw, ih, tr(o.lang, "imageAltRank"))) return;
+          self._renderRank(q, iw, ih);
+          self.heading.textContent = promptText(q, o.lang);
+          self.heading.removeAttribute("for");
+          self.note.textContent = tr(o.lang, "noteRank");
+        } else if (at === "select") {
+          if (!self._renderQuestionMedia(q, iw, ih, tr(o.lang, "imageAltSelect"))) return;
+          self._renderSelect(q, iw, ih);
+          self.heading.textContent = promptText(q, o.lang);
+          self.heading.removeAttribute("for");
+          self.note.textContent = tr(o.lang, "noteSelect");
+        } else if (at === "sequence") {
+          if (q.input_mode === "shell") {
+            if (!self._renderShell(q, iw, ih)) return;
+            self.heading.textContent = promptText(q, o.lang);
+            self.heading.removeAttribute("for");
+            self.note.textContent = tr(o.lang, "noteShell");
+          } else {
+            if (!self._renderQuestionMedia(q, iw, ih, tr(o.lang, "imageAltProgressive"))) return;
+            self._renderProgressive(q, iw, ih);
+            self.heading.textContent = promptText(q, o.lang);
+            self.heading.removeAttribute("for");
+            self.note.textContent = tr(o.lang, "noteProgressive");
+          }
+        } else if (at === "placements") {
+          if (!self._renderQuestionMedia(q, iw, ih, tr(o.lang, "imageAltPlacements"))) return;
+          self._renderPlacements(q, iw, ih);
+          self.heading.textContent = promptText(q, o.lang);
+          self.heading.removeAttribute("for");
+          self.note.textContent = tr(o.lang, "notePlacements");
         } else if (at === "pairs") {
           if (!self._renderQuestionMedia(q, iw, ih, tr(o.lang, "imageAltPairs"))) return;
           self._renderPairs(q);
@@ -1701,12 +1997,37 @@ if (typeof self !== "undefined") {
         if (!self._ensureWorker()) return;
         self._enable(true);
         if (!self._setState(STATES.READY)) return;
+        self._updateSubmit();
         self._telBegin();
         self._say(tr(o.lang, "ready"), "idle");
         self.autoRetry = 0;
         if (self.challenge.expires > 0) {
           self._armDeadline(self.deadlineEpoch, function () { self._expireChallenge(); });
         }
+        };
+        var needsInteractive = at === "masks" || at === "path" || at === "order" ||
+          at === "select" || at === "sequence" || at === "placements";
+        if (needsInteractive) {
+          self._ensureInteractive().then(function () {
+            if (self.destroyed || my !== self.gen) return;
+            // 模块加载也是等待：不能在 TTL 已过之后才把题面画出来。
+            if (self.challenge && self.challenge.expires > 0 && Date.now() >= self.deadlineEpoch) {
+              self._expireChallenge();
+              return;
+            }
+            if (typeof Widget._validInteractive !== "function" ||
+                !Widget._validInteractive(at, q, iw, ih)) {
+              self._fail("bad-response", "errBadResponse", { why: at }, false);
+              return;
+            }
+            proceed();
+          }, function () {
+            if (self.destroyed || my !== self.gen) return;
+            self._fail("interactive-unavailable", "errInteractiveUnavailable", null, true);
+          });
+          return;
+        }
+        proceed();
       })
       .catch(function (err) {
         if (self.destroyed || my !== self.gen || (err && err.code === "cancelled")) return;
@@ -1972,6 +2293,13 @@ if (typeof self !== "undefined") {
       else if (this.answerMode === "point") this._say(tr(o.lang, "errIncompletePoint"), "err");
       else if (this.answerMode === "timing") this._say(tr(o.lang, "errIncompleteTiming"), "err");
       else if (this.answerMode === "options") this._say(tr(o.lang, "errIncompleteOption"), "err");
+      else if (this.answerMode === "rotate") this._say(tr(o.lang, "errIncompleteRotate"), "err");
+      else if (this.answerMode === "path") this._say(tr(o.lang, "errIncompletePath"), "err");
+      else if (this.answerMode === "rank") this._say(tr(o.lang, "errIncompleteRank"), "err");
+      else if (this.answerMode === "select") this._say(tr(o.lang, "errIncompleteSelect"), "err");
+      else if (this.answerMode === "progressive") this._say(tr(o.lang, "errIncompleteProgressive"), "err");
+      else if (this.answerMode === "shell") this._say(tr(o.lang, "errIncompleteShell"), "err");
+      else if (this.answerMode === "placements") this._say(tr(o.lang, "errIncompletePlacements"), "err");
       else this._say(tr(o.lang, "errInvalidRequest"), "err");
       return;
     }
@@ -2129,6 +2457,15 @@ if (typeof self !== "undefined") {
     state: function (id) { var w = registry.get(id); return w ? w.state : null; },
     ids: function () { return Array.from(registry.keys()); },
     util: { leadingZeroBits: leadingZeroBits, b64urlToBytes: b64urlToBytes, lang: pickLang }
+  };
+
+  api._installInteractive = function (install) {
+    if (Widget._interactive) return;
+    install({
+      Widget: Widget, STATES: STATES, el: el, tr: tr, intField: intField,
+      validGrid: validGrid, validPrompts: validPrompts, clear: clear, i18n: I18N, global: global
+    });
+    Widget._interactive = true;
   };
 
   global.EpoCHA = api;

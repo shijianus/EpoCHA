@@ -20,6 +20,10 @@
 | `energy-window-v1` | image | `timing` | 36 帧能量游标，进入标记窗口时记录时机；TSV 时间桶 | 否（M4/人工可读性 NOT_RUN） |
 | `pipe-connect-v1` | image | `cells` | 4×4 拓扑网格，点选主路径 2 个断点 | 否（M4 NOT_RUN） |
 | `intersection-point-v1` | image | `point` | 两条虚线在随机位置相交，点击延长线交点；网格量化 + 3×3 邻格 TSV | 否（M4/人工可读性 NOT_RUN） |
+| `tile-rotation-v1` | image | `masks` | 3×3 路径块旋转，连成一张无越界边的网络；唯一解由枚举证明 | 否（M4/人工可读性 NOT_RUN） |
+| `symbol-path-v1` | image | `path` | 6×6 符号路径，按目标序列连接相邻格；唯一匹配路径由 DFS 证明 | 否（M4/人工可读性 NOT_RUN） |
+| `crowd-find-v1` | image | `select` | 36 个程序化非人形角色，点击与顶部样本完全相同的一个 | 否（M4/人工可读性 NOT_RUN） |
+| `visual-rank-v1` | image | `order` | 5 张折线卡按线段数从少到多排列 | 否（M4/人工可读性 NOT_RUN） |
 
 所有题型在管理面 `/api/admin/generators` 里都返回 `experimental:true` / `production_ready:false`。
 **没有**任何题型被证明抗 AI、抗 OCR、抗多模态或已完成人工可读性验收。
@@ -55,6 +59,12 @@ widget 按题面的 `answer_type` 自动切换控件（`text/cells/pairs/angle/p
 | `angle` | `1234` | 0..3599 的 0.1° 量化；只接受 ASCII 数字、≤4 位 | 符号、小数、>3599 |
 | `point` | `512,340` | 两个 0..999 的 ASCII 十进制数（各 1..3 位）；逗号两侧可裁 ASCII 空格 | 缺/多字段、>999、负数、小数、空字段 |
 | `timing` | `1234` | 0..60000 的毫秒整数；`energy-window-v1` 额外拒绝 <200ms（零思考抢答） | 非数字、>60000、energy-window 的 <200 |
+| `masks` | `v1:1a2b3c4d5` | 每格一个 4-bit edge mask；固定格数、严格 ASCII 十六进制、小写规范 | 空、长度不符、非 hex、尾随垃圾、Unicode 同形 |
+| `path` | `v1:03.09.10.16.22.28` | 每段两位十进制、固定长度范围、无重复；题型再校验相邻性 | 少/多段、一位数、越界、重复、不相邻、非 ASCII |
+| `select` | `v1:7` | 单个 0-based 索引；无前导零 | 越界、负数、前导零、多字段 |
+| `order` | `v1:A.B.C.D.E` | 固定 n 个字母 ID、无重复、保持选择顺序 | 缺/多字段、重复、非 A–Z、非法版本 |
+| `sequence` | `v1:0.4.8` | 固定 n 个一位十进制、允许重复（每轮独立） | 缺/多字段、>max、非数字 |
+| `placements` | `v1:0:2,3:1,…` | 固定 slot 数；`piece:rotation`，piece 不重复、rotation 0..3 | 缺/多字段、重复 piece、越界 rotation |
 
 Phase 1（ADR-025）定义的 `angle`（0.1° 整数）、`point`（`x,y` 千分位）与 `timing`（毫秒）三种契约类型
 已在 Phase 2–4.5 被实际题型使用：`bank-shot-v1`（`angle`）、`intersection-point-v1`（`point`）、
@@ -76,6 +86,12 @@ Phase 1（ADR-025）定义的 `angle`（0.1° 整数）、`point`（`x,y` 千分
 - `angle`：角度滑块，提交 0.1° 整数；题面给 `angle_min/angle_max/angle_step`。
 - `point`：图片点击/键盘移动，提交 `x,y`（各 0..999）。
 - `timing`：雪碧图动画 + “记录时机”，提交毫秒；必须 `render_mode:"sprite_sheet"`，减少动态时 fail closed。
+- `masks`：路径块旋转。3×3 可聚焦按钮；Enter/Space 顺时针 90°，Shift+Enter 逆时针；同一 tile 在
+  140ms 动画结束前拒绝重入；答案由每格初始 mask 与 turns 组合成 `v1:<9 hex>`。
+- `path`：6×6 符号路径。点击/拖动相邻格追加，Backspace 撤销，方向键移动焦点；已选格显示序号，
+  路径线只表示用户输入；达到目标长度才合成 `v1:NN.NN...`。
+- `select`：36 选 1。点击/键盘选择单个角色；提交前可改选，只有最后一个索引进入答案。
+- `order`：5 卡排序。点击卡片加入顺序栏，已选卡不会重复；Undo 撤销最后一张；选满 5 张才合成答案。
 
 六种输入都已有登记题型使用；widget 不解释答案、不做判定；隐藏字段仍然只承载一次性 response token（验证通过后），
 答案只通过 `/api/redeem` 发给服务端。服务端文本只进 `textContent`，没有 HTML 拼接。
@@ -98,7 +114,8 @@ go run ./cmd/preview \
 
 `--generator` 支持全部已登记题型：`text-image-v1/v2/v3`、`shape-grid-v1`、`shape-count-v1`、
 `parallax-code-v1`、`bank-shot-v1`、`accessible-choice-v1`、`energy-window-v1`、`pipe-connect-v1`、
-`intersection-point-v1`、`arithmetic-baseline-v1`。预览只允许 loopback，不接受非回环监听地址。
+`intersection-point-v1`、`tile-rotation-v1`、`symbol-path-v1`、`crowd-find-v1`、`visual-rank-v1`、
+`arithmetic-baseline-v1`。预览只允许 loopback，不接受非回环监听地址。
 
 ## 6. 离线样本与 OCR 基线
 
@@ -134,6 +151,10 @@ OCR 不是它们的威胁模型，它们对机器视觉本来就容易（见 §7
 | `energy-window-v1` | 36 帧 × 游标相位 × 视觉种子 | 480 个 6ms 桶；目标只在 40..439 桶（400 个可行桶），接受域 13 个桶 | `13/400 = 3.25%`；3 次 ≈9.44% | **未测** |
 | `pipe-connect-v1` | 主路径行位 × 死路位置 × 视觉种子 | 断点与死路都显示为空候选格；d1 最少 `E=9`、d5 最少 `E=13` 个候选 | d1 `1/C(9,2)=1/36 ≈ 2.78%`；3 次 ≈8.1%；d5 `1/C(13,2)=1/78 ≈ 1.28%` | **未测** |
 | `intersection-point-v1` | 两条线斜率组合 × 目标格（`cols×rows`）× 视觉种子 | 目标格 + 3×3 邻格；d1 32×18 网格（目标可行 351 格），d5 64×36（1404 格） | 最坏 `9/351 = 2.56%`；3 次 ≈7.50%；d5 `0.64%` / 3 次 ≈1.91% | **未测** |
+| `tile-rotation-v1` | 生成树/额外边 × 每格初始旋转 × 视觉种子 | 每格不同旋转的组合；生成器要求 ≥64 个候选最终状态 | 最坏 `1/64`；3 次 ≈4.69% | **未测** |
+| `symbol-path-v1` | 自避路径 × 目标符号排列 × 干扰符号 | 合法位置路径 ≥128；符号匹配路径由 DFS 证明恰好 1 条 | 盲猜合法路径 `1/128`；3 次 ≈2.34% | **未测** |
+| `crowd-find-v1` | 6 特征组合 × 目标位置 × 干扰组合 | 36 个角色中目标签名恰好 1 个 | `1/36`；3 次上界 `3/36 = 8.33%` | **未测** |
+| `visual-rank-v1` | 5 个线段数 × 卡片排列 × 公开 ID 排列 | 5! 个排列中唯一一个 | `1/120`；3 次 `2.5%` | **未测** |
 
 `shape-grid` / `shape-count` 的 M3 计算假设攻击者在**正确的 k/正确数量范围**内均匀猜；
 如果它连 k 都不知道，接受域更小。两者都在 3 次尝试的 10% 红线以内，但这只是"随机猜不通"，
@@ -189,3 +210,7 @@ v1/v2 仍是 48B 的精确 HMAC，路径与长度不变。
 - **人工可读性、辅助技术、真机移动端、M4、抗 AI/抗 OCR**：全部 NOT_RUN。
   人工可读性必须在目标设备上按 `docs/MANUAL-ACCEPTANCE.md` 的方式另行验收；
   本文件与生成器测试里的覆盖率/几何断言只证明"字没被擦掉/图形没被裁切"，不证明"人能读出来"。
+- **Wave 2 交互题**（`progressive-target-v1`、`shell-track-v1`、`silhouette-assembly-v1`）与
+  **negative polarity 修饰器**、`pipe-connect` 完整管道整改：见 `docs/reviews/CAPTCHA-BANK-REMEDIATION-2026-11-12.md`。
+  `pipe-connect-v1` 现状只是"点选两个断点"，verifier 无法表达完整逐格 edge mask；在不动其已签发
+  verifier 语义的前提下标记 **BLOCKED**，不得用客户端 `solved=true` 代替服务端验证。

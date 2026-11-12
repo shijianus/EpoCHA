@@ -257,10 +257,16 @@ function binarySize(path) {
 function widgetSize() {
   const js = readFileSync(join(ROOT, 'web/widget/v1.js'));
   const worker = readFileSync(join(ROOT, 'web/widget/v1.worker.js'));
-  if (!js.length || !worker.length) throw new Error('empty widget asset');
+  const interactive = readFileSync(join(ROOT, 'web/widget/v1.interactive.js'));
+  if (!js.length || !worker.length || !interactive.length) throw new Error('empty widget asset');
   const size = gzipSync(js, { level: 9 }).length;
+  const isize = gzipSync(interactive, { level: 9 }).length;
   if (size >= 30 * 1024) throw new Error(`widget gzip ${size} B must be < 30720 B`);
-  return `widget ${js.length} B; gzip ${size} B < 30720 B; main+worker gzip ${gzipSync(Buffer.concat([js, worker]), { level: 9 }).length} B`;
+  // ADR-025 第 5 条：交互模块按需加载，核心与模块各自守体积；交互题型一次加载两文件。
+  if (isize >= 30 * 1024) throw new Error(`interactive module gzip ${isize} B must be < 30720 B`);
+  if (size + isize >= 40 * 1024) throw new Error(`core+interactive gzip ${size + isize} B must be < 40960 B`);
+  return `widget ${js.length} B; gzip ${size} B < 30720 B; interactive ${interactive.length} B; gzip ${isize} B < 30720 B; ` +
+    `core+interactive gzip ${size + isize} B < 40960 B; main+worker gzip ${gzipSync(Buffer.concat([js, worker]), { level: 9 }).length} B`;
 }
 function sourceIdentity() {
   const commit = must('git', ['rev-parse', 'HEAD']).trim();

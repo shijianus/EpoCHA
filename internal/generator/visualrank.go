@@ -11,6 +11,7 @@ package generator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"io"
@@ -64,6 +65,9 @@ func buildVisualRank(entropy io.Reader) (visualRankSpec, error) {
 		spec, err := buildVisualRankOnce(entropy)
 		if err == nil {
 			return spec, nil
+		}
+		if errors.Is(err, ErrOutOfEntropy) {
+			return spec, err
 		}
 		lastErr = err
 	}

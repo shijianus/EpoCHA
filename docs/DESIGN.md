@@ -855,7 +855,7 @@ TTL 有 `[1s, 1h]` 上下界——有效期长度直接决定防重放账本必�
 | GET | `/healthz` | 无 | 1 | 存活探针，只返回 `{"status":"ok"}`，不含版本/路径/计数/依赖信息，不做健康即放行的语义 |
 | GET | `/readyz` | 无 | 5A | **就绪探针**（阶段 5A）：存储层有界自检——连得上、`meta.schema_version` 与本程序一致、**写路径可用**（主文件可写 + 数据目录可创建临时文件）。就绪 ⇒ `{"status":"ready"}`；否则 **503** `{"status":"unavailable"}`。三条边界：不分配题目也不消费 token（有测试逐表对账行数）；自带 2s 上限并沿用请求 ctx（探针不得成为故障源）；只回一个词，不外泄路径/SQL/驱动文本/站点数/失败原因（原因只进日志的类别字段）。题池水位低**不是**未就绪，那是容量信号（§8.3） |
 | ~~GET~~ | ~~`/asset/<pool_id>/<sig>`~~ | — | **未采用（3B）** | 草稿里的签名媒体端点没有实现：它会凭空造出一个需要防枚举、防跨 challenge 引用的面，而题目是一次性的。图片改为**内联在 `/api/challenge` 的公开 DTO 里**（§10.1 下方、ADR-012） |
-| GET | `/widget/v1.js` | 公开 | **4A** | widget 主脚本（go:embed）。实测 gzip **28,909 B** [实测 2026-11-12]（预算 30KB [目标]） |
+| GET | `/widget/v1.js` | 公开 | **4A** | widget 主脚本（go:embed）。实测 gzip **28,968 B** [实测 2026-11-12]（预算 30KB [目标]） |
 | GET | `/widget/v1.worker.js` | 公开 | **4A** | PoW worker 的**同源副本**（接入方选方案 B 时用）。内容与 v1.js 内嵌那份逐字节相同，由测试钉住 |
 | GET | `/widget/v1.interactive.js` | 公开 | **2026-11-12** | 实验型交互题渲染器（ADR-025 第 5 条的按需模块）：只在 `answer_type` 为 `masks/path/order/select/sequence/placements` 时由 v1.js 同源加载；不含答案或判分逻辑。实测 gzip **10,311 B** [实测 2026-11-12] |
 
@@ -1170,7 +1170,7 @@ compose **只**发布 `127.0.0.1:8080`，管理口 8081 不发布——容器内
 | 新题型单题体积（ADR-024） | — | `[实测]` 本地渲染样本：`shape-grid-v1` PNG 5.1–7.0KB、`shape-count-v1` 2.9–6.4KB、`text-image-v3` 11.7–19.0KB；v3 逐字 verifier **208B**（仍 <512B）。这是**样本**不是稳态分布，也未压满题池 | 生成器测试 + 本地渲染 |
 | 有限批次生成耗时 | — | `[实测]` 补 100 题：纯生成+写入 **29ms**（0.29ms/题）；补 1000 题：**339–391ms**（0.34–0.39ms/题）。总墙钟 1.03s / 10.3s 里**主动让出 CPU 占 1s / 10s**（`YieldEvery=10`/`YieldPause=100ms`，是设计意图不是开销）。测量条件：本机 4 核可见但 `BatchPerTick=n` 单轮补满、`t.TempDir()` 独立库、2026-10-17 | `BenchmarkPoolFill`（需显式 `-bench`） |
 | 题池磁盘占用 | `[目标]` 20000 行上限 | `[估算]` 按上行的 432 B/题 ⇒ 上限约 **8.4MB**（**外推值，未实测到 20000 行**；50GB 磁盘下不构成约束）。WAL 在写入进行中额外占 ~4.7MB（自动 checkpoint 阈值 1000 页） | `MaxRows` 同语句判定 |
-| widget 体积 | `gzip [目标]` <30KB（`make widget-size`） | `[实测 2026-11-12]` **v1.js 原文 110,402 B / gzip 28,909 B**；交互模块 48,751 B / gzip 10,311 B（仅交互题型按需加载）；core+interactive gzip **39,220 B**；与 `v1.worker.js` 合计 gzip 33,618 B | 核心始终 <30KB；模块单独 <30KB、合计 <40KB，由 `release-check.mjs --widget-size` 守护 |
+| widget 体积 | `gzip [目标]` <30KB（`make widget-size`） | `[实测 2026-11-12]` **v1.js 原文 110,465 B / gzip 28,968 B**；交互模块 48,751 B / gzip 10,311 B（仅交互题型按需加载）；core+interactive gzip **39,279 B**；与 `v1.worker.js` 合计 gzip 33,678 B | 核心始终 <30KB；模块单独 <30KB、合计 <40KB，由 `release-check.mjs --widget-size` 守护 |
 | 浏览器 PoW 吞吐 | 未设线（先测再说） | `[实测]` **422,833 次/秒**（Firefox 147 headless、linux/arm64、Dedicated Worker 内纯 JS SHA-256） | bits=12 求解 4–6ms；bits=20 提交→verified 五次采样 309–8,991ms（几何分布 + 负载差异，别当常量，也别据此抬难度） |
 | 内嵌字体 | `[估算]` Latin 1–3MB；CJK 子集 4–6MB | `[实测]` **Go Regular 单档 148,672 字节**（`goregular.TTF`，3B 只用这一档，不子集化：字符集只有 32 个字形，收益远小于复杂度）；二进制因此从 9,896,228 → **10,813,732 字节** | `docs/NOTICE.md` + `make size` |
 | 单题图片资产 | `[目标]` PNG ≤65,536B（库内 CHECK 强制） | `[实测]` d1 **1,126–2,557B**（均值 1,911）；d5 **5,648–6,902B**（均值 6,315）；base64 后 d5 一张约 8KB 响应（2026-10-18，60 样本） | `0004` CHECK + `store.MaxAssetBytes` + `TestAssetColumnChecksAreReal` |
@@ -1526,7 +1526,7 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
   指令修饰器（kind/category，固定 k=2/3，fill 固定 positive）。三者均登记到 server/preview/devseed/
   admin/dispatch，全部 `experimental:true` / `production_ready:false`。`pipe-connect-v1` 完整管道整改
   继续 BLOCKED（legacy cells verifier 无法表达逐格 edge mask，需新 ID/version）。
-  `web/widget/v1.interactive.js` 成为按需模块（核心 gzip 28,909 B / 模块 10,311 B / 合计 39,220 B）；
+  `web/widget/v1.interactive.js` 成为按需模块（核心 gzip 28,968 B / 模块 10,311 B / 合计 39,279 B）；
   GIF 与 Chrome/Firefox/WebKit 动画一致性、M4、人工可读性、辅助技术、真机移动端均 **NOT_RUN**。
 
 - 2026-11-12 **交互原语 Wave 1（ADR-030）**：新增 `tile-rotation-v1`（3×3 路径块旋转，唯一解枚举）、

@@ -280,8 +280,8 @@ Wave 1 四个题型已实现、登记并接入 widget；Wave 2 生成器代码�
 | 生成器唯一解与 10,000 seed | PASS | `go test -count=1 ./internal/generator/`（含 `TestTileRotationTenThousandSeeds`、`TestSymbolPathSeedsUniqueAndBounded`、`TestCrowdFindTargetUniqueAndDistractors`、`TestVisualRankCountsDistinctAndOrdered`） | Windows amd64 / Go 1.27.3 |
 | payload/verifier/asset 上限 | PASS | 同上的 `*AssetBudget*`、`*NoLeak*`、`SanitizePublic` 测试；全局上限仍为 8192/4096/65536 | 同上 |
 | 答案编码拒绝表与 fuzz | PASS | `internal/generator/answer_encoding_test.go`；`go test` 的 `FuzzNormalizeNewEncodings` 种子模式 | 同上 |
-| widget 交互（Node 工装） | PASS | `node --test docs/scripts/browser/pow_vectors.test.mjs docs/scripts/browser/widget_lifecycle.test.mjs`（39 项，含 7 种新输入与模块加载失败） | Node 24.14.0 / Windows |
-| widget 体积 | PASS | `node docs/scripts/release-check.mjs --widget-size`：core gzip 28,909 B < 30,720 B；interactive 10,311 B；合计 39,220 B < 40,960 B | 同上（LF 工作区） |
+| widget 交互（Node 工装） | PASS | `node --test docs/scripts/browser/pow_vectors.test.mjs docs/scripts/browser/widget_lifecycle.test.mjs`（50 项，含 7 种新输入、模块加载成功/失败/重试、reduced-motion 与中文文案） | Node 24.14.0 / Windows |
+| widget 体积 | PASS | `node docs/scripts/release-check.mjs --widget-size`：core gzip 28,968 B < 30,720 B；interactive 10,311 B；合计 39,279 B < 40,960 B | 同上（LF 工作区） |
 | Go widget 内嵌/路由 | PASS | `go test -count=1 ./web/widget/`（含新模块的资源字节、ETag、404 边界） | 同上 |
 | API 闭环（challenge/redeem/重放/错误终结） | **BLOCKED** | `internal/api/new_generators_test.go` 无法在 Windows 编译：`internal/store/lock.go` 使用 `syscall.Flock`（AGENTS 已声明 Windows 不做 flock 测试）。Linux 全量 race 未在本机执行。 | Windows amd64 |
 | 真实浏览器 E2E（Firefox BiDi） | **BLOCKED** | 需要可运行的 `cmd/server` 与 `cmd/devseed`；同一 Windows 限制。Node 工装不等于真实浏览器。 | Windows amd64 |

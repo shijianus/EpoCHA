@@ -215,7 +215,7 @@ function harness(t, { honorAbort = false, options = {}, interactive = true, redu
   const status = find(host.shadowRoot, (node) => node.getAttribute("role") === "status");
   const h = {
     api, id, time, requests, workers, urls, successes, errors, states, expired,
-    document, container, host, field, answer, buttons, status,
+    sandbox, document, container, host, field, answer, buttons, status,
     calls: (path) => requests.filter((request) => request.path === "/api/" + path),
     clickSubmit() { buttons[0].emit("click"); },
     async ready(request = requests.at(-1), token = "challenge-1", expires = 0, question = null) {
@@ -843,6 +843,21 @@ test("tile-rotation 输入：旋转后才有答案，Reset 清空本地操作", 
   assert.equal(h.buttons[0].disabled, true);
 });
 
+test("交互模块按需加载成功：同一状态机进入 ready 并渲染控件", async (t) => {
+  const h = harness(t, { interactive: false });
+  h.requests[0].respond(rotateChallenge());
+  await flush();
+  assert.equal(h.api.state(h.id), "loading");
+  const script = find(h.document.head, (node) => node.tagName === "SCRIPT");
+  assert.ok(script, "核心应当创建模块脚本");
+  vm.runInNewContext(interactiveSource, h.sandbox, { filename: "web/widget/v1.interactive.js" });
+  script.onload();
+  await flush();
+  assert.equal(h.api.state(h.id), "ready", JSON.stringify(h.errors));
+  const cells = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell");
+  assert.equal(cells.length, 9);
+});
+
 test("交互模块加载失败：明确失败，不渲染半成品", async (t) => {
   const h = harness(t, { interactive: false });
   h.requests[0].respond(rotateChallenge());
@@ -858,6 +873,29 @@ test("交互模块加载失败：明确失败，不渲染半成品", async (t) =
   assert.equal(h.buttons[0].disabled, true);
   assert.equal(findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell").length, 0,
     "模块失败时不得渲染可点击格子");
+});
+
+test("交互模块失败后刷新可以重试，不会把页面永久钉死", async (t) => {
+  const h = harness(t, { interactive: false });
+  h.requests[0].respond(rotateChallenge());
+  await flush();
+  const first = find(h.document.head, (node) => node.tagName === "SCRIPT");
+  assert.ok(first);
+  first.onerror();
+  await flush();
+  assert.equal(h.api.state(h.id), "error");
+
+  h.api.refresh(h.id);
+  assert.equal(h.requests.length, 2);
+  h.requests[1].respond(rotateChallenge());
+  await flush();
+  assert.equal(h.api.state(h.id), "loading");
+  const scripts = findAll(h.document.head, (node) => node.tagName === "SCRIPT");
+  assert.ok(scripts.length >= 2, "失败后重试必须重新加载模块");
+  vm.runInNewContext(interactiveSource, h.sandbox, { filename: "web/widget/v1.interactive.js" });
+  scripts.at(-1).onload();
+  await flush();
+  assert.equal(h.api.state(h.id), "ready", JSON.stringify(h.errors));
 });
 
 test("新交互题型的中文文案：指令与说明都来自既有 i18n 表", async (t) => {

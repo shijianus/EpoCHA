@@ -12,6 +12,7 @@ package generator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"io"
@@ -76,6 +77,9 @@ func buildCrowdFind(entropy io.Reader) (crowdFindSpec, error) {
 		spec, err := buildCrowdFindOnce(entropy)
 		if err == nil {
 			return spec, nil
+		}
+		if errors.Is(err, ErrOutOfEntropy) {
+			return spec, err
 		}
 		lastErr = err
 	}

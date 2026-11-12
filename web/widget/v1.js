@@ -764,7 +764,6 @@ if (typeof self !== "undefined") {
   // 非交互题型仍可继续使用核心状态机。
   Widget.prototype._ensureInteractive = function () {
     if (Widget._interactive) return Promise.resolve();
-    if (interactiveLoad.state === "failed") return Promise.reject(new Error("interactive-unavailable"));
     if (!interactiveLoad.promise) {
       var src = interactiveScriptURL(this.o.apiBase);
       interactiveLoad.promise = new Promise(function (resolve, reject) {
@@ -782,7 +781,11 @@ if (typeof self !== "undefined") {
         script.onerror = function () { reject(new Error("interactive-unavailable")); };
         (doc.head || doc.documentElement).appendChild(script);
       });
-      interactiveLoad.promise.catch(function () { interactiveLoad.state = "failed"; });
+      // 失败不永久钉死：下一次领题/刷新再试一次；CSP 永久阻断时会再次明确失败。
+      interactiveLoad.promise.catch(function () {
+        interactiveLoad.state = "failed";
+        interactiveLoad.promise = null;
+      });
     }
     return interactiveLoad.promise;
   };

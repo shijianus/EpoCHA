@@ -129,6 +129,21 @@ manifest **无签名** ⇒ 不得宣称抵御恶意替换（备份目录的可�
 边界见 ADR-024。站点**仍只选一个** `generator_id`，按权重混合多题型仍未实现。
 操作与 M1–M4 见 `docs/QUESTION-TYPES.md`。
 
+**2026-11-12 题库整改新增**（ADR-030 / ADR-031，不是阶段完成）：新增 Wave 1
+`tile-rotation-v1`（3×3 路径块旋转，`masks`）、`symbol-path-v1`（6×6 符号路径，`path`）、
+`crowd-find-v1`（36 选 1 程序化非人形角色，`select`）、`visual-rank-v1`（5 卡线段数排序，`order`），
+与 Wave 2 `progressive-target-v1`（三轮 3×3 定位，`sequence`）、`shell-track-v1`（三轮四容器；
+服务端预渲染 33 帧 PNG 雪碧图，`sequence`，`Motion:true`）、`silhouette-assembly-v1`
+（5 部件/5 槽位离散旋转装配，`placements`）。注册题型增至 **19**；`shape-grid-v1` 增加
+kind/category 的 negative polarity 指令修饰器（fill 固定 positive，答案空间仍 C(9,k)）。
+全部 `experimental:true` / `production_ready:false`，默认不加入站点。新增 7 种交互渲染器放在
+`web/widget/v1.interactive.js`（按需同源加载）：core gzip 28,968B、模块 10,311B、合计 39,279B，
+由 `release-check.mjs --widget-size` 守护（core<30KB、模块<30KB、合计<40KB）。`pipe-connect-v1`
+完整管道整改仍 **BLOCKED**（legacy `cells` verifier 无法表达逐格 edge mask，需新 ID/version）。
+M4、人工可读性、辅助技术、真机移动端、GIF disposal 与 Chrome/Firefox/WebKit 动画一致性、
+真实浏览器 E2E 全部 **NOT_RUN/BLOCKED**；`cmd/preview` 是自包含 text 页，非 text 答案会明确拒绝，
+不算交互预览验收。审计与门禁结果见 `docs/reviews/CAPTCHA-BANK-REMEDIATION-2026-11-12.md`。
+
 **尚未实现**：题型权重与多生成器选择、风险打分、自动淘汰、非视觉等价通道（音频等）、
 widget 的 `fallback_base` 与多站点配置面、阶段 4 的人工验收项（"题型人工各过 5 次"、辅助技术实测）、
 真机移动端验证（本轮窄屏是 headless 真实视口，不是真设备）、

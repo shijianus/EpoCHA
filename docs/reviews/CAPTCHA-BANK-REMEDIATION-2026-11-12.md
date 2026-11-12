@@ -9,18 +9,18 @@
 
 ## 0. 结论摘要
 
-1. 仓库当前登记 **12 个 generator**，全部 `experimental:true` / `production_ready:false`；schema 版本
+1. 仓库当前登记 **19 个 generator**，全部 `experimental:true` / `production_ready:false`；schema 版本
    `6`（迁移 `0001`–`0006`）；没有题型被证明抗 AI、抗 OCR 或可生产使用。
 2. `arithmetic-baseline-v1` 是**测试基线**：公开 payload 里的表达式可直接求值，M3 d1 最大单点概率
    约 4.5%–4.8%，3 次累计已超过 10% 红线。它只用于工程回归，**不是安全题型**。
 3. `accessible-choice-v1` 是**可访问替代路径**，不是强安全题型：12 选 1、单次随机猜中率约 8.3%，
    只允许显式 `accessibility:true` + 站点池显式包含 + 24h 一次。
-4. 现有 12 个题型的公共/私有分离、精确 HMAC 规范化入口、48B/208B/TSV 三种 verifier 形态、
-   单资产 64KB 预算、题池 worker 的有界批次与让步都已在代码和测试中落地；本轮新题型必须复用这些契约。
-5. 新题型（`tile-rotation-v1`、`symbol-path-v1`、`crowd-find-v1`、`visual-rank-v1`、
-   `progressive-target-v1`、`shell-track-v1`、`silhouette-assembly-v1`）与
-   `shape-grid-v1` 的 negative polarity 修饰器与 Wave 2 三个题型已按 ADR-031 实施；本文记录
-   审计事实、实施状态与仍然 NOT_RUN/BLOCKED 的边界。
+4. 原有 12 个题型的公共/私有分离、精确 HMAC 规范化入口、48B/208B/TSV 三种 verifier 形态、
+   单资产 64KB 预算、题池 worker 的有界批次与让步都已在代码和测试中落地；本轮 7 个新题型复用这些契约。
+5. Wave 1（`tile-rotation-v1`、`symbol-path-v1`、`crowd-find-v1`、`visual-rank-v1`）按 ADR-030、
+   Wave 2（`progressive-target-v1`、`shell-track-v1`、`silhouette-assembly-v1`）与
+   `shape-grid-v1` 的 negative polarity 修饰器按 ADR-031 实施；本文记录审计事实、实施状态与
+   仍然 NOT_RUN/BLOCKED 的边界。
 6. `pipe-connect-v1` 的现状是「点选主路径 2 个断点」，不是设计草案里的「旋转管道块 / 填满格子」；
    它的 verifier 只能表达一个 1-based 格子集合，**无法表达整张图的逐格 edge mask**。在不破坏
    已签发 verifier 语义的前提下，不能把它原地改成新题型；整改见 §9（BLOCKED / 设计 + 测试边界）。

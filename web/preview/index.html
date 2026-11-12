@@ -197,6 +197,12 @@ async function fetchChallenge() {
     busy(false);
     return;
   }
+  if (j.question.answer_type && j.question.answer_type !== "text") {
+    say("该题型需要交互控件（answer_type=" + j.question.answer_type +
+        "）；本预览页只支持 text 答案，请用生产 widget 或 cmd/exampleapp 预览。", "err");
+    busy(false);
+    return;
+  }
   current = { token: j.token, pow: j.pow, question: j.question, expires_in: j.expires_in };
   refreshCount++;
   lastFetchMs = Math.round(performance.now() - t0);

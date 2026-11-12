@@ -131,6 +131,10 @@ go run ./cmd/preview \
 `intersection-point-v1`、`tile-rotation-v1`、`symbol-path-v1`、`crowd-find-v1`、`visual-rank-v1`、
 `progressive-target-v1`、`shell-track-v1`、`silhouette-assembly-v1`、
 `arithmetic-baseline-v1`。预览只允许 loopback，不接受非回环监听地址。
+**注意**：`cmd/preview` 页面是自包含的 text 答案页（测试禁止外部 `<script src>`），
+非 `text` 题型会在页面上明确提示"本预览页只支持 text 答案"并停止，不会给一个误导性的
+文本输入框；交互题型的真实预览请用生产 widget 或 `cmd/exampleapp`。因此"新增题型出现在
+`--generator` 白名单"**不等于**"交互预览已验收"。
 
 ## 6. 离线样本与 OCR 基线
 

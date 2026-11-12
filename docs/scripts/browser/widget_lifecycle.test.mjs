@@ -133,7 +133,7 @@ function challenge(token = "challenge-1", expires = 0, question = null) {
   };
 }
 
-function harness(t, { honorAbort = false, options = {}, interactive = true } = {}) {
+function harness(t, { honorAbort = false, options = {}, interactive = true, reducedMotion = false } = {}) {
   const time = clock();
   const requests = [], workers = [], successes = [], errors = [], states = [], expired = [];
   const urls = new Set();
@@ -168,6 +168,7 @@ function harness(t, { honorAbort = false, options = {}, interactive = true } = {
   }
   const sandbox = {
     document, console, navigator: { language: "en" }, location: new URL("https://page.invalid/"),
+    matchMedia: (query) => ({ matches: reducedMotion && String(query).indexOf("prefers-reduced-motion") >= 0 }),
     URL: BrowserURL, Blob, Worker, AbortController, atob,
     Date: class extends Date { static now() { return time.now(); } },
     setTimeout: time.setTimeout, clearTimeout: time.clearTimeout,
@@ -859,6 +860,18 @@ test("交互模块加载失败：明确失败，不渲染半成品", async (t) =
     "模块失败时不得渲染可点击格子");
 });
 
+test("新交互题型的中文文案：指令与说明都来自既有 i18n 表", async (t) => {
+  const h = harness(t, { options: { language: "zh-CN" } });
+  h.requests[0].respond(rotateChallenge());
+  await flush();
+  assert.equal(h.api.state(h.id), "ready", JSON.stringify(h.errors));
+  assert.equal(h.host.getAttribute("lang"), "zh-CN");
+  const note = find(h.host.shadowRoot, (node) => node.getAttribute("class") === "note");
+  assert.ok(note.textContent.includes("路径块"), note.textContent);
+  const heading = find(h.host.shadowRoot, (node) => node.getAttribute("class") === "lbl");
+  assert.ok(heading.textContent.includes("旋转"), heading.textContent);
+});
+
 test("symbol-path 输入：相邻点击组成固定两位索引串，Backspace 撤销", async (t) => {
   const h = harness(t);
   h.requests[0].respond(pathChallenge());
@@ -1007,6 +1020,18 @@ test("shell-track 输入：动画结束前不可选，三轮后合成答案", as
   boxes[1].emit("click");
   assert.equal(h.answer.value, "v1:1.2.1");
   assert.equal(h.buttons[0].disabled, false);
+});
+
+test("shell-track + prefers-reduced-motion：明确失败，不强迫完成运动题", async (t) => {
+  const h = harness(t, { reducedMotion: true });
+  h.requests[0].respond(shellChallenge());
+  await flush();
+  assert.equal(h.api.state(h.id), "error");
+  assert.equal(h.errors.length, 1);
+  assert.equal(h.errors[0].code, "motion-required");
+  assert.equal(h.buttons[0].disabled, true);
+  assert.equal(findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell").length, 0,
+    "reduced-motion 下不得渲染可点击容器");
 });
 
 test("silhouette-assembly 输入：选择/旋转/放置，五格填满才合成答案", async (t) => {

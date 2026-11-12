@@ -300,9 +300,10 @@ Wave 1 四个题型已实现、登记并接入 widget；Wave 2 生成器代码�
 |---|---|---|---|
 | 生成器确定性/唯一解/资源上限 | PASS | `go test -count=1 ./internal/generator/`：`TestProgressiveTarget*`、`TestShellTrack*`、`TestSilhouetteAssembly*`、`TestSilhouetteCatalogIsUniqueUnderRotation` | Windows amd64 / Go 1.27.3 |
 | payload 不含目标/swap/mapping | PASS | 同上的 `*NoLeakInPayload`；payload 白名单 `SanitizePublic` | 同上 |
-| 登记（server/preview/devseed/admin/dispatch） | PASS（编译） | `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./cmd/... ./internal/... ./web/...` + `go vet` 同目标 | 交叉编译，未运行 |
+| 登记（server/preview/devseed/admin/dispatch） | PASS（编译）；预交互预览 **BLOCKED** | `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./cmd/... ./internal/... ./web/...` + `go vet` 同目标 | 交叉编译，未运行 |
 | dispatch 低风险/Motion | PASS | `go test ./internal/dispatch` 的 `TestNewInteractiveTypesStayLowRisk`；high/critical 权重为 0，shell 标记 Motion | Windows |
 | API 闭环 | **BLOCKED** | `internal/api` 的新增用例已编译（`go test -c` linux/arm64），但不能在本机执行（store `flock`） | Windows amd64 |
+| `cmd/preview` 交互题预览 | **BLOCKED** | 预览页是自包含 text 页，非 text 答案会明确拒绝并提示改用 widget；不给误导性输入框 | Windows |
 | 真实浏览器动画/GIF/cross-engine | **NOT_RUN** | shell-track 用服务端 PNG 雪碧图，不是 GIF；Chrome/Firefox/WebKit、GIF disposal、真机动画一致性未测 | — |
 | reduced-motion | PASS（逻辑） | `internal/dispatch` 测试排除 Motion；widget Node 工装覆盖 `motion-required` 失败路径；真实浏览器未测 | Windows/Node |
 | 人工可读性/辅助技术/真机移动端/M4 | **NOT_RUN** | 无真实参与者/设备/成本实验；不代填 | — |
@@ -322,3 +323,23 @@ Wave 2 三题型均 `experimental:true` / `production_ready:false`，默认不�
 - **`pipe-connect-v1`**：现状仍是 legacy cells 题型（恰好两个断点格），**不是**完整管道拼图。
   原地改会破坏已签发 verifier 语义，因此整改 **BLOCKED**；需要新 ID/version 与逐格 edge mask。
   `TestPipeConnectRemainsLegacyCellSelection` 钉住现状，防止文档漂移。
+
+## 14. 生成资源抽样（[实测 2026-11-12 / Windows amd64 开发机]）
+
+每种题型 100 次 `Generate`（difficulty=2，`crypto/rand` 熵源），payload 为
+`json.Marshal(Payload)` 字节数，asset 为 PNG 字节数。**不是目标机（1 vCPU/1GB）稳态**，
+也不是长期运行/满载数字；单次测量只用于确认没有数量级失控。
+
+| 题型 | 总耗时 | 平均 | 最大 | payload 平均/最大 | asset 平均/最大 | 生成失败 |
+|---|---|---|---|---|---|---|
+| `tile-rotation-v1` | 235ms | 2.35ms | 6.03ms | 474 / 474 B | 1,078 / 1,165 B | 0 |
+| `symbol-path-v1` | 357ms | 3.57ms | 8.31ms | 730 / 730 B | 4,587 / 5,022 B | 0 |
+| `crowd-find-v1` | 424ms | 4.25ms | 12.54ms | 678 / 678 B | 4,825 / 5,473 B | 0 |
+| `visual-rank-v1` | 313ms | 3.13ms | 5.24ms | 516 / 516 B | 1,707 / 1,856 B | 0 |
+| `progressive-target-v1` | 466ms | 4.67ms | 7.14ms | 525 / 525 B | 4,368 / 4,869 B | 0 |
+| `shell-track-v1` | 12,945ms | 129.46ms | 568.80ms | 654 / 654 B | 11,993 / 12,348 B | 0 |
+| `silhouette-assembly-v1` | 707ms | 7.07ms | 33.37ms | 753 / 753 B | 1,697 / 1,777 B | 0 |
+
+所有 payload 最大 753B（上限 8,192B）、asset 最大 12,348B（上限 65,536B）。
+`shell-track-v1` 的生成成本明显最高（33 帧雪碧图），只在题池 worker 预生成，
+不在 redeem 热路径；在目标机上必须重新测量，不能把本行当容量结论。

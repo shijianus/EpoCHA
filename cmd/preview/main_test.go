@@ -312,7 +312,8 @@ func TestPageIsSelfContainedNoFramework(t *testing.T) {
 		}
 	}
 	for _, need := range []string{`aria-live="polite"`, `<label for="answer"`, `img.alt = "人机验证图片`,
-		`crypto.subtle`, `/api/challenge?site_key=`, `/api/redeem?site_key=`, `/demo/verify`} {
+		`crypto.subtle`, `/api/challenge?site_key=`, `/api/redeem?site_key=`, `/demo/verify`,
+		`本预览页只支持 text 答案`} {
 		if !strings.Contains(page, need) {
 			t.Fatalf("页面缺少 %q：无障碍或闭环能力不完整", need)
 		}

@@ -343,3 +343,27 @@ Wave 2 三题型均 `experimental:true` / `production_ready:false`，默认不�
 所有 payload 最大 753B（上限 8,192B）、asset 最大 12,348B（上限 65,536B）。
 `shell-track-v1` 的生成成本明显最高（33 帧雪碧图），只在题池 worker 预生成，
 不在 redeem 热路径；在目标机上必须重新测量，不能把本行当容量结论。
+
+## 15. 最终门禁结果（2026-11-12，本机）
+
+环境：Windows amd64；**显式 PATH 指向已安装的 Go 1.27.3 toolchain + `GOTOOLCHAIN=local`**；
+无 Linux、无 WSL 发行版、Docker 守护进程不可达、无 Firefox、无 gcc。因此下面把
+"跑过的"和"跑不了的"分开写，不把交叉编译或 Node 工装冒充运行验收。
+
+| 检查 | 状态 | 命令 / 边界 |
+|---|---|---|
+| Go 单元测试（可在 Windows 编译的包） | PASS | `go test -count=1 ./internal/generator ./internal/dispatch ./internal/pow ./internal/token ./internal/risk ./internal/version ./web/widget ./web/adminui ./cmd/exampleapp ./cmd/preview ./cmd/evalocr ./cmd/blindtest`（Go 1.27.3 + local） |
+| Node widget/PoW 工装 | PASS | `node --test docs/scripts/browser/pow_vectors.test.mjs docs/scripts/browser/widget_lifecycle.test.mjs`：50/50 |
+| widget 体积 | PASS | `node docs/scripts/release-check.mjs --widget-size`：core 28,968 B / module 10,311 B / 合计 39,279 B |
+| gofmt | PASS | `release-check --fmt-check`（clean worktree） |
+| Linux arm64 交叉编译 | PASS（仅编译） | `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./cmd/... ./internal/... ./web/...` |
+| Linux arm64 交叉 vet | PASS（仅静态分析） | 同上目标 `go vet` |
+| store/api/admin/server/preview/devseed 测试二进制编译 | PASS（仅编译） | `go test -c` 到 linux/arm64；**未执行** |
+| engineering release check（clean worktree） | INCOMPLETE（exit 3） | `node docs/scripts/release-check.mjs --profile engineering`：非 Linux 项全 PASS；`linux-host`、`go-test`、`go-race`、`static-build`、`binary-size`、`secret-scan`、`key-permission`、`race-compiler`、`gnu-make` 为 BLOCKED |
+| Linux 全量 `go test -race -count=1 ./...` | **BLOCKED** | 本机无 Linux；Windows 无 gcc，race detector 不可用 |
+| `internal/api` / `internal/store` / `cmd/server` 真实运行 | **BLOCKED** | `internal/store/lock.go` 的 `syscall.Flock` 在 Windows 不存在；未用 shim 冒充 |
+| 真实浏览器交互 / 320px 视口 / 动画/GIF cross-engine | **BLOCKED / NOT_RUN** | 本机无 Firefox；无可用服务实例 |
+| M4 / 人工可读性 / 辅助技术 / 真机移动端 | **NOT_RUN** | 无成本实验/参与者/设备；不代填 |
+
+结论：**工程实现与可在本机执行的测试已跑绿；完整验收仍不通过**。不得据此打
+`stage-*-done` 标签，也不得声称 F-01、B-03、正式 arm64 验收或发布候选已解决。

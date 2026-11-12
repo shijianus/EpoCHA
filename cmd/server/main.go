@@ -544,6 +544,21 @@ func knownGenerators(qKey []byte) ([]generator.Generator, error) {
 		return nil, fmt.Errorf("视觉排序题型: %w", err)
 	}
 	out = append(out, rank)
+	progressive, err := generator.NewProgressiveTarget(qKey)
+	if err != nil {
+		return nil, fmt.Errorf("渐进定位题型: %w", err)
+	}
+	out = append(out, progressive)
+	shell, err := generator.NewShellTrack(qKey)
+	if err != nil {
+		return nil, fmt.Errorf("容器跟踪题型: %w", err)
+	}
+	out = append(out, shell)
+	silhouette, err := generator.NewSilhouetteAssembly(qKey)
+	if err != nil {
+		return nil, fmt.Errorf("轮廓装配题型: %w", err)
+	}
+	out = append(out, silhouette)
 	return out, nil
 }
 

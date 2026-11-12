@@ -118,7 +118,9 @@ func TestCatalogAndFallback(t *testing.T) {
 		generator.ArithID, generator.TextImageID, generator.TextImageV2ID, generator.TextImageV3ID,
 		generator.ShapeGridID, generator.ShapeCountID, generator.ParallaxID, generator.BankShotID,
 		generator.AccessibleChoiceID, generator.EnergyWindowID, generator.PipeConnectID,
-		generator.IntersectionPointID,
+		generator.IntersectionPointID, generator.TileRotationID, generator.SymbolPathID,
+		generator.CrowdFindID, generator.VisualRankID,
+		generator.ProgressiveTargetID, generator.ShellTrackID, generator.SilhouetteAssemblyID,
 	} {
 		if _, ok := cat[id]; !ok {
 			t.Fatalf("Catalog 缺 %s", id)
@@ -127,5 +129,36 @@ func TestCatalogAndFallback(t *testing.T) {
 	f := FallbackCandidate("unknown-v1")
 	if f.ID != "unknown-v1" || Weight(f, Request{Band: BandCritical, Device: DeviceTouch}) == 0 {
 		t.Fatalf("Fallback 权重不合法: %+v", f)
+	}
+}
+
+func TestNewInteractiveTypesStayLowRisk(t *testing.T) {
+	cat := Catalog()
+	for _, id := range []string{
+		generator.TileRotationID, generator.SymbolPathID, generator.CrowdFindID,
+		generator.VisualRankID, generator.ProgressiveTargetID,
+		generator.ShellTrackID, generator.SilhouetteAssemblyID,
+	} {
+		c, ok := cat[id]
+		if !ok {
+			t.Fatalf("Catalog 缺 %s", id)
+		}
+		if Weight(c, Request{Band: BandLow, Device: DeviceDesktop}) == 0 ||
+			Weight(c, Request{Band: BandMedium, Device: DeviceTouch}) == 0 {
+			t.Fatalf("%s 在 low/medium 应可用", id)
+		}
+		if Weight(c, Request{Band: BandHigh, Device: DeviceDesktop}) != 0 ||
+			Weight(c, Request{Band: BandCritical, Device: DeviceDesktop}) != 0 {
+			t.Fatalf("%s 不应进入 high/critical（实验题型）", id)
+		}
+	}
+	if !cat[generator.ShellTrackID].Motion {
+		t.Fatal("shell-track 必须标记 Motion")
+	}
+	if Weight(cat[generator.ShellTrackID], Request{Band: BandLow, Device: DeviceDesktop, NoMotion: true}) != 0 {
+		t.Fatal("prefers-reduced-motion 必须排除 shell-track")
+	}
+	if cat[generator.ProgressiveTargetID].Motion || cat[generator.SilhouetteAssemblyID].Motion {
+		t.Fatal("静态题型不应标记 Motion")
 	}
 }

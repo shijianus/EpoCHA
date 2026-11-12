@@ -797,7 +797,8 @@ func generatorLifecycle(id string) (experimental, productionReady bool) {
 		generator.AccessibleChoiceID, generator.EnergyWindowID, generator.PipeConnectID,
 		generator.IntersectionPointID,
 		generator.TileRotationID, generator.SymbolPathID, generator.CrowdFindID,
-		generator.VisualRankID:
+		generator.VisualRankID, generator.ProgressiveTargetID, generator.ShellTrackID,
+		generator.SilhouetteAssemblyID:
 		return true, false
 	default:
 		// 没登记结论的题型：按最保守的一档报，绝不让"忘了写"变成"看起来可用"
@@ -825,7 +826,8 @@ func noteForGenerator(id string) string {
 			"图片中可见字符本来就要给答题者看，不具备密码学保密性；" +
 			"M4/OCR 基线、多模态、人工可读性均未验收（NOT_RUN），production_ready 保持 false"
 	case generator.ShapeGridID:
-		return "图形点选题（3×3，点选所有满足判据的格子）：非纯文字输入；" +
+		return "图形点选题（3×3，点选所有满足判据的格子；kind/category 模式可带 negative polarity " +
+			"指令修饰器，k 仍 2/3、答案空间不变，不提高随机猜测下界）：非纯文字输入；" +
 			"图形对机器视觉并不难，M4 未测，不声称抗 AI；" +
 			"人工可读性、辅助技术与真机移动端未验收，production_ready 保持 false"
 	case generator.ShapeCountID:
@@ -872,6 +874,18 @@ func noteForGenerator(id string) string {
 		return "视觉排序题（5 张折线卡，按线段数从少到多排列；卡片 ID 随机）：" +
 			"单次 1/120，3 次 2.5%；M4/人工可读性/辅助技术 NOT_RUN，不声称抗 AI；" +
 			"production_ready 保持 false"
+	case generator.ProgressiveTargetID:
+		return "渐进定位题（三轮 3×3，每轮点击与顶部样本相同的图形；客户端不判对错）：" +
+			"单次 1/729，3 次约 0.41%；M4/人工可读性/辅助技术 NOT_RUN，不声称抗 AI；" +
+			"production_ready 保持 false"
+	case generator.ShellTrackID:
+		return "容器跟踪题（三轮四容器交换，服务端预渲染帧；动画结束前不可选）：" +
+			"单次 1/64，3 次约 4.7%；动画/重播的一致性未做跨浏览器实测，" +
+			"M4/人工可读性/辅助技术 NOT_RUN，不声称抗 AI；production_ready 保持 false"
+	case generator.SilhouetteAssemblyID:
+		return "轮廓装配题（5 部件/5 槽位，离散旋转与放置；生成器枚举唯一匹配）：" +
+			"答案空间 5!×4^5，3 次随机猜测上界约 2.4e-5；M4/人工可读性/辅助技术 NOT_RUN，" +
+			"不声称抗 AI；production_ready 保持 false"
 
 	default:
 		return ""

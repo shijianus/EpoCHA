@@ -774,9 +774,39 @@ Wave 1 已登记：
 - 资源：payload ≤8KB、verifier ≤4KB、单资产 ≤64KB；网格/帧数/路径长度/DFS 节点均有上限；
   重计算只在题池 worker，不在 redeem 热路径。
 - Wave 2（`progressive-target-v1`、`shell-track-v1`、`silhouette-assembly-v1`）与 negative polarity
-  修饰器、`pipe-connect` 完整管道整改见 `docs/reviews/CAPTCHA-BANK-REMEDIATION-2026-11-12.md`。
-  `pipe-connect-v1` 的现状 verifier 只能表达 2 个断点格，无法表达整张图的逐格 edge mask；
-  在不动已签发 verifier 语义的前提下标记 **BLOCKED**，不得用客户端 `solved=true` 代替服务端验证。
+  修饰器、`pipe-connect` 完整管道整改见 §8.9、ADR-031 与
+  `docs/reviews/CAPTCHA-BANK-REMEDIATION-2026-11-12.md`。`pipe-connect-v1` 的现状 verifier
+  只能表达 2 个断点格，无法表达整张图的逐格 edge mask；在不动已签发 verifier 语义的前提下
+  标记 **BLOCKED**，不得用客户端 `solved=true` 代替服务端验证。
+
+### 8.9 2026-11-12 交互原语 Wave 2、negative polarity 与 pipe-connect 边界（ADR-031）
+
+Wave 2 已登记三个题型；它们与 Wave 1 共用离散 canonical answer 与 48B 精确 HMAC：
+
+| ID | 交互 | canonical answer | 唯一解/边界 | 3 次随机猜测上界 |
+|---|---|---|---|---|
+| `progressive-target-v1` | 三轮 3×3 定位，客户端逐轮推进不判对错 | `v1:a.b.c`（`sequence`） | 每轮生成器只放一个目标字形；干扰字形永不等同 | `1/9^3 = 1/729`；3 次 `3/729 ≈ 0.41%` |
+| `shell-track-v1` | 三轮四容器，服务端预渲染 33 帧雪碧图 | `v1:a.b.c`（`sequence`） | 目标只由 swap 序列在服务端推进；payload 无 swap/目标索引 | `1/4^3 = 1/64`；3 次 `3/64 ≈ 4.69%` |
+| `silhouette-assembly-v1` | 5 部件/5 槽位，旋转后离散放置 | `v1:id:rot,...`（`placements`） | 枚举 piece×slot×rotation，只接受恰好一个完整匹配；部件无旋转对称且两两不在 D4 下等价 | `5!×4^5 = 122,880`；3 次 ≈ `2.45e-5` |
+
+- `shell-track-v1` 的动画是**服务端 worker 预生成**的 PNG 雪碧图（11 帧/轮 × 3 轮），
+  不是把 swap sequence 下发给浏览器再用 CSS/JS 动画。为什么不用 GIF：现有题池单资产且
+  `asset_mime` CHECK 只允许 PNG；三轮需要在轮次边界暂停，单张 GIF 无法表达。GIF 的
+  disposal/时序与 Chrome/Firefox/WebKit 一致性 **NOT_RUN**，不声称通过。
+- `shell-track-v1` 标记 `Motion:true`：`prefers-reduced-motion` 请求在 dispatch 层被排除；
+  widget 也会明确失败并提示换题，不强迫用户完成运动题。
+- **negative polarity** 只修饰 `shape-grid-v1` 的 kind/category 模式：k 仍 2/3，答案空间仍是
+  `C(9,k)`；至少 2 个应选、至少 2 个不应选；fill 模式固定 positive。提示只有一层否定
+  （中文「不是」/英文 NOT），不依赖颜色，不用"除了……以外不……"；positive/negative 错误率
+  必须分开记录。它不提高随机猜测下界，也不得写成"显著提高安全性"。
+- **`pipe-connect-v1` 仍是 legacy cells 题型**：答案只是两个断点格，不能表达多对端点配对、
+  路径不交叉、每格被占用、唯一解或逐格 edge mask。原地改会破坏已签发 verifier 语义，
+  因此整改标记 **BLOCKED**，必须新开 ID/version；新增测试
+  `TestPipeConnectRemainsLegacyCellSelection` 钉住现状。
+- 资源：payload ≤8KB、verifier ≤4KB、单资产 ≤64KB；33 帧雪碧图 1680×600 在客户端
+  2048×2048 形状上限内；生成失败有界重试，不降级成固定题。
+- 全部 Wave 2 题型与 polarity 仍为 `experimental:true` / `production_ready:false`；
+  M4、人工可读性、辅助技术、真机移动端、抗 AI/抗 OCR 全部 **NOT_RUN**。
 
 ## 9. 风险打分层（第三层，阶段 3+ 实现）
 
@@ -1489,6 +1519,15 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
 | R12 | 池容量不足时公共请求直接吃 503（不降级是正确的，但对调用方表现为"暂时不可用"） | 默认水位 50/100 与 20000 行上限都是 `[目标]`，**未经真实流量校准** | 3B/阶段 5 按 `[实测]` 到达率重设水位；运维侧先用 `/api/admin/pool` 观测 |
 
 ## 19. 变更日志
+
+- 2026-11-12 **交互原语 Wave 2 + negative polarity（ADR-031）**：新增 `progressive-target-v1`
+  （三轮 3×3 定位）、`shell-track-v1`（三轮四容器，服务端预渲染 33 帧 PNG 雪碧图，`Motion:true`）、
+  `silhouette-assembly-v1`（5 部件/5 槽位离散旋转装配）；`shape-grid-v1` 增加 negative polarity
+  指令修饰器（kind/category，固定 k=2/3，fill 固定 positive）。三者均登记到 server/preview/devseed/
+  admin/dispatch，全部 `experimental:true` / `production_ready:false`。`pipe-connect-v1` 完整管道整改
+  继续 BLOCKED（legacy cells verifier 无法表达逐格 edge mask，需新 ID/version）。
+  `web/widget/v1.interactive.js` 成为按需模块（核心 gzip 28,909 B / 模块 10,311 B / 合计 39,220 B）；
+  GIF 与 Chrome/Firefox/WebKit 动画一致性、M4、人工可读性、辅助技术、真机移动端均 **NOT_RUN**。
 
 - 2026-11-12 **交互原语 Wave 1（ADR-030）**：新增 `tile-rotation-v1`（3×3 路径块旋转，唯一解枚举）、
   `symbol-path-v1`（6×6 符号路径，DFS 唯一匹配路径）、`crowd-find-v1`（36 选 1 程序化非人形角色）、

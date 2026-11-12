@@ -238,3 +238,42 @@ func TestPipeConnectBrokenCellsLookAlike(t *testing.T) {
 		}
 	}
 }
+
+// TestPipeConnectRemainsLegacyCellSelection 钉住现状边界：pipe-connect-v1 的 verifier
+// 只表达"两个断点格"的 cells 集合，不能表达每格 edge mask / 路径覆盖 / 端点配对。
+// 这不是完整管道拼图；整改必须新开 ID/version（见审计文档 §9），不得原地改变已签发语义。
+func TestPipeConnectRemainsLegacyCellSelection(t *testing.T) {
+	key := bytes.Repeat([]byte{0x6a}, 32)
+	g, err := NewPipeConnect(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, err := g.Generate(context.Background(), Params{Difficulty: 2}, pipeStream(t, "pipe-legacy-shape"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, ok := q.Payload.(PipeConnectPublic)
+	if !ok {
+		t.Fatalf("pipe-connect-v1 payload 类型 = %T", q.Payload)
+	}
+	if pub.AnswerType != AnswerTypeCells {
+		t.Fatalf("pipe-connect-v1 answer_type = %q，期望 cells", pub.AnswerType)
+	}
+	if len(q.Verifier) != AnswerVerifierLen {
+		t.Fatalf("pipe-connect-v1 verifier 长度 = %d，期望精确 HMAC %d", len(q.Verifier), AnswerVerifierLen)
+	}
+	answer, err := PipeConnectAnswerFrom(pipeStream(t, "pipe-legacy-shape"), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.Split(answer, ",")
+	if len(parts) != 2 {
+		t.Fatalf("pipe-connect-v1 答案 = %q，应恰好两个断点格", answer)
+	}
+	raw, _ := json.Marshal(q.Payload)
+	for _, forbidden := range []string{`"masks":`, `"edges":`, `"solution_path":`, `"endpoint_pairs":`} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("pipe-connect-v1 不应声称完整管道状态，payload 含 %s: %s", forbidden, raw)
+		}
+	}
+}

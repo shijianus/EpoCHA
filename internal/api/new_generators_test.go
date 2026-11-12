@@ -5,16 +5,17 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/shijianus/EpoCHA/internal/generator"
 )
 
-// Wave 1（ADR-030）新题型的 API 闭环：DTO 形状、正确答案、一次性消费、错误答案终结。
+// ADR-030 新题型（Wave 1 + Wave 2）的 API 闭环：DTO 形状、正确答案、一次性消费、错误答案终结。
 // fixture 的 verifier 直接用生成器产物，因为生成器的线格式已在 internal/generator 里被
 // 独立测试覆盖；这里证明的是"登记 → 领题 → redeem → 一次性"这条链路。
 
-func wave1Fixture(t *testing.T, genID, seed string) seededQuestion {
+func generatorFixture(t *testing.T, genID, seed string) seededQuestion {
 	t.Helper()
 	stream := "epocha-api-wave1-" + genID + "-" + seed
 	var (
@@ -43,6 +44,21 @@ func wave1Fixture(t *testing.T, genID, seed string) seededQuestion {
 		if err == nil {
 			answer, err = generator.VisualRankAnswerFrom(evalStream(t, stream))
 		}
+	case generator.ProgressiveTargetID:
+		g, err = generator.NewProgressiveTarget(tokenQuestionKey(t))
+		if err == nil {
+			answer, err = generator.ProgressiveTargetAnswerFrom(evalStream(t, stream))
+		}
+	case generator.ShellTrackID:
+		g, err = generator.NewShellTrack(tokenQuestionKey(t))
+		if err == nil {
+			answer, err = generator.ShellTrackAnswerFrom(evalStream(t, stream))
+		}
+	case generator.SilhouetteAssemblyID:
+		g, err = generator.NewSilhouetteAssembly(tokenQuestionKey(t))
+		if err == nil {
+			answer, err = generator.SilhouetteAssemblyAnswerFrom(evalStream(t, stream))
+		}
 	default:
 		t.Fatalf("未知 Wave 1 题型 %q", genID)
 	}
@@ -62,7 +78,7 @@ func wave1Fixture(t *testing.T, genID, seed string) seededQuestion {
 	}
 }
 
-func wrongWave1Answer(genID, answer string) string {
+func wrongInteractiveAnswer(genID, answer string) string {
 	switch genID {
 	case generator.TileRotationID:
 		if answer == "v1:000000000" {
@@ -86,6 +102,27 @@ func wrongWave1Answer(genID, answer string) string {
 			return "v1:E.D.C.B.A"
 		}
 		return "v1:A.B.C.D.E"
+	case generator.ProgressiveTargetID, generator.ShellTrackID:
+		// 三轮序列：改最后一轮，保持格式合法且与答案不同。
+		if answer == "v1:0.0.0" {
+			return "v1:0.0.1"
+		}
+		return "v1:0.0.0"
+	case generator.SilhouetteAssemblyID:
+		// v1:id:rot,...：把第一个 slot 的 rotation 换成另一个桶（仍合法）。
+		parts := strings.Split(strings.TrimPrefix(answer, "v1:"), ",")
+		if len(parts) == 5 {
+			fields := strings.Split(parts[0], ":")
+			if len(fields) == 2 {
+				rot := "0"
+				if fields[1] == "0" {
+					rot = "1"
+				}
+				parts[0] = fields[0] + ":" + rot
+				return "v1:" + strings.Join(parts, ",")
+			}
+		}
+		return "v1:0:0,1:0,2:0,3:0,4:0"
 	}
 	return "v1:"
 }
@@ -103,7 +140,7 @@ func TestWave1GeneratorsChallengeAndRedeem(t *testing.T) {
 		t.Run(tc.id, func(t *testing.T) {
 			h := newHarness(t, nil)
 			site, _ := h.siteWithGenerator(t, tc.id, tc.siteKey, tc.id, 2)
-			fx := wave1Fixture(t, tc.id, "correct")
+			fx := generatorFixture(t, tc.id, "correct")
 			h.seedQuestions(t, site.Policy.Difficulty, fx)
 
 			r := h.challengeReply(tc.siteKey)
@@ -147,12 +184,12 @@ func TestWave1GeneratorsWrongAnswerTerminates(t *testing.T) {
 		t.Run(tc.id, func(t *testing.T) {
 			h := newHarness(t, nil)
 			site, _ := h.siteWithGenerator(t, tc.id+"-wrong", tc.siteKey, tc.id, 2)
-			fx := wave1Fixture(t, tc.id, "wrong")
+			fx := generatorFixture(t, tc.id, "wrong")
 			h.seedQuestions(t, site.Policy.Difficulty, fx)
 
 			r := h.challengeReply(tc.siteKey)
 			questionOf(t, r)
-			wrong := wrongWave1Answer(tc.id, fx.Answer)
+			wrong := wrongInteractiveAnswer(tc.id, fx.Answer)
 			if wrong == fx.Answer {
 				t.Fatalf("测试夹具没有产生错误答案")
 			}
@@ -161,6 +198,79 @@ func TestWave1GeneratorsWrongAnswerTerminates(t *testing.T) {
 				t.Fatalf("错误答案竟然通过: %s", rr.body)
 			}
 			// 错误答案已提交终态：再提交正确答案仍必须失败。
+			again := h.redeemAnswer(r.str("token"), h.solvePow(t, r), fx.Answer)
+			if again.status == http.StatusOK {
+				t.Fatalf("错误答案后第二次兑换竟然成功: %s", again.body)
+			}
+		})
+	}
+}
+
+func TestWave2GeneratorsChallengeAndRedeem(t *testing.T) {
+	cases := []struct {
+		id, siteKey, answerType string
+	}{
+		{generator.ProgressiveTargetID, "sk-progressive", "sequence"},
+		{generator.ShellTrackID, "sk-shell", "sequence"},
+		{generator.SilhouetteAssemblyID, "sk-silhouette", "placements"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			h := newHarness(t, nil)
+			site, _ := h.siteWithGenerator(t, tc.id, tc.siteKey, tc.id, 2)
+			fx := generatorFixture(t, tc.id, "correct")
+			h.seedQuestions(t, site.Policy.Difficulty, fx)
+
+			r := h.challengeReply(tc.siteKey)
+			q := questionOf(t, r)
+			if q["answer_type"] != tc.answerType || q["generator"] != tc.id {
+				t.Fatalf("DTO 形状不符: %v", q)
+			}
+			if q["media"] != "image" || q["image_base64"] == "" {
+				t.Fatalf("Wave 2 题型必须是内联图片: %v", q)
+			}
+			for _, forbidden := range []string{"answer", "verifier", "seed", "target_index", "target_start", "target_final", "swaps"} {
+				if _, ok := q[forbidden]; ok {
+					t.Fatalf("公开 DTO 含禁用字段 %q: %v", forbidden, q)
+				}
+			}
+			rr := h.redeemAnswer(r.str("token"), h.solvePow(t, r), fx.Answer)
+			if rr.status != http.StatusOK {
+				t.Fatalf("正确答案未通过兑换：%d %s", rr.status, rr.body)
+			}
+			again := h.redeemAnswer(r.str("token"), h.solvePow(t, r), fx.Answer)
+			if again.status == http.StatusOK {
+				t.Fatalf("同一 challenge 第二次兑换竟然成功: %s", again.body)
+			}
+		})
+	}
+}
+
+func TestWave2GeneratorsWrongAnswerTerminates(t *testing.T) {
+	cases := []struct {
+		id, siteKey string
+	}{
+		{generator.ProgressiveTargetID, "sk-progressive-wrong"},
+		{generator.ShellTrackID, "sk-shell-wrong"},
+		{generator.SilhouetteAssemblyID, "sk-silhouette-wrong"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			h := newHarness(t, nil)
+			site, _ := h.siteWithGenerator(t, tc.id+"-wrong", tc.siteKey, tc.id, 2)
+			fx := generatorFixture(t, tc.id, "wrong")
+			h.seedQuestions(t, site.Policy.Difficulty, fx)
+
+			r := h.challengeReply(tc.siteKey)
+			questionOf(t, r)
+			wrong := wrongInteractiveAnswer(tc.id, fx.Answer)
+			if wrong == fx.Answer {
+				t.Fatalf("测试夹具没有产生错误答案")
+			}
+			rr := h.redeemAnswer(r.str("token"), h.solvePow(t, r), wrong)
+			if rr.status == http.StatusOK {
+				t.Fatalf("错误答案竟然通过: %s", rr.body)
+			}
 			again := h.redeemAnswer(r.str("token"), h.solvePow(t, r), fx.Answer)
 			if again.status == http.StatusOK {
 				t.Fatalf("错误答案后第二次兑换竟然成功: %s", again.body)

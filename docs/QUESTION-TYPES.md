@@ -24,6 +24,13 @@
 | `symbol-path-v1` | image | `path` | 6×6 符号路径，按目标序列连接相邻格；唯一匹配路径由 DFS 证明 | 否（M4/人工可读性 NOT_RUN） |
 | `crowd-find-v1` | image | `select` | 36 个程序化非人形角色，点击与顶部样本完全相同的一个 | 否（M4/人工可读性 NOT_RUN） |
 | `visual-rank-v1` | image | `order` | 5 张折线卡按线段数从少到多排列 | 否（M4/人工可读性 NOT_RUN） |
+| `progressive-target-v1` | image | `sequence` | 三轮 3×3 定位，客户端逐轮推进不判对错 | 否（M4/人工可读性 NOT_RUN） |
+| `shell-track-v1` | image | `sequence` | 三轮四容器交换；服务端预渲染 33 帧雪碧图，动画结束前不可选 | 否（M4/跨浏览器动画 NOT_RUN） |
+| `silhouette-assembly-v1` | image | `placements` | 5 部件/5 槽位离散旋转装配，唯一匹配由枚举证明 | 否（M4/人工可读性 NOT_RUN） |
+
+`shape-grid-v1` 还有一个 **negative polarity** 指令修饰器：kind/category 模式可出"选出所有
+**不是** X 的格子"；k 仍为 2/3，至少 2 个应选、至少 2 个不应选，fill 模式固定 positive。
+它只改变指令表达，不改变答案空间或 verifier，不得描述为显著提高安全性。
 
 所有题型在管理面 `/api/admin/generators` 里都返回 `experimental:true` / `production_ready:false`。
 **没有**任何题型被证明抗 AI、抗 OCR、抗多模态或已完成人工可读性验收。
@@ -45,7 +52,9 @@ curl -sS -X POST "$ADMIN_BASE/api/admin/sites" \
 ```
 
 管理控制台的创建/详情页会从 `/api/admin/generators` 动态列出全部题型；
-widget 按题面的 `answer_type` 自动切换控件（`text/cells/pairs/angle/point/timing` 六种）。
+widget 按题面的 `answer_type` 自动切换控件（`text/cells/pairs/angle/point/timing` 与
+`masks/path/select/order/sequence/placements` 共 12 种）；后 6 种由按需加载的
+`v1.interactive.js` 提供，核心 `v1.js` 不因实验题型膨胀。
 `EPOCHA_GENERATORS` 是**进程级白名单**：留空 = 全部启用；填了列表就只有列表里的题型能领题。
 关掉一个题型不会让已签发但未作答的 challenge 静默降级——它会得到 503 可重试（见 DESIGN §8.4）。
 
@@ -74,7 +83,7 @@ Phase 1（ADR-025）定义的 `angle`（0.1° 整数）、`point`（`x,y` 千分
 `cells` 的规范化只把"同一集合的另一种写法"折叠掉，**不扩大接受域**：一个 challenge 只接受
 唯一一个规范化集合。
 
-## 4. widget 的六种输入
+## 4. widget 的输入类型
 
 - `text`：文本输入（v1/v2/v3）。v3 的题面带 `"tolerant":1`，widget 会追加一行
   "本题最多允许 1 个字符认错"的说明。
@@ -92,8 +101,13 @@ Phase 1（ADR-025）定义的 `angle`（0.1° 整数）、`point`（`x,y` 千分
   路径线只表示用户输入；达到目标长度才合成 `v1:NN.NN...`。
 - `select`：36 选 1。点击/键盘选择单个角色；提交前可改选，只有最后一个索引进入答案。
 - `order`：5 卡排序。点击卡片加入顺序栏，已选卡不会重复；Undo 撤销最后一张；选满 5 张才合成答案。
+- `sequence`：固定 n 轮的单值序列。`progressive-target` 逐轮推进并在每轮重建 3×3 按钮；
+  `shell-track` 播放服务端预渲染帧，每轮动画结束前按钮 disabled，三轮都选完才合成答案。
+- `placements`：5 部件托盘 + 5 槽位。选择部件、独立 Rotate 按钮改朝向、点击槽位放置；
+  已占用槽位再放置会把原部件返回托盘（确定行为）；Undo/Reset 不生成 token、不改服务端 challenge；
+  五格填满才合成 `v1:id:rot,...`。
 
-六种输入都已有登记题型使用；widget 不解释答案、不做判定；隐藏字段仍然只承载一次性 response token（验证通过后），
+这些输入都已有登记题型使用；widget 不解释答案、不做判定；隐藏字段仍然只承载一次性 response token（验证通过后），
 答案只通过 `/api/redeem` 发给服务端。服务端文本只进 `textContent`，没有 HTML 拼接。
 
 ## 5. 本地预览
@@ -115,6 +129,7 @@ go run ./cmd/preview \
 `--generator` 支持全部已登记题型：`text-image-v1/v2/v3`、`shape-grid-v1`、`shape-count-v1`、
 `parallax-code-v1`、`bank-shot-v1`、`accessible-choice-v1`、`energy-window-v1`、`pipe-connect-v1`、
 `intersection-point-v1`、`tile-rotation-v1`、`symbol-path-v1`、`crowd-find-v1`、`visual-rank-v1`、
+`progressive-target-v1`、`shell-track-v1`、`silhouette-assembly-v1`、
 `arithmetic-baseline-v1`。预览只允许 loopback，不接受非回环监听地址。
 
 ## 6. 离线样本与 OCR 基线
@@ -155,6 +170,9 @@ OCR 不是它们的威胁模型，它们对机器视觉本来就容易（见 §7
 | `symbol-path-v1` | 自避路径 × 目标符号排列 × 干扰符号 | 合法位置路径 ≥128；符号匹配路径由 DFS 证明恰好 1 条 | 盲猜合法路径 `1/128`；3 次 ≈2.34% | **未测** |
 | `crowd-find-v1` | 6 特征组合 × 目标位置 × 干扰组合 | 36 个角色中目标签名恰好 1 个 | `1/36`；3 次上界 `3/36 = 8.33%` | **未测** |
 | `visual-rank-v1` | 5 个线段数 × 卡片排列 × 公开 ID 排列 | 5! 个排列中唯一一个 | `1/120`；3 次 `2.5%` | **未测** |
+| `progressive-target-v1` | 三轮独立目标字形 × 每轮 9 格 | 每轮恰好一个目标格；`9^3` 个序列 | `1/729`；3 次 ≈`0.41%` | **未测** |
+| `shell-track-v1` | 三轮目标起点 × 每轮 4 次交换 | 四容器、三轮；`4^3=64` 个最终序列 | `1/64`；3 次 ≈`4.69%` | **未测** |
+| `silhouette-assembly-v1` | 5 部件无放回 × 槽位旋转 × 公开 ID 排列 | 唯一 `slot→piece+rotation` 映射 | `1/(5!×4^5)=1/122880`；3 次 ≈`2.45e-5` | **未测** |
 
 `shape-grid` / `shape-count` 的 M3 计算假设攻击者在**正确的 k/正确数量范围**内均匀猜；
 如果它连 k 都不知道，接受域更小。两者都在 3 次尝试的 10% 红线以内，但这只是"随机猜不通"，
@@ -204,13 +222,20 @@ v1/v2 仍是 48B 的精确 HMAC，路径与长度不变。
   不是同一站点自动轮换。
 - **从 N 个图形里点一个的单选题**：N 只有 4..12，3 次尝试通过率超过 10% 红线，没有实现。
   `intersection-point-v1` 是连续坐标点选（网格量化 + 3×3 容差），不是这一形态，不能拿它的 M3 为 N 选 1 背书。
-- **自由拖拽/旋转拼图/大面积区域容差**：未实现；会放大接受域，需要另一套判分构造。
-  已实现的是受限形态：`bank-shot-v1` 的角度滑块（0.1° + TSV）与 `intersection-point-v1` 的点击点（9 格上限）。
+- **自由拖拽/浮点坐标/大面积区域容差**：未实现；会放大接受域，需要另一套判分构造。
+  已实现的是受限形态：`bank-shot-v1` 的角度滑块（0.1° + TSV）、`intersection-point-v1` 的点击点
+  （9 格上限）与 `silhouette-assembly-v1` 的离散旋转/槽位放置（不上传浮点坐标）。
 - **非视觉等价通道（音频等）**：未实现；PoW-only 降级不是等效替代。
+- **`shell-track-v1` 的 reduced-motion**：dispatch 对 `Motion:true` 的候选在
+  `prefers-reduced-motion` 请求下直接排除；如果站点的 `generator_pool` 只有 `shell-track-v1`，
+  该请求会得到可重试的 `challenge-unavailable`，**不会**降级成普通题或 PoW-only。运营者必须
+  在池里显式加入一个非 Motion 题型，才算提供"更换其他验证"。
 - **人工可读性、辅助技术、真机移动端、M4、抗 AI/抗 OCR**：全部 NOT_RUN。
   人工可读性必须在目标设备上按 `docs/MANUAL-ACCEPTANCE.md` 的方式另行验收；
   本文件与生成器测试里的覆盖率/几何断言只证明"字没被擦掉/图形没被裁切"，不证明"人能读出来"。
-- **Wave 2 交互题**（`progressive-target-v1`、`shell-track-v1`、`silhouette-assembly-v1`）与
-  **negative polarity 修饰器**、`pipe-connect` 完整管道整改：见 `docs/reviews/CAPTCHA-BANK-REMEDIATION-2026-11-12.md`。
+- **Wave 2 交互题**（`progressive-target-v1`、`shell-track-v1`、`silhouette-assembly-v1`）已实现并登记；
+  `shape-grid-v1` 的 negative polarity 修饰器已实现（kind/category，fill 固定 positive）。
+  三题型仍 `experimental:true` / `production_ready:false`；`shell-track` 的服务端 PNG 雪碧图路径
+  已有 Node 工装，但 GIF disposal 与 Chrome/Firefox/WebKit 动画一致性 **NOT_RUN**。
   `pipe-connect-v1` 现状只是"点选两个断点"，verifier 无法表达完整逐格 edge mask；在不动其已签发
   verifier 语义的前提下标记 **BLOCKED**，不得用客户端 `solved=true` 代替服务端验证。

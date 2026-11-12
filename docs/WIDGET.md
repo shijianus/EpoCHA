@@ -195,7 +195,8 @@ idle → loading → ready → solving → submitting → verified
 
 `onError` 的 `code` 集合：`network` `timeout` `rate-limited` `challenge-unavailable`
 `invalid-challenge` `invalid-request` `expired` `worker-blocked` `worker-unsupported`
-`worker-unavailable` `pow-timeout` `pow-exhausted` `image-unusable` `bad-response` `http-<status>`。
+`worker-unavailable` `pow-timeout` `pow-exhausted` `image-unusable` `bad-response`
+`interactive-unavailable` `motion-required` `http-<status>`。
 
 ## 4. 隐藏字段（以及 Shadow DOM 的那个坑）
 

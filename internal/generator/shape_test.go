@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image/png"
 	"strings"
 	"testing"
@@ -489,5 +490,81 @@ func TestShapeAnswersDoNotLeakAcrossGenerators(t *testing.T) {
 	}
 	if findPrivateLeak(graw, gq.Verifier) || findPrivateLeak(craw, cq.Verifier) {
 		t.Fatal("公开题面出现私有 verifier")
+	}
+}
+
+// TestShapeGridNegativePolarity 钉住 modifier 的语义：否定只改指令，不改答案空间；
+// 至少 2 个应选、2 个不应选；负向题不得出现在 fill 模式（否则是“不是空心=实心”的伪否定）。
+func TestShapeGridNegativePolarity(t *testing.T) {
+	negativeSeen := 0
+	for i := 0; i < 400; i++ {
+		spec, err := drawGridSpec(detStream(t, fmt.Sprintf("shape-polarity-%d", i)))
+		if err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+		selected := [ShapeGridCells]bool{}
+		for _, c := range spec.cells {
+			selected[c] = true
+		}
+		if len(spec.cells) < 2 || ShapeGridCells-len(spec.cells) < 2 {
+			t.Fatalf("seed %d: 应选 %d / 不应选 %d，必须都 ≥2",
+				i, len(spec.cells), ShapeGridCells-len(spec.cells))
+		}
+		for c, cat := range spec.cats {
+			matched := spec.matches(cat)
+			if spec.negative {
+				if selected[c] == matched {
+					t.Fatalf("seed %d cell %d: negative 下应选==匹配 (selected=%v matched=%v)",
+						i, c, selected[c], matched)
+				}
+			} else if selected[c] != matched {
+				t.Fatalf("seed %d cell %d: positive 下应选!=匹配 (selected=%v matched=%v)",
+					i, c, selected[c], matched)
+			}
+		}
+		zh, en := spec.prompts()
+		if !spec.negative {
+			if strings.Contains(zh, "不是") || strings.Contains(en, "NOT") {
+				t.Fatalf("seed %d: positive 提示含否定词: %q / %q", i, zh, en)
+			}
+			continue
+		}
+		negativeSeen++
+		if spec.mode == gridByFill {
+			t.Fatalf("seed %d: fill 模式不得使用 negative 修饰器", i)
+		}
+		if !strings.Contains(zh, "不是") || !strings.Contains(en, "NOT") {
+			t.Fatalf("seed %d: negative 提示未突出否定词: %q / %q", i, zh, en)
+		}
+		if strings.Contains(zh, "除了") || strings.Contains(en, "except") {
+			t.Fatalf("seed %d: negative 提示使用了复杂句式: %q / %q", i, zh, en)
+		}
+		if strings.Count(zh, "不是") != 1 || strings.Count(en, "NOT") != 1 {
+			t.Fatalf("seed %d: negative 提示疑似双重否定: %q / %q", i, zh, en)
+		}
+	}
+	if negativeSeen == 0 {
+		t.Fatal("400 个 seed 中没有出现 negative 修饰器")
+	}
+}
+
+// 历史池行没有 polarity 字段：必须按 positive 解释，不能整题作废。
+func TestShapeGridSanitizeLegacyPolarity(t *testing.T) {
+	g := newTestShapeGrid(t)
+	raw := `{"answer_type":"cells","max_answer_len":32,"image_width":340,"image_height":340,` +
+		`"grid_cols":3,"grid_rows":3,"grid_x":12,"grid_y":12,"grid_cell":100,"grid_gap":8,` +
+		`"prompt_zh":"选出所有的三角形。","prompt_en":"Select every triangle."}`
+	pub, err := g.SanitizePublic([]byte(raw))
+	if err != nil {
+		t.Fatalf("无 polarity 的历史题面应被接受: %v", err)
+	}
+	if pub["polarity"] != "positive" {
+		t.Fatalf("历史题面 polarity = %v，期望 positive", pub["polarity"])
+	}
+	bad := `{"answer_type":"cells","max_answer_len":32,"image_width":340,"image_height":340,` +
+		`"grid_cols":3,"grid_rows":3,"grid_x":12,"grid_y":12,"grid_cell":100,"grid_gap":8,` +
+		`"prompt_zh":"x","prompt_en":"x","polarity":"both"}`
+	if _, err := g.SanitizePublic([]byte(bad)); err == nil {
+		t.Fatal("非法 polarity 应被拒")
 	}
 }

@@ -102,6 +102,7 @@ type ShapeGridPublic struct {
 	GridGap      int    `json:"grid_gap"`
 	PromptZH     string `json:"prompt_zh"`
 	PromptEN     string `json:"prompt_en"`
+	Polarity     string `json:"polarity,omitempty"`
 }
 
 func (ShapeGridPublic) PublicKind() string { return "shape-grid" }
@@ -145,11 +146,12 @@ const (
 
 // gridSpec 是全部**答案决定量**：k、判据与每个格子的类别。渲染参数不在里面。
 type gridSpec struct {
-	k     int
-	mode  gridCriterionMode
-	cat   shapeCategory // mode=kind 时只用 kind；mode=fill 时只用 filled
-	cells []int         // 目标格（0-based，升序）
-	cats  [ShapeGridCells]shapeCategory
+	k        int
+	mode     gridCriterionMode
+	cat      shapeCategory // mode=kind 时只用 kind；mode=fill 时只用 filled
+	cells    []int         // 目标格（0-based，升序）
+	cats     [ShapeGridCells]shapeCategory
+	negative bool // 指令修饰器：选“不满足判据”的格子；不是新的 verifier 或答案格式
 }
 
 func (s gridSpec) answer() string {
@@ -174,6 +176,18 @@ func (s gridSpec) matches(c shapeCategory) bool {
 }
 
 func (s gridSpec) prompts() (zh, en string) {
+	if s.negative {
+		// 否定词用「不是」/NOT 显式突出；句式只有一层否定，不用“除了……以外不……”
+		// 这类复杂结构，也不依赖颜色或排版。
+		switch s.mode {
+		case gridByKind:
+			return fmt.Sprintf("选出图中所有「不是」%s的格子（不论实心或空心）。", s.cat.kind.labelZH()),
+				fmt.Sprintf("Select every cell that is NOT a %s, filled or hollow.", s.cat.kind.labelEN())
+		case gridByCategory:
+			return fmt.Sprintf("选出图中所有「不是」%s的格子。", s.cat.labelZH()),
+				fmt.Sprintf("Select every cell that is NOT %s.", s.cat.labelEN())
+		}
+	}
 	switch s.mode {
 	case gridByKind:
 		return fmt.Sprintf("选出图中所有的%s（不论实心或空心）。", s.cat.kind.labelZH()),
@@ -239,7 +253,17 @@ func drawGridSpec(entropy io.Reader) (gridSpec, error) {
 		}
 	}
 
-	// 每个格子的类别。目标格按判据给出确定匹配的类别；干扰格从**不可能匹配**的类别里抽。
+	// polarity 是**指令修饰器**，不是新答案空间：k 仍是 2/3，答案仍是 C(9,k) 个集合。
+	// fill 模式否定后只剩另一种填充（等价于肯定指令），会制造“不是空心=实心”的
+	// 伪否定，因此该模式固定 positive。
+	pol, err := drawInt(entropy, 0, 1)
+	if err != nil {
+		return s, err
+	}
+	s.negative = pol == 1 && s.mode != gridByFill
+
+	// 每个格子的类别。positive：目标格匹配判据、干扰格不匹配；negative 反过来。
+	// 这样“选出的格子集合”始终是 s.cells，答案编码与 verifier 完全不变。
 	allowed := make([]shapeCategory, 0, len(allCats))
 	for c := 0; c < ShapeGridCells; c++ {
 		if target[c] {
@@ -252,9 +276,12 @@ func drawGridSpec(entropy io.Reader) (gridSpec, error) {
 		}
 		allowed = allowed[:0]
 		for _, cat := range allCats {
-			if !s.matches(cat) {
+			if s.matches(cat) == s.negative {
 				allowed = append(allowed, cat)
 			}
+		}
+		if len(allowed) == 0 {
+			return s, fmt.Errorf("%w: shape-grid 否定修饰器没有可用的干扰类别", ErrBadParams)
 		}
 		idx, err := drawInt(entropy, 0, int64(len(allowed)-1))
 		if err != nil {
@@ -270,6 +297,23 @@ var allCats = allShapeCategories()
 // targetCategory 给目标格抽一个"满足判据"的类别。mode=kind 时填充随机（"所有三角形"
 // 包含实心与空心）；mode=fill 时种类随机；mode=category 时就是那一个类别。
 func (s gridSpec) targetCategory(entropy io.Reader) (shapeCategory, error) {
+	if s.negative {
+		// 否定：目标格必须**不**满足判据；候选从不可能匹配的类别里抽。
+		cands := make([]shapeCategory, 0, len(allCats))
+		for _, cat := range allCats {
+			if !s.matches(cat) {
+				cands = append(cands, cat)
+			}
+		}
+		if len(cands) == 0 {
+			return shapeCategory{}, fmt.Errorf("%w: shape-grid 否定修饰器没有可用的目标类别", ErrBadParams)
+		}
+		idx, err := drawInt(entropy, 0, int64(len(cands)-1))
+		if err != nil {
+			return shapeCategory{}, err
+		}
+		return cands[idx], nil
+	}
 	switch s.mode {
 	case gridByKind:
 		f, err := drawInt(entropy, 0, 1)
@@ -351,6 +395,10 @@ func (g ShapeGrid) Generate(ctx context.Context, p Params, entropy io.Reader) (Q
 		return Question{}, err
 	}
 	zh, en := spec.prompts()
+	polarity := "positive"
+	if spec.negative {
+		polarity = "negative"
+	}
 	return Question{
 		Payload: ShapeGridPublic{
 			AnswerType:   "cells",
@@ -365,6 +413,7 @@ func (g ShapeGrid) Generate(ctx context.Context, p Params, entropy io.Reader) (Q
 			GridGap:      shapeGridGap,
 			PromptZH:     zh,
 			PromptEN:     en,
+			Polarity:     polarity,
 		},
 		Verifier: PrivateVerifier(answerVerifier(g.macKey, nonce, spec.answer())),
 		Asset:    asset,
@@ -411,12 +460,14 @@ func (ShapeGrid) SanitizePublic(raw []byte) (map[string]any, error) {
 		return nil, fmt.Errorf("generator: shape-grid 的格/间距 (%d,%d) 与档位不符", p.GridCell, p.GridGap)
 	case p.PromptZH == "" || len(p.PromptZH) > 200 || p.PromptEN == "" || len(p.PromptEN) > 200:
 		return nil, errors.New("generator: shape-grid 的提示文本不合法")
+	case p.Polarity != "" && p.Polarity != "positive" && p.Polarity != "negative":
+		return nil, errors.New("generator: shape-grid 的 polarity 不合法")
 	}
 	for k := range generic {
 		switch k {
 		case "answer_type", "max_answer_len", "image_width", "image_height",
 			"grid_cols", "grid_rows", "grid_x", "grid_y", "grid_cell", "grid_gap",
-			"prompt_zh", "prompt_en":
+			"prompt_zh", "prompt_en", "polarity":
 		default:
 			return nil, fmt.Errorf("generator: shape-grid 题面含非白名单字段 %q", k)
 		}
@@ -435,7 +486,17 @@ func (ShapeGrid) SanitizePublic(raw []byte) (map[string]any, error) {
 		"grid_gap":       p.GridGap,
 		"prompt_zh":      p.PromptZH,
 		"prompt_en":      p.PromptEN,
+		"polarity":       polarityOrDefault(p.Polarity),
 	}, nil
+}
+
+// polarityOrDefault 让历史池行（没有 polarity 字段）继续按 positive 解释，
+// 而不是因为新增字段整题作废；新题一律显式写 positive/negative。
+func polarityOrDefault(v string) string {
+	if v == "negative" {
+		return "negative"
+	}
+	return "positive"
 }
 
 // newShapeJitter 用 CSPRNG 种子建一个独立的 math/rand 实例（不共享）。

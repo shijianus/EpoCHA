@@ -82,7 +82,7 @@ func run(args []string, getenv func(string) string) error {
 	var o options
 	fs.StringVar(&o.DBPath, "db", getenv("EPOCHA_DB"), "SQLite 库路径（必填）")
 	fs.StringVar(&o.OutDir, "out-dir", "", "答案与图片的输出目录（必填，本地开发目录）")
-	fs.StringVar(&o.Generator, "generator", generator.TextImageID, "题型：text-image-v1/v2/v3、shape-grid-v1、shape-count-v1、parallax-code-v1、bank-shot-v1、accessible-choice-v1、energy-window-v1、pipe-connect-v1、intersection-point-v1、tile-rotation-v1、symbol-path-v1、crowd-find-v1、visual-rank-v1 或 arithmetic-baseline-v1")
+	fs.StringVar(&o.Generator, "generator", generator.TextImageID, "题型：text-image-v1/v2/v3、shape-grid-v1、shape-count-v1、parallax-code-v1、bank-shot-v1、accessible-choice-v1、energy-window-v1、pipe-connect-v1、intersection-point-v1、tile-rotation-v1、symbol-path-v1、crowd-find-v1、visual-rank-v1、progressive-target-v1、shell-track-v1、silhouette-assembly-v1 或 arithmetic-baseline-v1")
 	fs.IntVar(&o.Difficulty, "difficulty", 2, "难度档 1..5，必须与站点配置一致，否则领不到")
 	fs.IntVar(&o.Count, "count", 1, "注入条数 1..50")
 	fs.DurationVar(&o.TTL, "ttl", 70*time.Minute, "题目寿命（必须 > 站点 challenge TTL）")
@@ -245,6 +245,24 @@ func buildGenerator(id string, qKey []byte) (generator.Generator, error) {
 		g, err := generator.NewVisualRank(qKey)
 		if err != nil {
 			return nil, fmt.Errorf("构造视觉排序题型: %w", err)
+		}
+		return g, nil
+	case generator.ProgressiveTargetID:
+		g, err := generator.NewProgressiveTarget(qKey)
+		if err != nil {
+			return nil, fmt.Errorf("构造渐进定位题型: %w", err)
+		}
+		return g, nil
+	case generator.ShellTrackID:
+		g, err := generator.NewShellTrack(qKey)
+		if err != nil {
+			return nil, fmt.Errorf("构造容器跟踪题型: %w", err)
+		}
+		return g, nil
+	case generator.SilhouetteAssemblyID:
+		g, err := generator.NewSilhouetteAssembly(qKey)
+		if err != nil {
+			return nil, fmt.Errorf("构造轮廓装配题型: %w", err)
 		}
 		return g, nil
 	case generator.ArithID:

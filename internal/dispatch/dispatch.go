@@ -286,5 +286,20 @@ func Catalog() map[string]Candidate {
 			RiskFit:   fit(BandLow, 0.4, BandMedium, 0.3, BandHigh, 0, BandCritical, 0),
 			DeviceFit: dev(DeviceDesktop, 1, DeviceTouch, 1, DeviceKeyboard, 1),
 		},
+		generator.ProgressiveTargetID: {
+			ID: generator.ProgressiveTargetID, Family: "visual-search", BaseWeight: 0.2,
+			RiskFit:   fit(BandLow, 0.4, BandMedium, 0.3, BandHigh, 0, BandCritical, 0),
+			DeviceFit: dev(DeviceDesktop, 1, DeviceTouch, 1, DeviceKeyboard, 1),
+		},
+		generator.ShellTrackID: {
+			ID: generator.ShellTrackID, Family: "motion-tracking", BaseWeight: 0.15, Motion: true,
+			RiskFit:   fit(BandLow, 0.3, BandMedium, 0.2, BandHigh, 0, BandCritical, 0),
+			DeviceFit: dev(DeviceDesktop, 1, DeviceTouch, 1, DeviceKeyboard, 1),
+		},
+		generator.SilhouetteAssemblyID: {
+			ID: generator.SilhouetteAssemblyID, Family: "spatial-assembly", BaseWeight: 0.2,
+			RiskFit:   fit(BandLow, 0.4, BandMedium, 0.3, BandHigh, 0, BandCritical, 0),
+			DeviceFit: dev(DeviceDesktop, 1, DeviceTouch, 1, DeviceKeyboard, 1),
+		},
 	}
 }

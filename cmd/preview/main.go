@@ -183,7 +183,8 @@ func parseFlags(args []string, getenv func(string) string) (*options, error) {
 		generator.ParallaxID, generator.BankShotID, generator.AccessibleChoiceID,
 		generator.EnergyWindowID, generator.PipeConnectID, generator.IntersectionPointID,
 		generator.TileRotationID, generator.SymbolPathID, generator.CrowdFindID,
-		generator.VisualRankID:
+		generator.VisualRankID, generator.ProgressiveTargetID, generator.ShellTrackID,
+		generator.SilhouetteAssemblyID:
 	default:
 		return nil, fmt.Errorf("%w: 预览不支持题型 %q", errBadConfig, opt.Generator)
 	}

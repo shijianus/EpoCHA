@@ -19,7 +19,8 @@
    单资产 64KB 预算、题池 worker 的有界批次与让步都已在代码和测试中落地；本轮新题型必须复用这些契约。
 5. 新题型（`tile-rotation-v1`、`symbol-path-v1`、`crowd-find-v1`、`visual-rank-v1`、
    `progressive-target-v1`、`shell-track-v1`、`silhouette-assembly-v1`）与
-   `shape-grid-v1` 的 negative polarity 修饰器按 Wave 1 / Wave 2 实施；本文只记录审计事实与开工前状态。
+   `shape-grid-v1` 的 negative polarity 修饰器与 Wave 2 三个题型已按 ADR-031 实施；本文记录
+   审计事实、实施状态与仍然 NOT_RUN/BLOCKED 的边界。
 6. `pipe-connect-v1` 的现状是「点选主路径 2 个断点」，不是设计草案里的「旋转管道块 / 填满格子」；
    它的 verifier 只能表达一个 1-based 格子集合，**无法表达整张图的逐格 edge mask**。在不破坏
    已签发 verifier 语义的前提下，不能把它原地改成新题型；整改见 §9（BLOCKED / 设计 + 测试边界）。
@@ -34,7 +35,7 @@
 | Go 工具链 | `GOTOOLCHAIN=local`，Go 1.27.3 | 未升级、未切换 |
 | 依赖 | `modernc.org/sqlite v1.46.1`、`golang.org/x/image v0.36.0` | 本轮未新增依赖 |
 | schema | `schemaVersion=6` | 迁移 `0001`–`0006`；新增 asset MIME/编码前必须评估迁移 |
-| 注册题型 | 16 | `cmd/server/main.go` 的 `knownGenerators`（12 + Wave 1 的 4） |
+| 注册题型 | 19 | `cmd/server/main.go` 的 `knownGenerators`（12 + Wave 1 的 4 + Wave 2 的 3） |
 
 ## 2. 现有 12 个题型的真实代码状态
 
@@ -197,7 +198,7 @@
 7. 随机性：安全语义只用 `crypto/rand`；测试通过注入 `io.Reader` 获得确定性；
    生产生成器不得用固定 seed 或 `time.Now().UnixNano()` 作为安全随机源。
 
-## 6. Wave 1 / Wave 2 计划与验收边界
+## 6. Wave 1 / Wave 2 的答案与随机猜测边界
 
 | 波次 | 题型 | 输入原语 | canonical answer | 3 次随机猜测上界（设计目标） |
 |---|---|---|---|---|
@@ -210,6 +211,7 @@
 | Wave 2 | `silhouette-assembly-v1` | 5 槽位装配 | `v1:id:rot,…` | 1/(5!×4^5)=1/122880；3 次 ≈2.4e-5 |
 | 修饰器 | `shape-grid-v1` negative polarity | 网格点选 | 现有 cells 集合 | 与 positive 相同 C(9,k)；k=2/3 ⇒ <10% |
 
+Wave 1 / Wave 2 均已实施并登记（下文 §11/§12）；negative polarity 已实施（§13）。
 所有题型的 M4、人工可读性、辅助技术、真机移动端仍是 **NOT_RUN**；`production_ready` 保持 `false`。
 新增题型默认**不加入任何站点**；运营者必须在站点 `generator_id` / `generator_pool` 中显式选择，
 才可能被签发。现有站点的题型与权重不变。
@@ -291,3 +293,32 @@ Wave 1 四个题型已实现、登记并接入 widget；Wave 2 生成器代码�
 `answer_type` 时由核心同源按需加载；核心 `v1.js` 仍 <30KB。模块失败时进入
 `interactive-unavailable`，不渲染可点击的半成品。核心与模块共用同一个 Widget 状态机，
 唯一通过点仍是服务端 `/api/redeem`。
+
+## 12. Wave 2 实施与验证（2026-11-12）
+
+| 项 | 状态 | 证据/命令 | 环境 |
+|---|---|---|---|
+| 生成器确定性/唯一解/资源上限 | PASS | `go test -count=1 ./internal/generator/`：`TestProgressiveTarget*`、`TestShellTrack*`、`TestSilhouetteAssembly*`、`TestSilhouetteCatalogIsUniqueUnderRotation` | Windows amd64 / Go 1.27.3 |
+| payload 不含目标/swap/mapping | PASS | 同上的 `*NoLeakInPayload`；payload 白名单 `SanitizePublic` | 同上 |
+| 登记（server/preview/devseed/admin/dispatch） | PASS（编译） | `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./cmd/... ./internal/... ./web/...` + `go vet` 同目标 | 交叉编译，未运行 |
+| dispatch 低风险/Motion | PASS | `go test ./internal/dispatch` 的 `TestNewInteractiveTypesStayLowRisk`；high/critical 权重为 0，shell 标记 Motion | Windows |
+| API 闭环 | **BLOCKED** | `internal/api` 的新增用例已编译（`go test -c` linux/arm64），但不能在本机执行（store `flock`） | Windows amd64 |
+| 真实浏览器动画/GIF/cross-engine | **NOT_RUN** | shell-track 用服务端 PNG 雪碧图，不是 GIF；Chrome/Firefox/WebKit、GIF disposal、真机动画一致性未测 | — |
+| reduced-motion | PASS（逻辑） | `internal/dispatch` 测试排除 Motion；widget Node 工装覆盖 `motion-required` 失败路径；真实浏览器未测 | Windows/Node |
+| 人工可读性/辅助技术/真机移动端/M4 | **NOT_RUN** | 无真实参与者/设备/成本实验；不代填 | — |
+
+Wave 2 三题型均 `experimental:true` / `production_ready:false`，默认不加入任何站点。
+`shell-track-v1` 的 33 帧雪碧图（1680×600）在客户端 2048×2048 形状上限内；单资产仍受 64KB 限制，
+由 `TestShellTrackAssetBudgetAndSpriteGeometry` 钉住。
+
+## 13. negative polarity 与 pipe-connect（2026-11-12）
+
+- **negative polarity**（`shape-grid-v1`）：只在 kind/category 模式启用；k 仍 2/3，答案仍是
+  `C(9,k)` 个集合；至少 2 个应选、至少 2 个不应选；fill 固定 positive。提示只有一层否定
+  （中文「不是」/英文 NOT），不依赖颜色；positive/negative 的错误率必须分开记录——本轮没有
+  真人样本，两项都是 **NOT_RUN**，不得合并成一个平均数。它**不**提高
+  随机猜测下界，也不得写成显著提高安全性。测试：`TestShapeGridNegativePolarity`、
+  `TestShapeGridSanitizeLegacyPolarity`（历史池行无 polarity ⇒ positive）。
+- **`pipe-connect-v1`**：现状仍是 legacy cells 题型（恰好两个断点格），**不是**完整管道拼图。
+  原地改会破坏已签发 verifier 语义，因此整改 **BLOCKED**；需要新 ID/version 与逐格 edge mask。
+  `TestPipeConnectRemainsLegacyCellSelection` 钉住现状，防止文档漂移。

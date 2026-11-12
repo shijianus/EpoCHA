@@ -1393,3 +1393,81 @@ Phase 1/2 的题型全部依赖视觉或运动精度；没有等价通道时，�
 `internal/generator/{tilerotation,symbolpath,crowdfind,visualrank}.go`、`internal/generator/answer.go`、
 `internal/dispatch`、`internal/admin`、`cmd/{server,preview,devseed}`、`web/widget/v1.js`、
 `docs/{DESIGN,QUESTION-TYPES}.md` 与审计文档。不新增依赖；不改变现有题型的判分路径与历史结果。
+
+---
+
+## ADR-031 2026-11-12：交互原语 Wave 2、negative polarity 与 pipe-connect 的边界
+
+### 背景与授权
+
+ADR-030 只交付了 Wave 1 四个题型，并把 Wave 2、negative polarity 与 `pipe-connect-v1`
+完整管道整改留作跟踪项。用户要求继续完成 Wave 2（`progressive-target-v1`、`shell-track-v1`、
+`silhouette-assembly-v1`）、为已有网格题增加 negative polarity，并审核 `pipe-connect-v1`。
+约束不变：纯 Go、无 cgo、不新增依赖、不使用外部素材或在线模型；不得照搬 Neal.fun 或任何
+第三方游戏的源码、图片、角色、品牌、音乐、视频、文字表达或页面布局。
+
+### 决策
+
+1. **Wave 2 三个题型**：
+   - `progressive-target-v1`：三轮独立 3×3，每轮顶部样本与网格同一张服务端 PNG；客户端逐轮
+     选择、不判断对错，三轮完成后提交 `v1:a.b.c`（`sequence`）。目标格与干扰字形只存在
+     verifier/生成器内存；payload 只有几何。
+   - `shell-track-v1`：三轮四容器、每轮 4 次可见交换；服务端在 worker 中把
+     **11 帧/轮 × 3 轮 = 33 帧**预渲染成一张 6×6 的 PNG 雪碧图，payload 只有帧几何与点击区。
+     每轮结尾客户端暂停等待选择；动画结束前按钮 disabled；`Motion:true` 使
+     `prefers-reduced-motion` 请求在 dispatch 层就被排除，widget 也会明确失败并提示换题。
+   - `silhouette-assembly-v1`：5 个程序化 polyomino 部件、5 个槽位、4 个旋转桶；槽位显示
+     旋转后的轮廓，答案提交 `v1:id:rot,...`（`placements`）。部件形状两两不在 D4 下等价、
+     本身无旋转对称；生成器枚举 piece×slot×rotation，只接受恰好一个完整匹配。
+2. **为什么 shell-track 用 PNG 雪碧图而不是 GIF**：现有题池是**单资产**，`asset_mime` 的
+   CHECK 只允许 `image/png`；三轮必须在轮次边界暂停等待用户选择，单张 GIF 无法表达这个
+   暂停点，拆成三条资产又会改 schema/DTO。雪碧图仍然是**服务端预生成**，payload 不含
+   swap sequence、初始/最终目标索引或可重算种子；浏览器只做顺序播放。GIF 的 disposal、
+   帧时序与 Chrome/Firefox/WebKit 一致性**未实测**，因此不声称 GIF 路径通过；
+   这项限制不改变"服务端渲染、客户端不持有结构答案"的安全边界。
+3. **为什么不用浮点轨迹**：所有 Wave 1/2 答案都是离散的最终状态（edge mask 向量、格子索引、
+   卡片 ID 排列、slot→piece+rotation）。浮点轨迹会引入平台/浏览器差异、接受容差和
+   "客户端自报坐标"的歧义；离散答案可以直接走 48B 精确 HMAC，且畸形答案不消耗作答机会。
+   客户端不提交 `solved`、`targetIndex`、`expectedAnswer`、私有 seed 或 RNG 状态。
+4. **唯一解与资源上限**：tile-rotation 枚举每格不同旋转（节点上限 2^20）；symbol-path 用
+   DFS 统计匹配路径（节点上限 2^18，合法位置路径 ≥128）；silhouette 枚举 5!×4^5 的固定结构；
+   progressive/shell 的答案空间分别是 9^3/4^3。payload ≤8KB、verifier ≤4KB、单资产 ≤64KB；
+   生成失败达到重试上限返回 `ErrGenerateExhausted`，不降级成固定题。
+5. **negative polarity 只是指令修饰器**：只在 `shape-grid-v1` 的 kind/category 模式启用
+   （fill 模式否定后等价于另一种肯定指令，固定 positive）。k 仍为 2/3，答案仍是 C(9,k)；
+   positive 与 negative 的错误率必须分开记录。提示只用一层否定（中文「不是」、英文 NOT），
+   不用"除了……以外不……"或双重否定；否定词是文本本身，不依赖颜色。它**不**提高
+   随机猜测下界，也不得描述成显著提高安全性。
+6. **`pipe-connect-v1` 原地整改为 BLOCKED**：现有 verifier 是一个 `cells` 集合（恰好两个
+   断点格），无法表达"多对端点配对 / 路径不交叉 / 每格被占用 / 唯一解 / 每格 edge mask"。
+   改 `cells` 的语义会破坏已签发 challenge 与历史结果（DESIGN §8.4），因此不原地改。
+   整改必须新开 generator/version（例如使用 `masks` canonical answer），并先写唯一解证明、
+   端点形状/纹理配对、路径覆盖与不交叉、键盘逐格绘制/撤销的测试。本轮新增一条测试
+   `TestPipeConnectRemainsLegacyCellSelection` 钉住现状，防止以后把"点选两个断点"误写成
+   "完整管道拼图"；新 ID 未实现，标记 BLOCKED。
+7. **Widget 模块化**：7 种新输入的渲染器移到 `web/widget/v1.interactive.js`，只在领到
+   `masks/path/order/select/sequence/placements` 时从核心脚本位置同源按需加载；核心
+   `v1.js` 保持 gzip <30KB。模块失败进入 `interactive-unavailable`，不渲染可提交的半成品；
+   核心与模块共用同一个状态机，唯一通过点仍是服务端 `/api/redeem`。模块本身也受体积守护
+   （<30KB；核心+模块 <40KB）。
+8. **实验边界**：三个 Wave 2 题型与 negative polarity 一律 `experimental:true` /
+   `production_ready:false`；默认不加入任何站点，必须由运营者显式选择
+   `generator_id` / `generator_pool`。dispatch 只给 low/medium 低权重，high/critical 为 0；
+   `shell-track` 标记 Motion。M4、人工可读性、辅助技术、真机移动端、抗 AI/抗 OCR 全部
+   **NOT_RUN**；不得把"图片是服务端 rasterize 的"当成安全证明。
+
+### 未做
+
+- `pipe-connect` 的完整管道新题型/新 verifier；
+- GIF 路径与 Chrome/Firefox/WebKit 的动画/GIF disposal 实测；
+- M4、人工可读性、辅助技术、真机移动端；
+- 按权重混合多题型、风险评分决策、自动淘汰、音频等价通道；
+- 任何"抗 AI / 抗 OCR / 抗多模态 / 可生产使用"结论；F-01、B-03 与正式发布候选仍未解决。
+
+### 影响
+
+`internal/generator/{progressivetarget,shelltrack,silhouette,shapegrid}.go`、
+`internal/generator/answer.go`（已有编码）、`internal/dispatch`、`internal/admin`、
+`cmd/{server,preview,devseed}`、`web/widget/{v1.js,v1.interactive.js}`、
+`docs/{DESIGN,QUESTION-TYPES,WIDGET}.md` 与审计文档。不新增依赖；不改变现有 12 个题型的
+verifier 与历史结果；`shape-grid-v1` 的旧池行（无 polarity 字段）按 positive 解释。

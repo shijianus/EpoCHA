@@ -273,13 +273,15 @@ func Catalog() map[string]Candidate {
 		},
 		generator.SymbolPathID: {
 			ID: generator.SymbolPathID, Family: "spatial-path", BaseWeight: 0.2,
-			RiskFit:   fit(BandLow, 0.4, BandMedium, 0.3, BandHigh, 0, BandCritical, 0),
-			DeviceFit: dev(DeviceDesktop, 1, DeviceTouch, 1, DeviceKeyboard, 1),
+			RiskFit: fit(BandLow, 0.4, BandMedium, 0.3, BandHigh, 0, BandCritical, 0),
+			// 6×6 targets fall below the touch hit-box floor on narrow screens until a mobile variant exists.
+			DeviceFit: dev(DeviceDesktop, 1, DeviceTouch, 0, DeviceKeyboard, 1),
 		},
 		generator.CrowdFindID: {
 			ID: generator.CrowdFindID, Family: "visual-search", BaseWeight: 0.2,
-			RiskFit:   fit(BandLow, 0.4, BandMedium, 0.3, BandHigh, 0, BandCritical, 0),
-			DeviceFit: dev(DeviceDesktop, 1, DeviceTouch, 1, DeviceKeyboard, 0.8),
+			RiskFit: fit(BandLow, 0.4, BandMedium, 0.3, BandHigh, 0, BandCritical, 0),
+			// 36 dense targets need a touch-specific layout before they can enter the touch pool.
+			DeviceFit: dev(DeviceDesktop, 1, DeviceTouch, 0, DeviceKeyboard, 0.8),
 		},
 		generator.VisualRankID: {
 			ID: generator.VisualRankID, Family: "visual-order", BaseWeight: 0.2,

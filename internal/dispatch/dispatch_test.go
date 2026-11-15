@@ -134,6 +134,10 @@ func TestCatalogAndFallback(t *testing.T) {
 
 func TestNewInteractiveTypesStayLowRisk(t *testing.T) {
 	cat := Catalog()
+	touchExcluded := map[string]bool{
+		generator.SymbolPathID: true,
+		generator.CrowdFindID:  true,
+	}
 	for _, id := range []string{
 		generator.TileRotationID, generator.SymbolPathID, generator.CrowdFindID,
 		generator.VisualRankID, generator.ProgressiveTargetID,
@@ -143,9 +147,16 @@ func TestNewInteractiveTypesStayLowRisk(t *testing.T) {
 		if !ok {
 			t.Fatalf("Catalog 缺 %s", id)
 		}
-		if Weight(c, Request{Band: BandLow, Device: DeviceDesktop}) == 0 ||
-			Weight(c, Request{Band: BandMedium, Device: DeviceTouch}) == 0 {
-			t.Fatalf("%s 在 low/medium 应可用", id)
+		if Weight(c, Request{Band: BandLow, Device: DeviceDesktop}) == 0 {
+			t.Fatalf("%s 在 desktop low 应可用", id)
+		}
+		touchWeight := Weight(c, Request{Band: BandMedium, Device: DeviceTouch})
+		if touchExcluded[id] {
+			if touchWeight != 0 {
+				t.Fatalf("%s 在移动变体完成前必须排除 touch", id)
+			}
+		} else if touchWeight == 0 {
+			t.Fatalf("%s 在 touch medium 应可用", id)
 		}
 		if Weight(c, Request{Band: BandHigh, Device: DeviceDesktop}) != 0 ||
 			Weight(c, Request{Band: BandCritical, Device: DeviceDesktop}) != 0 {

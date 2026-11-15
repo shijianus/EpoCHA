@@ -371,6 +371,7 @@
     this.timingWrap.setAttribute("class", "timing hidden");
     this.optionsWrap.setAttribute("class", "options hidden");
     this.cellWrap.setAttribute("class", "cells");
+    this.cellWrap.setAttribute("data-hit-mode", "rotate");
     this.cellStatus.setAttribute("class", "cellsum");
     this.auxWrap.setAttribute("class", "aux");
     this.btnUndo.setAttribute("class", "hidden");
@@ -444,6 +445,7 @@
     this.timingWrap.setAttribute("class", "timing hidden");
     this.optionsWrap.setAttribute("class", "options hidden");
     this.cellWrap.setAttribute("class", "cells");
+    this.cellWrap.setAttribute("data-hit-mode", "path");
     this.cellStatus.setAttribute("class", "cellsum");
     this.auxWrap.setAttribute("class", "aux");
     this.btnUndo.setAttribute("class", "");
@@ -500,6 +502,7 @@
     this.timingWrap.setAttribute("class", "timing hidden");
     this.optionsWrap.setAttribute("class", "options hidden");
     this.cellWrap.setAttribute("class", "cells");
+    this.cellWrap.setAttribute("data-hit-mode", "rank");
     this.cellStatus.setAttribute("class", "cellsum");
     this.auxWrap.setAttribute("class", "aux");
     this.orderBar.setAttribute("class", "ordersum");
@@ -582,6 +585,7 @@
     this.timingWrap.setAttribute("class", "timing hidden");
     this.optionsWrap.setAttribute("class", "options hidden");
     this.cellWrap.setAttribute("class", "cells");
+    this.cellWrap.setAttribute("data-hit-mode", "select");
     this.cellStatus.setAttribute("class", "cellsum");
     this.auxWrap.setAttribute("class", "aux");
     this.btnUndo.setAttribute("class", "hidden");
@@ -655,6 +659,7 @@
     this.timingWrap.setAttribute("class", "timing hidden");
     this.optionsWrap.setAttribute("class", "options hidden");
     this.cellWrap.setAttribute("class", "cells");
+    this.cellWrap.setAttribute("data-hit-mode", "progressive");
     this.cellStatus.setAttribute("class", "cellsum");
     this.auxWrap.setAttribute("class", "aux");
     this.orderBar.setAttribute("class", "ordersum hidden");
@@ -777,6 +782,7 @@
     this.optionsWrap.setAttribute("class", "options hidden");
     this.orderBar.setAttribute("class", "ordersum hidden");
     this.cellWrap.setAttribute("class", "cells");
+    this.cellWrap.setAttribute("data-hit-mode", "shell");
     this.cellStatus.setAttribute("class", "cellsum");
     this.auxWrap.setAttribute("class", "aux");
     this.btnUndo.setAttribute("class", "hidden");
@@ -901,6 +907,7 @@
     this.optionsWrap.setAttribute("class", "options hidden");
     this.orderBar.setAttribute("class", "ordersum hidden");
     this.cellWrap.setAttribute("class", "cells");
+    this.cellWrap.setAttribute("data-hit-mode", "placements");
     this.cellStatus.setAttribute("class", "cellsum");
     this.auxWrap.setAttribute("class", "aux");
     this.btnUndo.setAttribute("class", "");

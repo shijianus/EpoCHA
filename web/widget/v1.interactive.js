@@ -436,6 +436,12 @@
 
 
   Widget.prototype._renderPath = function (q, iw, ih) {
+    var dense = intField(q, "grid_cols") * intField(q, "grid_rows") >= 36;
+    var coarse = !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+    if (dense && coarse) {
+      this._fail("touch-layout", "errTouchLayout", null, true);
+      return false;
+    }
     this._clearCells();
     this.answerMode = "path";
     this.answer.value = "";
@@ -489,6 +495,7 @@
       this.cellWrap.appendChild(btn);
     }
     this._syncPathAnswer(q, iw, ih);
+    return true;
   };
 
 

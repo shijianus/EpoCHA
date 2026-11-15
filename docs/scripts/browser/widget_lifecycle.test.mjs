@@ -133,7 +133,7 @@ function challenge(token = "challenge-1", expires = 0, question = null) {
   };
 }
 
-function harness(t, { honorAbort = false, options = {}, interactive = true, reducedMotion = false } = {}) {
+function harness(t, { honorAbort = false, options = {}, interactive = true, reducedMotion = false, coarsePointer = false } = {}) {
   const time = clock();
   const requests = [], workers = [], successes = [], errors = [], states = [], expired = [];
   const urls = new Set();
@@ -168,7 +168,10 @@ function harness(t, { honorAbort = false, options = {}, interactive = true, redu
   }
   const sandbox = {
     document, console, navigator: { language: "en" }, location: new URL("https://page.invalid/"),
-    matchMedia: (query) => ({ matches: reducedMotion && String(query).indexOf("prefers-reduced-motion") >= 0 }),
+    matchMedia: (query) => ({
+      matches: (reducedMotion && String(query).indexOf("prefers-reduced-motion") >= 0) ||
+        (coarsePointer && String(query).indexOf("pointer: coarse") >= 0),
+    }),
     URL: BrowserURL, Blob, Worker, AbortController, atob,
     Date: class extends Date { static now() { return time.now(); } },
     setTimeout: time.setTimeout, clearTimeout: time.clearTimeout,
@@ -1002,6 +1005,15 @@ test("symbol-path 输入：相邻点击组成固定两位索引串，Backspace �
   cells[15].emit("keydown", { key: "Backspace" });
   assert.equal(h.answer.value, "", "未完成目标长度时不得提交部分路径");
   assert.equal(h.buttons[0].disabled, true);
+});
+
+test("symbol-path 粗指针布局过密时 fail closed，不渲染不可用命中盒", async (t) => {
+  const h = harness(t, { coarsePointer: true });
+  h.requests[0].respond(pathChallenge());
+  await flush();
+  assert.equal(h.api.state(h.id), "error");
+  assert.equal(h.errors.at(-1).code, "touch-layout");
+  assert.equal(findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell").length, 0);
 });
 
 test("visual-rank 输入：五张卡按选择顺序合成排列，Undo 撤销最后一张", async (t) => {

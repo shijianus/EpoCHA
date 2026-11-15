@@ -1,7 +1,7 @@
 # 当前题库视觉优化与复测报告
 
 日期：2026-11-15
-分支：`release-preparation`
+分支：`sync/visual-bank-20261116`
 范围：`web/widget/v1.js`、`web/widget/v1.interactive.js`、真实 PNG 夹具和视觉画廊。
 
 ## 已完成的修复
@@ -9,6 +9,7 @@
 - 统一 widget 卡片、题图、按钮、输入框、状态提示和焦点环的视觉 token。
 - 输入框、按钮和选项的最小高度设为 44 CSS px。
 - `grid`、`rotate`、`placements` 使用独立命中盒，视觉图形不再决定按钮最小尺寸。
+- `symbol-path` 在粗指针环境下检测到 6×6 密集布局时 fail closed，不渲染不可用的微小命中盒，并要求换题。
 - 加入 hover、active、focus-visible 和 selected 状态。
 - 视觉画廊加载真实 widget、真实 Shadow DOM 和 PNG 资产，mock challenge 只替代 Go 服务。
 - 动态题夹具的帧数、帧列数、帧间隔和 sprite 资产已经对齐。
@@ -71,7 +72,7 @@
 
 ## 当前验证边界
 
-- Node widget、PoW 和生命周期回归共 50 项通过。
+- Node widget、PoW 和生命周期回归共 58 项通过。
 - JavaScript 语法检查和 `git diff --check` 通过。
 - 当前环境没有可用的 Go 工具链，Go 全量测试、race、Linux 静态构建和真实 Go 服务闭环未执行。
 - 因此本报告是视觉工程优化和前端回归报告，不是生产发布批准。

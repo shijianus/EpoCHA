@@ -306,6 +306,7 @@ if (typeof self !== "undefined") {
       btnUndo: "撤销",
       btnRotate: "旋转",
       errInteractiveUnavailable: "交互题型模块加载失败（CSP 或网络）。请换一题。",
+      errTouchLayout: "此题在当前触屏尺寸下不适合操作，请换一题。",
       errIncompleteOption: "请选择一个选项。",
       cellLabel: "第 {n} 格",
       selectedCount: "已选 {n} 格",
@@ -375,6 +376,7 @@ if (typeof self !== "undefined") {
       btnUndo: "Undo",
       btnRotate: "Rotate",
       errInteractiveUnavailable: "The interactive question module could not be loaded (CSP or network). Get another question.",
+      errTouchLayout: "This question is too dense for the current touch layout. Get another question.",
       errIncompleteOption: "Choose one option.",
       cellLabel: "Cell {n}",
       selectedCount: "{n} selected",
@@ -1991,7 +1993,7 @@ if (typeof self !== "undefined") {
           self.note.textContent = tr(o.lang, "noteRotate");
         } else if (at === "path") {
           if (!self._renderQuestionMedia(q, iw, ih, tr(o.lang, "imageAltPath"))) return;
-          self._renderPath(q, iw, ih);
+          if (!self._renderPath(q, iw, ih)) return;
           self.heading.textContent = promptText(q, o.lang);
           self.heading.removeAttribute("for");
           self.note.textContent = tr(o.lang, "notePath");

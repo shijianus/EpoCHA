@@ -6,6 +6,8 @@
 
 ## 1. 当前题型
 
+低密度扩展候选：[`memory-sequence-v1`](QUESTION-TYPE-MEMORY-SEQUENCE.md)、[`drag-align-v1`、`semantic-select-v1`](QUESTION-TYPE-LOW-DENSITY-EXTENSIONS.md)。它们目前是设计候选，尚未登记、尚未实现、不会进入默认题池。
+
 | `generator_id` | 介质 | 输入 `answer_type` | 定位 | 生产可用 |
 |---|---|---|---|---|
 | `arithmetic-baseline-v1` | text | `integer` | 工程基线；题面可直接求值 | 否（`production_ready:false`） |

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EpoCHA 题库视觉验收画廊</title>
+  <style>
+    :root { color-scheme: dark; font: 16px/1.45 system-ui,sans-serif; background:#09111f; color:#e5eefc; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-width:320px; background:radial-gradient(circle at 10% -10%,#1a3155 0,#09111f 42rem); }
+    header { max-width:1440px; margin:auto; padding:24px clamp(16px,3vw,48px) 12px; }
+    h1 { margin:0 0 8px; font-size:clamp(24px,3vw,40px); }
+    p { color:#aabbd5; line-height:1.55; max-width:880px; }
+    .notice { padding:14px 16px; border:1px solid #2b4262; border-radius:14px; background:#0d1a2e; }
+    .toolbar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:16px; }
+    select,button { border:1px solid #486383; border-radius:10px; background:#13243b; color:#e5eefc; padding:9px 12px; font:inherit; }
+    button { cursor:pointer; }
+    #gallery { max-width:1440px; margin:auto; padding:16px clamp(16px,3vw,48px) 56px; display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr)); gap:18px; }
+    .card { min-width:0; border:1px solid #2b4262; border-radius:16px; background:#0e1b2e; overflow:hidden; box-shadow:0 16px 36px #0003; }
+    .card-head { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; padding:16px 18px 10px; }
+    .card h2 { margin:0; font-size:18px; }
+    .meta { margin-top:5px; color:#89a3c6; font:12px ui-monospace,SFMono-Regular,monospace; }
+    .stage { padding:12px; background:#0a1526; }
+    .mount { min-height:210px; display:grid; place-items:center; padding:12px; border:1px solid #243b5b; border-radius:12px; background:#101f35; overflow:hidden; }
+    .mount > div { width:min(100%,560px); }
+    .metrics { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px 12px; margin-top:10px; padding:10px 12px; border-top:1px solid #1d3452; background:#0a1526; color:#aabbd5; font:12px ui-monospace,SFMono-Regular,monospace; }
+    .metrics strong { color:#d9e7fa; }
+    .status { padding:10px 18px 14px; color:#aabbd5; font-size:13px; }
+    .status.pass { color:#72e3b5; } .status.fail { color:#ff9b9b; } .status.blocked { color:#ffd07a; }
+    .legend { display:flex; gap:10px; flex-wrap:wrap; color:#9bb1ce; font-size:13px; }
+    .dot { display:inline-block; width:9px; height:9px; border-radius:50%; background:#72e3b5; margin-right:5px; }
+    .dot.warn { background:#ffd07a; } .dot.fail { background:#ff9b9b; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>EpoCHA 题库视觉验收画廊</h1>
+    <p>真实加载仓库 widget、interactive 模块、Shadow DOM 和 PNG 夹具。画廊只检查布局、图片比例、命中盒、滚动宽度和生命周期状态，不把它当成生产 verifier 或真机验收。</p>
+    <div class="notice">
+      <div class="legend"><span><i class="dot"></i>几何与触屏通过</span><span><i class="dot warn"></i>需要逐帧/人工/真机证据</span><span><i class="dot fail"></i>布局或命中失败</span></div>
+      <div class="toolbar"><label for="viewport">CSS 内容宽度模拟</label><select id="viewport"><option value="375x667">375 × 667</option><option value="320x568">320 × 568</option><option value="414x896">414 × 896</option><option value="768x1024">768 × 1024</option><option value="1366x768">1366 × 768</option></select><button id="remeasure" type="button">重新测量</button></div>
+    </div>
+  </header>
+  <main id="gallery" aria-live="polite"></main>
+  <script src="../../web/widget/v1.js"></script>
+  <script src="../../web/widget/v1.interactive.js"></script>
+  <script>
+  (function(){
+    'use strict';
+    const nativeFetch=window.fetch.bind(window), gallery=document.querySelector('#gallery'), viewport=document.querySelector('#viewport');
+    const png={}, instances=[];
+    const fixtures=[
+      {id:'text-image',title:'视觉文字',type:'text',asset:'textimage.png',w:320,h:116,q:{answer_type:'text',length:6,charset:'ABCDEFGHJKLMNPQRSTUVWXYZ23456789',prompt_zh:'输入图中的 6 个字符。',prompt_en:'Enter the 6 characters.'}},
+      {id:'shape-grid',title:'3×3 图形点选',type:'cells',asset:'grid.png',w:480,h:340,q:{answer_type:'cells',max_answer_len:32,grid_cols:3,grid_rows:3,grid_x:56,grid_y:48,grid_cell:72,grid_gap:24,prompt_zh:'选出所有绿色图形。',prompt_en:'Select every green shape.'}},
+      {id:'tile-rotation',title:'路径块旋转',type:'masks',asset:'grid.png',w:480,h:340,q:{answer_type:'masks',max_answer_len:16,grid_cols:3,grid_rows:3,grid_x:56,grid_y:48,grid_cell:72,grid_gap:24,initial_masks:'1a2b3c4d5',style:'network-v1',input_mode:'rotate',prompt_zh:'旋转路径块。',prompt_en:'Rotate the path tiles.'}},
+      {id:'symbol-path',title:'符号路径',type:'path',asset:'path.png',w:480,h:360,q:{answer_type:'path',max_answer_len:32,grid_cols:6,grid_rows:6,grid_x:36,grid_y:52,grid_cell:45,grid_gap:5,target_len:6,target_y:8,target_h:38,cell_ids:Array.from({length:36},(_,i)=>i.toString(16).padStart(4,'0')),input_mode:'path',prompt_zh:'按顺序连接符号。',prompt_en:'Trace the symbols in order.'}},
+      {id:'silhouette-assembly',title:'离散装配',type:'placements',asset:'assembly.png',w:400,h:260,q:{answer_type:'placements',max_answer_len:32,pieces:[{id:'0',x:45,y:18,w:54,h:54},{id:'1',x:109,y:18,w:54,h:54},{id:'2',x:173,y:18,w:54,h:54},{id:'3',x:237,y:18,w:54,h:54},{id:'4',x:301,y:18,w:54,h:54}],slots:[{x:20,y:160,w:64,h:64},{x:94,y:160,w:64,h:64},{x:168,y:160,w:64,h:64},{x:242,y:160,w:64,h:64},{x:316,y:160,w:64,h:64}],input_mode:'placements',prompt_zh:'装配部件。',prompt_en:'Assemble the parts.'}},
+      {id:'shell-track',title:'动态容器跟踪',type:'sequence',asset:'shell.png',w:280,h:100,q:{answer_type:'sequence',max_answer_len:8,render_mode:'sprite_sheet',frame_count:6,frame_cols:6,frame_rows:1,frame_ms:120,frame_loop:false,rounds:3,frames_per_round:2,boxes:[{x:14,y:18,w:52,h:70},{x:84,y:18,w:52,h:70},{x:154,y:18,w:52,h:70},{x:224,y:18,w:52,h:70}],input_mode:'shell',prompt_zh:'跟踪目标容器。',prompt_en:'Track the target container.'}}
+    ];
+    function response(v,s){return new Response(JSON.stringify(v),{status:s||200,headers:{'content-type':'application/json'}});}
+    function fixture(f){const q=Object.assign({media:'image',image_mime:'image/png',image_base64:png[f.asset],image_width:f.w,image_height:f.h},f.q);return {token:'gallery-'+f.id,mode:'pow_question',expires_in:120,pow:{algo:'sha256-prefix',bits:12,seed:'AAECAwQFBgcICQoLDA0ODw'},question:q};}
+    window.fetch=async function(url,options){const u=String(url);if(u.includes('/api/challenge')){const id=u.split('/fake-api/')[1]?.split('/')[0]||'text-image';return response(fixture(fixtures.find(f=>f.id===id)||fixtures[0]));}if(u.includes('/api/redeem'))return response({response:'gallery-response',expires_in:300});return nativeFetch(url,options);};
+    async function loadB64(path){const buf=await nativeFetch('./assets/'+path).then(r=>r.arrayBuffer());const b=new Uint8Array(buf);let s='';for(let i=0;i<b.length;i+=0x8000)s+=String.fromCharCode(...b.subarray(i,i+0x8000));return btoa(s);}
+    function card(f){const c=document.createElement('article');c.className='card';c.dataset.fixture=f.id;c.innerHTML=`<div class="card-head"><div><h2>${f.title}</h2><div class="meta">${f.id} · ${f.type}</div></div><button type="button" data-measure>测量</button></div><div class="stage"><div class="mount"><div data-mount></div></div><div class="metrics" data-metrics>等待渲染…</div></div><div class="status" data-status>loading</div>`;gallery.appendChild(c);return c;}
+    function measure(c){const mount=c.querySelector('[data-mount]'),host=mount.querySelector('[data-epocha-widget]'),root=host?.shadowRoot,rect=host?.getBoundingClientRect(),mr=mount.getBoundingClientRect(),simWidth=Number(viewport.value.split('x')[0]);const image=root?.querySelector('img'),ir=image?.getBoundingClientRect(),controls=root?[...root.querySelectorAll('button,input')].map(x=>{const r=x.getBoundingClientRect();return [r.width,r.height];}).filter(v=>v[0]>0&&v[1]>0):[];const minTarget=controls.length?Math.min(...controls.flat()):null;const fine=minTarget===null||minTarget>=28,coarse=minTarget===null||minTarget>=44,geometry=!!host&&!!rect&&rect.width>0&&rect.height>0&&rect.left>=mr.left-1&&rect.right<=mr.right+1;const ratio=image?.naturalWidth&&image.naturalHeight&&ir?.width&&ir?.height?(ir.width/ir.height)/(image.naturalWidth/image.naturalHeight):null;const ratioOK=ratio!==null&&Math.abs(ratio-1)<.02;const state=!geometry||!coarse||(ratio!==null&&!ratioOK)?'fail':ratio===null?'blocked':'pass';c.querySelector('[data-metrics]').innerHTML=`<div>simulated width <strong>${simWidth}px</strong></div><div>scrollWidth <strong>${document.documentElement.scrollWidth}</strong></div><div>widget <strong>${rect?Math.round(rect.width)+'×'+Math.round(rect.height):'missing'}</strong></div><div>min target <strong>${minTarget===null?'n/a':minTarget.toFixed(1)+'px'}</strong></div><div>fine ≥28 <strong>${fine?'PASS':'FAIL'}</strong></div><div>coarse ≥44 <strong>${coarse?'PASS':'FAIL'}</strong></div><div>image ratio <strong>${ratio===null?'n/a':ratio.toFixed(3)}</strong></div><div>geometry <strong>${geometry&&coarse?'PASS':'FAIL'}</strong></div><div>ratio <strong>${ratio===null?'NOT_RUN':ratioOK?'PASS':'FAIL'}</strong></div>`;const s=c.querySelector('[data-status]');s.className='status '+state;s.textContent=!geometry?'FAIL · 发现越界问题。':!coarse?(fine?'FAIL · 精细指针可用，但触屏 44px 不足。':'FAIL · 精细指针和触屏命中都不足。'):ratio===null?'NOT_RUN · sprite/background 题图需要逐帧和跨浏览器验收。':ratioOK?'PASS · 内容几何和触屏命中通过，这不是实际设备 viewport 证据。':'FAIL · 题图比例异常。';c.dataset.visualPass=state==='pass';}
+    async function renderAll(){for(const id of instances.splice(0)){EpoCHA.destroy(id);}gallery.innerHTML='';for(const f of fixtures){const c=card(f);c.querySelector('[data-measure]').onclick=()=>measure(c);try{const id=EpoCHA.render(c.querySelector('[data-mount]'),{apiBase:location.origin+'/fake-api/'+f.id,siteKey:'pk_gallery',language:'zh-CN',fieldName:'',maxAutoRetry:0});instances.push(id);setTimeout(()=>measure(c),1200);}catch(e){c.querySelector('[data-status]').textContent='FAIL · '+e.message;c.querySelector('[data-status]').className='status fail';}}}
+    function setSimulated(){const [w,h]=viewport.value.split('x').map(Number);document.documentElement.style.width=w+'px';document.body.style.width=w+'px';gallery.style.width=w+'px';gallery.style.gridTemplateColumns=w<=520?'1fr':'';document.querySelectorAll('.card').forEach(measure);}
+    viewport.onchange=async()=>{setSimulated();await renderAll();};document.querySelector('#remeasure').onclick=()=>document.querySelectorAll('.card').forEach(measure);setSimulated();
+    (async()=>{for(const f of fixtures)png[f.asset]=await loadB64(f.asset);await renderAll();})();
+  })();
+  </script>
+</body>
+</html>

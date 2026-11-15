@@ -18,6 +18,8 @@
 - 试部署前的只读预检与待确认清单：`deploy/preflight.sh`、`docs/TRIAL-DEPLOYMENT.md`
 - 依赖与字体许可：`docs/NOTICE.md`
 - 前端 widget：中英双语、键盘可完成（`docs/WIDGET.md`）
+- 当前题库视觉画廊与复测报告：`docs/visual-gallery/index.html`、`docs/reviews/VISUAL-CRITIQUE-2026-11-15.md`
+- 低密度题型扩展设计：`docs/QUESTION-TYPE-MEMORY-SEQUENCE.md`、`docs/QUESTION-TYPE-LOW-DENSITY-EXTENSIONS.md`
 - 命令：`make help`
 
 ## 状态

@@ -19,8 +19,9 @@
 #   bash preflight.sh
 #   bash preflight.sh --data-dir /data/epocha --ports 80,443,8080 --out /tmp/pf.json
 #   bash preflight.sh --text
+#   bash preflight.sh --strict
 #   环境变量等价：EPOCHA_PREFLIGHT_{DATA_DIR,KEYS_DIR,BACKUP_DIR,PORTS}
-# 退出码：0=报告已生成（warn 不改变退出码）；1=生成不了 / --out 已存在；2=用法错误。
+# 退出码：0=报告已生成；3=--strict 发现正式支持范围阻断；1=生成不了 / --out 已存在；2=用法错误。
 
 set -uo pipefail
 
@@ -30,6 +31,8 @@ BACKUP_DIR="${EPOCHA_PREFLIGHT_BACKUP_DIR:-/var/backups/epocha}"
 PORTS="${EPOCHA_PREFLIGHT_PORTS:-80 443 8080 8081}"
 OUT=""
 FORMAT=json
+STRICT=false
+STRICT_FAILURES=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -40,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     --out)        OUT="${2:-}"; shift 2 ;;
     --text)       FORMAT=text; shift ;;
     --json)       FORMAT=json; shift ;;
+    --strict|--require-supported) STRICT=true; shift ;;
     -h|--help)    sed -n '1,31p' "$0"; exit 0 ;;
     *) printf '用法错误：%s（--help 看用法）\n' "$1" >&2; exit 2 ;;
   esac
@@ -47,7 +51,7 @@ done
 PORTS="${PORTS//,/ }"
 
 have() { command -v "$1" >/dev/null 2>&1; }
-for t in awk sed grep stat id date df uname dirname; do
+for t in awk sed grep stat id date df uname dirname find; do
   have "$t" || { printf '缺少基本工具：%s ⇒ 不出报告而不是猜\n' "$t" >&2; exit 1; }
 done
 
@@ -55,6 +59,7 @@ FIELDS=()   # 每项形如 '"key": value'，渲染时统一加逗号
 WARNS=()
 esc() { local s="${1:-}"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\n'/ }"; printf '%s' "$s"; }
 warn() { WARNS+=("$1"); }
+strict_fail() { STRICT_FAILURES+=("$1"); warn "严格预检阻断：$1"; }
 f_str()  { FIELDS+=("\"$1\": \"$(esc "$2")\""); }
 f_num()  { local v="${2:-}"; if [[ "$v" =~ ^[0-9]+$ ]]; then FIELDS+=("\"$1\": $v"); else FIELDS+=("\"$1\": null"); fi; }
 f_bool() { local v="${2:-false}"; [[ "$v" == true || "$v" == false ]] || v=false; FIELDS+=("\"$1\": $v"); }
@@ -135,8 +140,14 @@ fi
 
 # 密钥文件：只 stat 权限位与属主。服务自己会拒绝 group/other 位非空的密钥文件，
 # 这是"部署起不来"的头号原因，所以值得在预检里就数出来（不读内容、不列文件名）。
-KEY_TOTAL=0; KEY_BADPERM=0; KEY_BADOWNER=0
+KEY_TOTAL=0; KEY_BADPERM=0; KEY_BADOWNER=0; KEY_BADRUNNER=0; KEY_SYMLINKS=0
+KEY_MASTER_PRESENT=false; KEY_PEPPER_PRESENT=false
 if [[ -d "$KEYS_DIR" ]]; then
+  # Scan links separately.  `find -L ... -type f` silently drops broken
+  # links, which would make a malformed key directory look clean.
+  while IFS= read -r kf; do
+    [[ -n "$kf" ]] && KEY_SYMLINKS=$((KEY_SYMLINKS + 1))
+  done < <(find "$KEYS_DIR" -maxdepth 1 -type l 2>/dev/null)
   while IFS= read -r kf; do
     [[ -f "$kf" ]] || continue
     KEY_TOTAL=$((KEY_TOTAL + 1))
@@ -145,14 +156,23 @@ if [[ -d "$KEYS_DIR" ]]; then
     # bash 的 (( )) 不认 0o 前缀（那是 Python 写法），octal 用 8#。
     if [[ "$km" =~ ^[0-7]{3,4}$ ]] && (( 8#$km & 8#77 )); then KEY_BADPERM=$((KEY_BADPERM + 1)); fi
     if [[ "$ko" != "$RUN_UID" && "$ko" != "65534" ]]; then KEY_BADOWNER=$((KEY_BADOWNER + 1)); fi
+    if [[ "$ko" != "$RUN_UID" ]]; then KEY_BADRUNNER=$((KEY_BADRUNNER + 1)); fi
   done < <(find "$KEYS_DIR" -maxdepth 1 -type f 2>/dev/null)
+  [[ -f "$KEYS_DIR/master" && ! -L "$KEYS_DIR/master" ]] && KEY_MASTER_PRESENT=true
+  [[ -f "$KEYS_DIR/pepper" && ! -L "$KEYS_DIR/pepper" ]] && KEY_PEPPER_PRESENT=true
 fi
 f_num  key_files_total "$KEY_TOTAL"
 f_num  key_files_with_group_or_other_bits "$KEY_BADPERM"
 f_num  key_files_owned_by_neither_runner_nor_65534 "$KEY_BADOWNER"
+f_num  key_files_not_owned_by_runner "$KEY_BADRUNNER"
+f_num  key_files_that_are_symlinks "$KEY_SYMLINKS"
+f_bool key_master_present "$KEY_MASTER_PRESENT"
+f_bool key_pepper_present "$KEY_PEPPER_PRESENT"
 f_str  key_dir_policy "不读内容、不列文件名：只取每个密钥文件的 stat 属主与权限位"
 (( KEY_BADPERM > 0 )) && warn "密钥里有 $KEY_BADPERM 把的 group/other 位不为空 ⇒ 服务会**拒绝启动**（config.readKeyFile 的 fail-closed 规则）。修法是 chmod 600，不是让服务放宽检查。"
 (( KEY_BADOWNER > 0 )) && warn "密钥里有 $KEY_BADOWNER 把的属主既不是当前用户也不是 65534 ⇒ 容器 uid 读不到，同样是拒绝启动而不是降级运行。"
+(( KEY_BADRUNNER > 0 )) && warn "密钥里有 $KEY_BADRUNNER 把的属主不是当前执行用户 UID $RUN_UID ⇒ 正式 1000:1000 配方无法证明容器服务可读。"
+(( KEY_SYMLINKS > 0 )) && warn "密钥目录里有 $KEY_SYMLINKS 个符号链接 ⇒ 容器只读挂载后可能解析到挂载外路径，正式预检拒绝。"
 [[ -d "$KEYS_DIR" && $KEY_TOTAL -eq 0 ]] && warn "密钥目录存在但没有文件：缺 master/pepper 时服务拒绝启动（没有内置默认密钥，这是设计不是缺陷）。"
 
 # ---------- Docker / Compose ----------
@@ -209,6 +229,7 @@ for p in $PORTS; do
           st="$state"
         fi ;;
   esac
+  printf -v "PORT_STATE_$p" '%s' "$st"
   [[ "$st" == unknown ]] && warn "端口 $p 探测失败或不可用（$LISTENER_TOOL）⇒ unknown；不能当成空闲。"
   [[ $first -eq 1 ]] && first=0 || ports_json+=","
   ports_json+="{\"port\":$p,\"state\":\"$st\"}"
@@ -224,13 +245,14 @@ ports_json+="]"
 f_raw ports "$ports_json"
 
 # ---------- 反代候选 ----------
-web_json="["; wfirst=1
+web_json="["; wfirst=1; PROXY_ACTIVE=false
 for svc in nginx caddy; do
   present=false; active=unknown; ver=""
   if have "$svc"; then
     present=true
     ver="$("$svc" -v 2>&1 | head -n1 | tr -d '\r' || true)"
     if have systemctl; then active="$(systemctl is-active "$svc" 2>/dev/null || echo inactive)"; fi
+    [[ "$active" == active ]] && PROXY_ACTIVE=true
   fi
   [[ $wfirst -eq 1 ]] && wfirst=0 || web_json+=","
   web_json+="{\"name\":\"$svc\",\"binary_present\":$present,\"systemd_active\":\"$(esc "$active")\",\"version\":\"$(esc "$ver")\"}"
@@ -241,6 +263,37 @@ f_raw reverse_proxy_candidates "$web_json"
 f_str not_done_by_this_script "安装、提权、创建目录/用户、拉镜像、构建、启动容器、改防火墙/DNS/证书、终止进程、读取或打印任何凭据内容"
 f_str authorization "Docker 可达、端口空闲、目录可写都不等于部署已获授权"
 
+# ---------- 严格正式支持范围门槛 ----------
+# 普通模式只生成只读信息报告。--strict 给正式 Linux/arm64 Oracle/VPS 上线前使用，
+# 将明确不满足支持范围的条件转换成 exit 3，避免 warning 被误读成放行。
+if [[ "$STRICT" == true ]]; then
+  case "$(uname -m)" in
+    aarch64|arm64) ;;
+    *) strict_fail "架构 $(uname -m) 不在正式支持范围，要求 linux/arm64" ;;
+  esac
+  [[ "$RUN_UID:$RUN_GID" == "1000:1000" ]] || strict_fail "执行身份 $RUN_UID:$RUN_GID 不符合正式范围 1000:1000"
+  [[ "$DOCKER_PRESENT" == true && "$DAEMON_OK" == true ]] || strict_fail "Docker CLI 或 daemon 对当前执行用户不可用"
+  [[ -n "$COMPOSE_VER" ]] || strict_fail "docker compose 子命令不可用"
+  [[ -d "$DATA_DIR" && -w "$DATA_DIR" ]] || strict_fail "数据目录不存在或不可写：$DATA_DIR"
+  [[ -d "$KEYS_DIR" && -w "$KEYS_DIR" ]] || strict_fail "密钥目录不存在或不可写：$KEYS_DIR"
+  [[ -d "$BACKUP_DIR" && -w "$BACKUP_DIR" ]] || strict_fail "备份目录不存在或不可写：$BACKUP_DIR"
+  [[ "$DATA_DIR" != "$BACKUP_DIR" ]] || strict_fail "数据目录与备份目录不能相同"
+  [[ "$KEYS_DIR" != "$DATA_DIR" ]] || strict_fail "密钥目录与数据目录不能相同"
+  (( KEY_TOTAL >= 2 )) || strict_fail "密钥目录至少需要 master 与 pepper 两份密钥文件"
+  [[ "$KEY_MASTER_PRESENT" == true ]] || strict_fail "缺少名为 master 的密钥文件"
+  [[ "$KEY_PEPPER_PRESENT" == true ]] || strict_fail "缺少名为 pepper 的密钥文件"
+  (( KEY_BADPERM == 0 )) || strict_fail "存在 group/other 可读写的密钥文件"
+  (( KEY_BADRUNNER == 0 )) || strict_fail "存在属主不是当前执行用户的密钥文件"
+  (( KEY_SYMLINKS == 0 )) || strict_fail "密钥目录包含符号链接"
+  [[ "${MEM_T:-0}" =~ ^[0-9]+$ && "$MEM_T" -ge 900000 ]] || strict_fail "物理内存低于正式 1GB 机器的最低预检阈值"
+  [[ "${SWAP_T:-0}" =~ ^[0-9]+$ && "$SWAP_T" -ge 400000 ]] || strict_fail "swap 小于约 512MB"
+  [[ "$SWAPPY" == "10" ]] || strict_fail "vm.swappiness 不是 10：$SWAPPY"
+  [[ "$LISTENER_TOOL" != none ]] || strict_fail "无法判断监听端口，不能进入严格部署预检"
+  [[ "${PORT_STATE_8080:-unknown}" == free ]] || strict_fail "宿主 8080 不是明确空闲状态：${PORT_STATE_8080:-unknown}"
+  [[ "${PORT_STATE_8081:-unknown}" == free ]] || strict_fail "宿主 8081 不是明确空闲状态：${PORT_STATE_8081:-unknown}"
+  [[ "$PROXY_ACTIVE" == true ]] || strict_fail "没有检测到 active 的 nginx 或 caddy 反代"
+fi
+
 # ---------- 渲染 ----------
 render_json() {
   printf '{\n'
@@ -249,7 +302,14 @@ render_json() {
     [[ $firsti -eq 1 ]] && firsti=0 || printf ',\n'
     printf '  %s' "$i"
   done
-  printf ',\n  "warnings": ['
+  printf ',\n  "strict": %s,\n  "strict_failures": [' "$STRICT"
+  firsti=1
+  for i in ${STRICT_FAILURES[@]+"${STRICT_FAILURES[@]}"}; do
+    [[ $firsti -eq 1 ]] && firsti=0 || printf ','
+    printf '\n    "%s"' "$(esc "$i")"
+  done
+  [[ ${#STRICT_FAILURES[@]} -gt 0 ]] && printf '\n  '
+  printf '],\n  "warnings": ['
   firsti=1
   for i in ${WARNS[@]+"${WARNS[@]}"}; do
     [[ $firsti -eq 1 ]] && firsti=0 || printf ','
@@ -264,6 +324,10 @@ render_text() {
     "$(uname -m)" "$(uname -r)" "$OSPretty" "$(id -un)" "$RUN_UID:$RUN_GID"
   local i
   for i in "${FIELDS[@]}"; do printf '%s\n' "$i"; done
+  if [[ "$STRICT" == true ]]; then
+    printf '\n严格预检阻断：%d 项\n' "${#STRICT_FAILURES[@]}"
+    for i in "${STRICT_FAILURES[@]}"; do printf '  - %s\n' "$i"; done
+  fi
   if [[ ${#WARNS[@]} -gt 0 ]]; then
     printf '\n需要人判断的 %d 项：\n' "${#WARNS[@]}"
     for i in "${WARNS[@]}"; do printf '  - %s\n' "$i"; done
@@ -292,5 +356,9 @@ if [[ -n "$BODY_FILE" ]]; then
   BODY_FILE=""
   printf '报告已写入 %s\n' "$OUT" >&2
 fi
-printf '预检完成：warn=%d（warn 给人判断，不是失败）；未改变机器状态；这不是部署授权\n' "${#WARNS[@]}" >&2
+if [[ "$STRICT" == true && ${#STRICT_FAILURES[@]} -gt 0 ]]; then
+  printf '严格预检完成：strict_failures=%d，warn=%d，退出码 3；未改变机器状态；这不是部署授权\n' "${#STRICT_FAILURES[@]}" "${#WARNS[@]}" >&2
+  exit 3
+fi
+printf '预检完成：warn=%d；未改变机器状态；这不是部署授权\n' "${#WARNS[@]}" >&2
 exit 0

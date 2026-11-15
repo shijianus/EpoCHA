@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,6 +44,7 @@ id() {
   case "$1" in -u|-g) printf '1000\n' ;; -un) printf 'fixture\n' ;; *) return 2 ;; esac
 }
 stat() {
+  [[ "\${PF_SCAN_KEYS:-}" == 1 ]] && { builtin command stat "$@"; return; }
   case "$2" in
     '%u:%g') printf '424242:424242\n' ;;
     '%u') printf '424242\n' ;;
@@ -57,7 +58,7 @@ findmnt() {
 df() {
   printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nfixture 100000 1000 99000 1%% /\n'
 }
-find() { return 0; }
+find() { builtin command find "$@"; }
 if [[ "$PF_DIRS" == readonly ]]; then
   locked_dir=''
   for d in /proc/sys /sys /proc; do
@@ -66,16 +67,25 @@ if [[ "$PF_DIRS" == readonly ]]; then
   [[ -n "$locked_dir" ]] || { printf 'BLOCKED: no readonly pseudo-directory fixture\n' >&2; exit 125; }
   PF_DATA="$locked_dir"; PF_KEYS="$locked_dir"; PF_BACKUP="$locked_dir"
 fi
-source "$1" --data-dir "$PF_DATA" --keys-dir "$PF_KEYS" --backup-dir "$PF_BACKUP" --ports 8080 --"$PF_FORMAT"
+if [[ "$PF_STRICT" == 1 ]]; then
+  source "$1" --data-dir "$PF_DATA" --keys-dir "$PF_KEYS" --backup-dir "$PF_BACKUP" --ports 8080 --"$PF_FORMAT" --strict
+else
+  source "$1" --data-dir "$PF_DATA" --keys-dir "$PF_KEYS" --backup-dir "$PF_BACKUP" --ports 8080 --"$PF_FORMAT"
+fi
 `;
 
-function runPreflight(t, { tool = 'ss', mode = 'free', dirs = 'writable', format = 'json' } = {}) {
+function runPreflight(t, { tool = 'ss', mode = 'free', dirs = 'writable', format = 'json', strict = false, expectedStatus = 0, scanKeys = false } = {}) {
   const temp = mkdtempSync(join(tmpdir(), 'epocha-preflight-regression-'));
   t.after(() => rmSync(temp, { recursive: true, force: true })); // Only this test's own new fixture.
   for (const name of ['data', 'keys', 'backups']) mkdirSync(join(temp, name));
+  if (scanKeys) {
+    writeFileSync(join(temp, 'keys', 'master'), 'master-fixture');
+    writeFileSync(join(temp, 'keys', 'pepper'), 'pepper-fixture');
+    symlinkSync('master', join(temp, 'keys', 'key-link'));
+  }
   const env = {
     ...process.env,
-    PF_TOOL: tool, PF_MODE: mode, PF_DIRS: dirs, PF_FORMAT: format,
+    PF_TOOL: tool, PF_MODE: mode, PF_DIRS: dirs, PF_FORMAT: format, PF_STRICT: strict ? '1' : '', PF_SCAN_KEYS: scanKeys ? '1' : '',
     PF_DATA: join(temp, 'data').replaceAll('\\', '/'),
     PF_KEYS: join(temp, 'keys').replaceAll('\\', '/'),
     PF_BACKUP: join(temp, 'backups').replaceAll('\\', '/'),
@@ -86,7 +96,7 @@ function runPreflight(t, { tool = 'ss', mode = 'free', dirs = 'writable', format
     cwd: ROOT, env, encoding: 'utf8', timeout: 15000,
   });
   assert.ifError(result.error);
-  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.equal(result.status, expectedStatus, result.stderr || result.stdout);
   assert.doesNotMatch(result.stderr, /UNEXPECTED_.*_CALL/);
   if (format === 'text') return result;
   const report = JSON.parse(result.stdout);
@@ -127,6 +137,21 @@ test('directory warnings are also retained in the human-readable report', (t) =>
   const count = stdout.match(/需要人判断的 (\d+) 项/);
   assert.ok(count);
   assert.equal(Number(count[1]), Number(stderr.match(/warn=(\d+)/)[1]));
+});
+
+test('strict mode returns exit 3 outside formal support', (t) => {
+  const { report } = runPreflight(t, { strict: true, expectedStatus: 3 });
+  assert.equal(report.strict, true);
+  assert.ok(report.strict_failures.length > 0);
+  assert.ok(report.warnings.some((w) => w.includes('严格预检阻断')));
+});
+
+test('strict mode rejects key symlinks and reports the required key names', (t) => {
+  const { report } = runPreflight(t, { strict: true, expectedStatus: 3, scanKeys: true });
+  assert.equal(report.key_master_present, true);
+  assert.equal(report.key_pepper_present, true);
+  assert.equal(report.key_files_that_are_symlinks, 1);
+  assert.ok(report.strict_failures.some((item) => item.includes('符号链接')));
 });
 
 function serverDirectives(source) {

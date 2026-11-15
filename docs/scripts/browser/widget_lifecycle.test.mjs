@@ -1007,6 +1007,18 @@ test("symbol-path 输入：相邻点击组成固定两位索引串，Backspace �
   assert.equal(h.buttons[0].disabled, true);
 });
 
+test("symbol-path 拖动在 pointerup 后结束，释放到格子外不会粘住命中状态", async (t) => {
+  const h = harness(t);
+  h.requests[0].respond(pathChallenge());
+  await flush();
+  const cells = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell");
+  cells[0].emit("pointerdown", { button: 0, pointerId: 7 });
+  h.document.emit("pointerup", { pointerId: 7 });
+  for (const i of [1, 2, 8, 14, 15]) cells[i].emit("pointerenter");
+  assert.equal(h.answer.value, "", "释放后悬停不能继续追加路径");
+  assert.equal(cells[1].getAttribute("data-path"), "false");
+});
+
 test("symbol-path 粗指针布局过密时 fail closed，不渲染不可用命中盒", async (t) => {
   const h = harness(t, { coarsePointer: true });
   h.requests[0].respond(pathChallenge());
@@ -1024,8 +1036,10 @@ test("visual-rank 输入：五张卡按选择顺序合成排列，Undo 撤销最
   const cards = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell");
   assert.equal(cards.length, 5);
   const ids = cards.map((card) => card.getAttribute("data-card"));
+  assert.ok(cards.every((card) => card.getAttribute("aria-pressed") === "false"));
   for (const card of cards) card.emit("click");
   assert.equal(h.answer.value, "v1:" + ids.join("."));
+  assert.ok(cards.every((card) => card.getAttribute("aria-pressed") === "true"));
   assert.equal(h.buttons[0].disabled, false);
   const aux = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "aux")[0];
   const btns = findAll(aux, (node) => node.tagName === "BUTTON");
@@ -1043,8 +1057,11 @@ test("crowd-find 输入：单格选择，改选只保留最后一个索引", asy
   assert.equal(cells.length, 36);
   cells[7].emit("click");
   assert.equal(h.answer.value, "v1:7");
+  assert.equal(cells[7].getAttribute("aria-pressed"), "true");
   cells[20].emit("click");
   assert.equal(h.answer.value, "v1:20");
+  assert.equal(cells[7].getAttribute("aria-pressed"), "false");
+  assert.equal(cells[20].getAttribute("aria-pressed"), "true");
   assert.equal(h.buttons[0].disabled, false);
 });
 
@@ -1146,12 +1163,14 @@ test("shell-track 输入：动画结束前不可选，三轮后合成答案", as
   let boxes = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell shellbox");
   assert.equal(boxes.length, 4);
   assert.equal(boxes[0].disabled, true, "动画结束前容器必须不可选");
+  assert.equal(boxes[0].getAttribute("aria-pressed"), "false");
   await h.time.advance(170 * 11);
   boxes = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell shellbox");
   assert.equal(boxes[0].disabled, false, "动画结束后容器必须可选");
   boxes[1].emit("click");
   assert.equal(h.answer.value, "");
   boxes = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell shellbox");
+  assert.equal(boxes[1].getAttribute("aria-pressed"), "false", "下一轮开始后不应把上一轮选择伪装成当前选中");
   assert.equal(boxes[0].disabled, true, "下一轮动画期间再次不可选");
   await h.time.advance(170 * 11);
   boxes = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell shellbox");
@@ -1160,6 +1179,7 @@ test("shell-track 输入：动画结束前不可选，三轮后合成答案", as
   boxes = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell shellbox");
   boxes[1].emit("click");
   assert.equal(h.answer.value, "v1:1.2.1");
+  assert.equal(boxes[1].getAttribute("aria-pressed"), "true");
   assert.equal(h.buttons[0].disabled, false);
 });
 
@@ -1194,4 +1214,23 @@ test("silhouette-assembly 输入：选择/旋转/放置，五格填满才合成�
   }
   assert.equal(h.answer.value, "v1:" + ids.map((id, i) => id + ":" + (i === 0 ? 1 : 0)).join(","));
   assert.equal(h.buttons[0].disabled, false);
+});
+
+test("silhouette-assembly 不覆盖已占用槽位，部件不会凭空丢失", async (t) => {
+  const h = harness(t);
+  h.requests[0].respond(placementsChallenge());
+  await flush();
+  const pieces = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell piece");
+  const slots = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell slot");
+  pieces[0].emit("click");
+  slots[0].emit("click");
+  assert.equal(h.api.state(h.id), "ready");
+  pieces[1].emit("click");
+  slots[0].emit("click");
+  assert.equal(h.answer.value, "", "覆盖操作不得生成不完整但不可恢复的答案");
+  const summary = find(h.host.shadowRoot, (node) => node.getAttribute("class") === "cellsum");
+  assert.match(summary.textContent, /occupied|已有部件/);
+  assert.equal(slots[0].firstChild.getAttribute("class"), "pieceimg");
+  assert.equal(pieces[0].getAttribute("data-used"), "true");
+  assert.equal(pieces[1].getAttribute("data-used"), "false");
 });

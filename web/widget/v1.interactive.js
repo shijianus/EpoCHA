@@ -153,6 +153,7 @@
       shellReduced: "当前系统开启了“减少动态效果”，本题需要动画；请更换其他验证。",
       pieceLabel: "部件 {id}",
       slotLabel: "槽位 {n}",
+      slotOccupied: "槽位 {n} 已有部件，请先选择空槽位。",
       placementsProgress: "已放置 {n}/5",
       pieceSelected: "已选择部件 {id}，可旋转后放入槽位。",
       pieceRotated: "部件方向 {deg}°。",
@@ -195,6 +196,7 @@
       shellReduced: "Reduced motion is enabled and this question needs animation; please switch to another verification.",
       pieceLabel: "Piece {id}",
       slotLabel: "Slot {n}",
+      slotOccupied: "Slot {n} is occupied. Choose an empty slot.",
       placementsProgress: "Placed {n}/5",
       pieceSelected: "Piece {id} selected; rotate it and place it in a slot.",
       pieceRotated: "Piece orientation {deg}°.",
@@ -304,6 +306,7 @@
       var btn = this.cellButtons[k];
       var pos = this.pathCells.indexOf(k);
       btn.setAttribute("data-path", pos >= 0 ? "true" : "false");
+      btn.setAttribute("aria-pressed", pos >= 0 ? "true" : "false");
       var badge = btn.firstChild;
       if (badge) {
         badge.textContent = pos >= 0 ? String(pos + 1) : "";
@@ -464,6 +467,13 @@
     this.gridCols = intField(q, "grid_cols");
     this.pathTargetLen = intField(q, "target_len");
     var self = this;
+    var dragSurface = this.host && this.host.ownerDocument;
+    if (dragSurface && typeof dragSurface.addEventListener === "function") {
+      this.pathDragSurface = dragSurface;
+      this.pathDragRelease = function () { self.pathDragging = false; };
+      this._on(dragSurface, "pointerup", this.pathDragRelease);
+      this._on(dragSurface, "pointercancel", this.pathDragRelease);
+    }
     var ids = Array.isArray(q.cell_ids) ? q.cell_ids : [];
     for (var i = 0; i < this.gridCols * intField(q, "grid_rows"); i++) {
       var idx = i;
@@ -478,19 +488,30 @@
         return function (e) { self._pathKey(e, cellIdx); };
       })(idx);
       var df = (function (cellIdx) {
-        return function (e) { if (e.button === 0) { self.pathDragging = true; self._pathTap(cellIdx); } };
+        return function (e) {
+          if (e.button !== 0) return;
+          self.pathDragging = true;
+          self._pathTap(cellIdx);
+        };
       })(idx);
       var ef = (function (cellIdx) {
         return function () { if (self.pathDragging) { self._pathTap(cellIdx); } };
       })(idx);
+      var uf = function () {
+        self.pathDragging = false;
+      };
       btn._epochaClick = fn;
       btn._epochaKey = kf;
       btn._epochaDown = df;
       btn._epochaEnter = ef;
+      btn._epochaUp = uf;
+      btn._epochaCancel = uf;
       this._on(btn, "click", fn);
       this._on(btn, "keydown", kf);
       this._on(btn, "pointerdown", df);
       this._on(btn, "pointerenter", ef);
+      this._on(btn, "pointerup", uf);
+      this._on(btn, "pointercancel", uf);
       this.cellButtons.push(btn);
       this.cellWrap.appendChild(btn);
     }
@@ -520,7 +541,7 @@
     for (var i = 0; i < q.cards.length; i++) {
       var card = q.cards[i];
       var btn = el("button", {
-        type: "button", class: "cell", "data-card": String(card.id),
+        type: "button", class: "cell", "data-card": String(card.id), "aria-pressed": "false",
         "aria-label": tr(this.o.lang, "cellLabel", { n: i + 1 }),
         "aria-describedby": this.note.getAttribute("id") + " " + this.status.getAttribute("id"),
         style: "left:" + (card.x / iw * 100) + "%;top:" + (card.y / ih * 100) + "%;width:" +
@@ -542,6 +563,15 @@
 
   Widget.prototype._syncRank = function () {
     var parts = [];
+    for (var reset = 0; reset < this.cellButtons.length; reset++) {
+      this.cellButtons[reset].setAttribute("data-sel", "false");
+      this.cellButtons[reset].setAttribute("aria-pressed", "false");
+      var resetBadge = this.cellButtons[reset].firstChild;
+      if (resetBadge) {
+        resetBadge.textContent = "";
+        resetBadge.setAttribute("class", "rankno hidden");
+      }
+    }
     for (var i = 0; i < this.rankOrder.length; i++) {
       var id = this.rankOrder[i];
       parts.push(id);
@@ -551,6 +581,7 @@
           badge.textContent = String(i + 1);
           badge.setAttribute("class", "rankno");
           this.cellButtons[k].setAttribute("data-sel", "true");
+          this.cellButtons[k].setAttribute("aria-pressed", "true");
         }
       }
     }
@@ -604,6 +635,7 @@
       var idx = i;
       var btn = this._placeGridButton(q, iw, ih, idx,
         tr(this.o.lang, "cellLabel", { n: idx + 1 }) + (ids[idx] ? " (" + ids[idx] + ")" : ""));
+      btn.setAttribute("aria-pressed", "false");
       var fn = (function (cellIdx) {
         return function (e) { e.preventDefault(); self._selectCell(cellIdx); };
       })(idx);
@@ -634,6 +666,7 @@
     this.selectIndex = idx;
     for (var i = 0; i < this.cellButtons.length; i++) {
       this.cellButtons[i].setAttribute("data-sel", i === idx ? "true" : "false");
+      this.cellButtons[i].setAttribute("aria-pressed", i === idx ? "true" : "false");
     }
     this.answer.value = "v1:" + String(idx);
     this.cellStatus.textContent = tr(this.o.lang, "selectChosen", { n: idx + 1 });
@@ -824,6 +857,7 @@
       var btn = el("button", {
         type: "button", class: "cell shellbox", "data-box": String(i),
         "aria-label": tr(this.o.lang, "slotLabel", { n: i + 1 }),
+        "aria-pressed": "false",
         "aria-describedby": this.note.getAttribute("id") + " " + this.status.getAttribute("id"),
         style: "left:" + (b.x / iw * 100) + "%;top:" + (b.y / ih * 100) + "%;width:" +
           (b.w / iw * 100) + "%;height:" + (b.h / ih * 100) + "%"
@@ -858,7 +892,10 @@
     var end = start + this.shellFramesPerRound - 1;
     this.shellFrame = start;
     this._shellShowFrame(start);
-    for (var i = 0; i < this.cellButtons.length; i++) this.cellButtons[i].setAttribute("data-sel", "false");
+    for (var i = 0; i < this.cellButtons.length; i++) {
+      this.cellButtons[i].setAttribute("data-sel", "false");
+      this.cellButtons[i].setAttribute("aria-pressed", "false");
+    }
     if (this.state === STATES.READY) this._setInputsEnabled(true);
     this.cellStatus.textContent = tr(this.o.lang, "shellWatch", { n: round + 1, total: this.shellRounds });
     var self = this, my = this.gen;
@@ -888,6 +925,7 @@
     this.shellSelections[this.shellRound] = idx;
     for (var i = 0; i < this.cellButtons.length; i++) {
       this.cellButtons[i].setAttribute("data-sel", i === idx ? "true" : "false");
+      this.cellButtons[i].setAttribute("aria-pressed", i === idx ? "true" : "false");
     }
     if (this.shellRound < this.shellRounds - 1) {
       this._shellPlayRound(this.shellRound + 1);
@@ -1011,6 +1049,12 @@
   Widget.prototype._placeSlot = function (slot) {
     if (this.destroyed || this.state !== STATES.READY || this.answerMode !== "placements") return;
     if (!this.placeSelected) return;
+    if (slot < 0 || slot >= this.placeState.length || this.placeState[slot]) {
+      if (slot >= 0 && slot < this.placeState.length) {
+        this.cellStatus.textContent = tr(this.o.lang, "slotOccupied", { n: slot + 1 });
+      }
+      return;
+    }
     this._placeSnapshot();
     for (var i = 0; i < this.placeState.length; i++) {
       if (this.placeState[i] && this.placeState[i].id === this.placeSelected) this.placeState[i] = null;

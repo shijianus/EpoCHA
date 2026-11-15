@@ -45,10 +45,10 @@ sudo -u epocha -g epocha -- bash deploy/prepare-keys.sh /etc/epocha/keys
 
 **权限与"非 root 容器实际读得到什么"**：镜像的 `USER` 是数字 uid `65534:65534`（scratch 里没有
 `/etc/passwd`，因此不使用用户名）。`epocha` 读密钥文件走 `os.Stat` + `os.Open`，并且要求
-**解析后的目标文件**权限的 group/other 位为空（0600 或 0400），否则拒绝启动。符号链接是允许的
-（编排平台的 secret 挂载本身就是指向 `..data/<uuid>` 的链接），但目标必须是普通文件。
-也就是说：容器内进程能读的只有它自己 uid 能读的那几把密钥，而密钥目录还是 `:ro` 挂载——
-运行时无法换掉自己的密钥。
+**解析后的目标文件**权限的 group/other 位为空（0600 或 0400），否则拒绝启动。正式 Docker 预检还要求
+`master`/`pepper` 是当前服务 UID 持有的普通文件，并拒绝符号链接，避免本地 bind mount 绕出密钥目录。
+这与某些编排平台的 secret 链接挂载形状不同，不能把 Kubernetes 的链接目录直接当作本项目正式 Docker
+单节点验收证据。密钥目录仍以 `:ro` 挂载，运行时无法换掉自己的密钥。
 
 ## 3. 构建镜像：受支持的是 B 路径，A 路径保持可选
 
@@ -429,7 +429,7 @@ node docs/scripts/release-check.mjs --profile full
 - [ ] 恢复演练后的站点逐个确认再启用；管理凭据用恢复时新装入的那把。
 - [ ] 反代日志的磁盘占用与轮转确认（`logrotate` 或服务自己的 json-file 上限）。
 - [ ] `make stage5a-check` 在本机退出码 0；若非 0，逐条读 RESULT 行而不是把文件写完当成验收通过。
-- [ ] 在**目标机**上获授权后跑一次 `bash deploy/preflight.sh --text`（只读），把它报的 warn 逐条处置完再部署：
+- [ ] 在**目标机**上获授权后先跑一次 `bash deploy/preflight.sh --strict --text`（只读）。正式上线要求 strict 退出码为 0；若 strict 返回 3，先处理报告中的架构、UID/GID、Docker、目录、密钥、swap 和端口阻断，再部署：
       密钥权限位、数据目录属主与 uid、端口占用、可用内存/swap、docker 组可达性。
       `ss`/其他探测失败必须是 `unknown`，不是 `free`；目录告警应同时出现在字段、warnings 与最终计数。
       退出码 0 只表示报告已生成，不表示端口全空闲或获准部署。开发机的预检结果不算目标机事实。

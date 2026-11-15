@@ -61,6 +61,12 @@ bash preflight.sh --json \
 
 # 给人看的版本：
 bash preflight.sh --text
+
+# 正式上线前的硬门槛。Oracle 正式支持范围是 Linux/arm64、UID:GID 1000:1000。
+# strict 发现明确阻断时退出 3，仍然只读，不安装、不提权、不启动服务。
+bash preflight.sh --strict --json \
+  --data-dir /var/lib/epocha --keys-dir /etc/epocha/keys --backup-dir /var/backups/epocha \
+  --ports 80,443,8080,8081 --out /tmp/epocha-preflight-strict.json
 ```
 
 脚本不安装、不提权、不拉镜像、不构建、不创建目录/用户、不改防火墙/DNS/证书、不终止占端口的进程，

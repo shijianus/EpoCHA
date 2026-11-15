@@ -751,7 +751,7 @@ if (typeof self !== "undefined") {
   }
 
   Widget._interactive = false;
-  var interactiveLoad = { state: "none", promise: null };
+  var interactiveLoad = null;
 
   function interactiveScriptURL(apiBase) {
     if (SCRIPT_SRC) {
@@ -760,34 +760,61 @@ if (typeof self !== "undefined") {
     return String(apiBase || "").replace(/\/+$/, "") + "/widget/v1.interactive.js";
   }
 
-  // 只加载一次；同一个页面的多个 widget 共用。失败后不无限重试：交互题型明确失败，
-  // 非交互题型仍可继续使用核心状态机。
+  Widget.prototype._cancelInteractive = function () {
+    if (this.cancelInteractive) this.cancelInteractive();
+  };
+
   Widget.prototype._ensureInteractive = function () {
     if (Widget._interactive) return Promise.resolve();
-    if (!interactiveLoad.promise) {
-      var src = interactiveScriptURL(this.o.apiBase);
-      interactiveLoad.promise = new Promise(function (resolve, reject) {
+    var attempt = interactiveLoad, self = this;
+    if (!attempt) {
+      attempt = { waiters: [], script: null, done: false };
+      interactiveLoad = attempt;
+      attempt.finish = function (error) {
+        if (attempt.done) return;
+        attempt.done = true;
+        if (interactiveLoad === attempt) interactiveLoad = null;
+        var script = attempt.script;
+        if (script) {
+          script.onload = script.onerror = null;
+          if (script.parentNode) script.parentNode.removeChild(script);
+        }
+        attempt.waiters.slice().forEach(function (finish) { finish(error); });
+      };
+    }
+    return new Promise(function (resolve, reject) {
+      var timer = 0, settled = false;
+      function finish(error) {
+        if (settled) return;
+        settled = true;
+        if (timer) global.clearTimeout(timer);
+        var i = attempt.waiters.indexOf(finish);
+        if (i >= 0) attempt.waiters.splice(i, 1);
+        if (self.cancelInteractive === cancel) self.cancelInteractive = null;
+        if (!attempt.waiters.length && !attempt.done) attempt.finish(new Error("cancelled"));
+        if (error) reject(error); else resolve();
+      }
+      function cancel() { finish(new Error("cancelled")); }
+      self.cancelInteractive = cancel;
+      attempt.waiters.push(finish);
+      // Reuse the bounded network budget; the instance's challenge timer may expire sooner.
+      timer = global.setTimeout(function () { finish(new Error("interactive-unavailable")); }, self.o.fetchTimeoutMs);
+      if (!attempt.script) {
         var doc = global.document;
         if (!doc || typeof doc.createElement !== "function" || !(doc.head || doc.documentElement)) {
-          reject(new Error("interactive-unavailable")); return;
+          attempt.finish(new Error("interactive-unavailable")); return;
         }
         var script = doc.createElement("script");
-        script.src = src;
+        attempt.script = script;
+        script.src = interactiveScriptURL(self.o.apiBase);
         script.async = true;
         script.onload = function () {
-          if (Widget._interactive) resolve();
-          else reject(new Error("interactive-unavailable"));
+          attempt.finish(Widget._interactive ? null : new Error("interactive-unavailable"));
         };
-        script.onerror = function () { reject(new Error("interactive-unavailable")); };
+        script.onerror = function () { attempt.finish(new Error("interactive-unavailable")); };
         (doc.head || doc.documentElement).appendChild(script);
-      });
-      // 失败不永久钉死：下一次领题/刷新再试一次；CSP 永久阻断时会再次明确失败。
-      interactiveLoad.promise.catch(function () {
-        interactiveLoad.state = "failed";
-        interactiveLoad.promise = null;
-      });
-    }
-    return interactiveLoad.promise;
+      }
+    });
   };
 
   Widget._ = function () {};
@@ -1570,16 +1597,27 @@ if (typeof self !== "undefined") {
     this.timingOut.textContent = tr(this.o.lang, "timingRecorded", { ms: ms });
   };
 
+  function spritePosition(frame, cols, rows) {
+    return (cols > 1 ? frame % cols / (cols - 1) * 100 : 0) + "% " +
+      (rows > 1 ? Math.floor(frame / cols) / (rows - 1) * 100 : 0) + "%";
+  }
+
+  function spriteStyle(view, iw, ih, cols, rows) {
+    view.style.width = iw + "px";
+    view.style.height = "auto";
+    view.style.aspectRatio = iw + " / " + ih;
+    view.style.backgroundSize = (cols * 100) + "% " + (rows * 100) + "%";
+    view.style.backgroundPosition = spritePosition(0, cols, rows);
+  }
+
   Widget.prototype._renderFrames = function (q, iw, ih, alt) {
     if (!validFrames(q, iw, ih)) { this._imageFailed(); return false; }
     this._clearImage();
     var count = intField(q, "frame_count"), cols = intField(q, "frame_cols");
     var rows = intField(q, "frame_rows"), ms = intField(q, "frame_ms");
     var view = el("div", { class: "frameview", role: "img", "aria-label": alt });
-    view.style.width = iw + "px";
-    view.style.height = ih + "px";
+    spriteStyle(view, iw, ih, cols, rows);
     view.style.backgroundImage = "url(data:" + q.image_mime + ";base64," + q.image_base64 + ")";
-    view.style.backgroundSize = (iw * cols) + "px " + (ih * rows) + "px";
     this.frameView = view;
     this.imgBox.appendChild(view);
     this._showImageBox();
@@ -1596,7 +1634,7 @@ if (typeof self !== "undefined") {
     var keyframes = [];
     for (var f = 0; f < count; f++) {
       keyframes.push({
-        backgroundPosition: (-(f % cols) * iw) + "px " + (-Math.floor(f / cols) * ih) + "px",
+        backgroundPosition: spritePosition(f, cols, rows),
         offset: f / count
       });
     }
@@ -1748,6 +1786,7 @@ if (typeof self !== "undefined") {
   };
 
   Widget.prototype._clearDeadline = function () {
+    this._cancelInteractive();
     if (this.timer) { global.clearTimeout(this.timer); this.timer = 0; }
     this.deadlineEpoch = 0;
   };
@@ -1787,6 +1826,7 @@ if (typeof self !== "undefined") {
   };
 
   Widget.prototype._expireChallenge = function () {
+    this.gen++;
     this.challenge = null;
     this._clearDeadline();
     this._terminateWorker();
@@ -1914,13 +1954,11 @@ if (typeof self !== "undefined") {
           expires: Number(j.expires_in) || 0
         };
         if (self.challenge.expires > 0) {
-          self.deadlineEpoch = loadStartedAt + self.challenge.expires * 1000;
-          if (Date.now() >= self.deadlineEpoch) {
-            self._expireChallenge();
-            return;
-          }
+          self._armDeadline(loadStartedAt + self.challenge.expires * 1000, function () { self._expireChallenge(); });
+          if (self.destroyed || my !== self.gen || !self.challenge) return;
         }
         var proceed = function () {
+        if (self.destroyed || my !== self.gen || !self.challenge) return;
         if (at === "text") {
           if (media === "text") {
             self._renderTextOptions(q);
@@ -2466,7 +2504,8 @@ if (typeof self !== "undefined") {
     if (Widget._interactive) return;
     install({
       Widget: Widget, STATES: STATES, el: el, tr: tr, intField: intField,
-      validGrid: validGrid, validPrompts: validPrompts, clear: clear, i18n: I18N, global: global
+      validGrid: validGrid, validPrompts: validPrompts, clear: clear, i18n: I18N, global: global,
+      spriteStyle: spriteStyle, spritePosition: spritePosition
     });
     Widget._interactive = true;
   };

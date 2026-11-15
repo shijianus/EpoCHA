@@ -817,6 +817,83 @@ function selectChallenge() {
   });
 }
 
+test("interactive pending request times out and refresh starts a fresh attempt", async (t) => {
+  const h = harness(t, { interactive: false });
+  h.requests[0].respond(rotateChallenge());
+  await flush();
+  const old = find(h.document.head, (node) => node.tagName === "SCRIPT");
+  const lateLoad = old.onload;
+  await h.time.advance(1000);
+  assert.equal(h.api.state(h.id), "error");
+  assert.equal(h.errors.at(-1).code, "interactive-unavailable");
+  assert.equal(h.buttons[1].disabled, false);
+  assert.equal(h.time.timers.size, 0);
+  assert.equal(old.parentNode, null);
+  vm.runInNewContext(interactiveSource, h.sandbox);
+  lateLoad();
+  await flush();
+  assert.equal(h.api.state(h.id), "error", "late module callback revived an expired attempt");
+  h.api.refresh(h.id);
+  h.requests.at(-1).respond(rotateChallenge());
+  await flush();
+  assert.equal(h.api.state(h.id), "ready");
+});
+
+test("interactive challenge TTL expires before module timeout and late callback", async (t) => {
+  const h = harness(t, { interactive: false });
+  const reply = rotateChallenge(); reply.expires_in = 0.5;
+  h.requests[0].respond(reply);
+  await flush();
+  const script = find(h.document.head, (node) => node.tagName === "SCRIPT");
+  const lateLoad = script.onload;
+  await h.time.advance(500);
+  h.empty("expired");
+  assert.equal(h.time.timers.size, 0);
+  vm.runInNewContext(interactiveSource, h.sandbox);
+  lateLoad(); await flush();
+  h.empty("expired");
+});
+
+for (const action of ["reset", "destroy"]) {
+  test(`interactive ${action} releases the pending attempt and ignores callbacks`, async (t) => {
+    const h = harness(t, { interactive: false });
+    h.requests[0].respond(rotateChallenge()); await flush();
+    const script = find(h.document.head, (node) => node.tagName === "SCRIPT");
+    const callback = script.onload;
+    h.api[action](h.id);
+    assert.equal(h.time.timers.size, 0);
+    assert.equal(script.parentNode, null);
+    vm.runInNewContext(interactiveSource, h.sandbox); callback(); await flush();
+    assert.equal(h.api.state(h.id), action === "destroy" ? null : "idle");
+    assert.equal(h.calls("redeem").length, 0);
+  });
+}
+
+test("interactive shared attempt survives one instance reset and cleans up after the last", async (t) => {
+  const h = harness(t, { interactive: false });
+  const second = h.api.render(h.container, { apiBase: "https://captcha.invalid", siteKey: "pk_second", fetchTimeoutMs: 1000 });
+  t.after(() => h.api.destroy(second));
+  h.requests[0].respond(rotateChallenge()); h.requests[1].respond(rotateChallenge()); await flush();
+  assert.equal(findAll(h.document.head, (node) => node.tagName === "SCRIPT").length, 1);
+  h.api.reset(h.id);
+  const script = find(h.document.head, (node) => node.tagName === "SCRIPT");
+  assert.ok(script);
+  vm.runInNewContext(interactiveSource, h.sandbox); script.onload(); await flush();
+  assert.equal(h.api.state(second), "ready");
+  assert.equal(h.api.state(h.id), "idle");
+  assert.equal(h.time.timers.size, 0);
+});
+
+test("interactive background resume rechecks TTL while loading", async (t) => {
+  const h = harness(t, { interactive: false });
+  const reply = rotateChallenge(); reply.expires_in = 2;
+  h.requests[0].respond(reply); await flush();
+  h.time.jump(3000);
+  h.document.emit("visibilitychange");
+  h.empty("expired");
+  assert.equal(h.time.timers.size, 0);
+});
+
 test("tile-rotation 输入：旋转后才有答案，Reset 清空本地操作", async (t) => {
   const h = harness(t);
   h.requests[0].respond(rotateChallenge());
@@ -891,7 +968,8 @@ test("交互模块失败后刷新可以重试，不会把页面永久钉死", as
   await flush();
   assert.equal(h.api.state(h.id), "loading");
   const scripts = findAll(h.document.head, (node) => node.tagName === "SCRIPT");
-  assert.ok(scripts.length >= 2, "失败后重试必须重新加载模块");
+  assert.equal(scripts.length, 1, "失败脚本必须清理，重试只保留一个新请求");
+  assert.notEqual(scripts[0], first, "失败后重试必须重新加载模块");
   vm.runInNewContext(interactiveSource, h.sandbox, { filename: "web/widget/v1.interactive.js" });
   scripts.at(-1).onload();
   await flush();
@@ -1033,6 +1111,19 @@ test("progressive-target 输入：三轮逐轮推进，第三轮后才合成答�
   cells[7].emit("click");
   assert.equal(h.answer.value, "v1:2.5.7");
   assert.equal(h.buttons[0].disabled, false);
+});
+
+test("sprite geometry uses the same responsive percentages as its hit targets", async (t) => {
+  const h = harness(t);
+  h.requests[0].respond(shellChallenge()); await flush();
+  const view = find(h.host.shadowRoot, (node) => node.getAttribute("class") === "frameview");
+  assert.equal(view.style.height, "auto");
+  assert.equal(view.style.aspectRatio, "280 / 100");
+  assert.equal(view.style.backgroundSize, "600% 600%");
+  await h.time.advance(170 * 10);
+  assert.equal(view.style.backgroundPosition, "80% 20%", "frame 10 must stay aligned at any display scale");
+  const boxes = findAll(h.host.shadowRoot, (node) => node.getAttribute("class") === "cell shellbox");
+  assert.ok(boxes[3].getAttribute("style").includes("left:80%"));
 });
 
 test("shell-track 输入：动画结束前不可选，三轮后合成答案", async (t) => {

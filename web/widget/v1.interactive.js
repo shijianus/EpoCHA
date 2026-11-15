@@ -800,11 +800,8 @@
     this.shellFrame = 0;
     this._clearImage();
     var view = el("div", { class: "frameview", role: "img", "aria-label": tr(this.o.lang, "imageAltShell") });
-    view.style.width = iw + "px";
-    view.style.height = ih + "px";
+    h.spriteStyle(view, iw, ih, this.shellFrameCols, this.shellFrameRows);
     view.style.backgroundImage = "url(data:" + q.image_mime + ";base64," + q.image_base64 + ")";
-    view.style.backgroundSize = (iw * this.shellFrameCols) + "px " + (ih * this.shellFrameRows) + "px";
-    view.style.backgroundPosition = "0px 0px";
     this.frameView = view;
     this.imgBox.appendChild(view);
     this._showImageBox();
@@ -835,9 +832,7 @@
 
   Widget.prototype._shellShowFrame = function (frame) {
     if (!this.frameView) return;
-    var cols = this.shellFrameCols, iw = this.shellIW, ih = this.shellIH;
-    var col = frame % cols, row = Math.floor(frame / cols);
-    this.frameView.style.backgroundPosition = (-(col * iw)) + "px " + (-(row * ih)) + "px";
+    this.frameView.style.backgroundPosition = h.spritePosition(frame, this.shellFrameCols, this.shellFrameRows);
   };
 
 

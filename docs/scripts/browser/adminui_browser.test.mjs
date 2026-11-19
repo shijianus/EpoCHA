@@ -120,12 +120,15 @@ async function sendKeys(...actions) {
 async function clickText(needle, tag = "button") {
   // 按可见文案找按钮再**真实点击**（中心坐标），不派发合成 click 事件。
   const pos = await bidi.evaluate(ctx,
-    `(()=>{const els=[...document.querySelectorAll(${JSON.stringify(tag)})];
+    `(async()=>{const els=[...document.querySelectorAll(${JSON.stringify(tag)})];
       const el=els.find(e=>(e.textContent||"").trim()===${JSON.stringify(needle)});
       if(!el) return null;
       el.scrollIntoView({block:'center', inline:'center'});
+      await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
       const r=el.getBoundingClientRect();
-      return [Math.round(r.left+r.width/2), Math.round(r.top+r.height/2)];})()`);
+      const x=Math.round(r.left+r.width/2),y=Math.round(r.top+r.height/2);
+      if(!el.contains(document.elementFromPoint(x,y))) throw new Error('控件中心不能命中：'+${JSON.stringify(needle)});
+      return [x,y];})()`, true);
   if (!pos) throw new Error(`找不到文案为「${needle}」的 ${tag}`);
   return bidi.pointerClick(ctx, pos[0], pos[1]);
 }
@@ -603,7 +606,14 @@ test(caseTitle("adminui.narrow-viewport"), async () => {
   // 窄屏真实点击填表并创建第二个站点
   await typeInto(".create-site input[type=text]", "gate-site-narrow");
   await clickText("创建站点");
-  await bidi.waitUntil(ctx, `document.querySelector(".once textarea")`, { label: "窄屏创建结果" });
+  try {
+    await bidi.waitUntil(ctx, `document.querySelector(".once textarea")`, { label: "窄屏创建结果" });
+  } catch (error) {
+    const state = await bidi.evaluateJSON(ctx, `({name:document.querySelector('.create-site input[name=name]')?.value,
+      status:document.getElementById('new-status')?.textContent,
+      active:document.activeElement?.outerHTML?.slice(0,300)})`);
+    throw new Error(`${error.message}；创建现场=${JSON.stringify(state)}`);
+  }
   const narrow = await text();
   assert.match(narrow, /gate-site-narrow/);
   const s2 = (await api("GET", "/api/admin/sites")).data.sites.find((x) => x.name === "gate-site-narrow");

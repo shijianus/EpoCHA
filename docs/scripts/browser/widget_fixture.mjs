@@ -141,7 +141,7 @@ function randomKey(prefix) {
 }
 
 function secret() {
-  return randomBytes(32).toString("base64url");
+  return randomBytes(32).toString("base64");
 }
 
 async function freeLoopbackPort() {
@@ -167,7 +167,7 @@ function command(scope, executable, args, env) {
 
 function listenPort(output, label) {
   const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = output.match(new RegExp(`msg=\\"${escaped}\\" addr=127\\.0\\.0\\.1:(\\d+)`));
+  const match = output.match(new RegExp(`msg=(?:"${escaped}"|${escaped}) addr=127\\.0\\.0\\.1:(\\d+)`));
   return match ? Number(match[1]) : 0;
 }
 

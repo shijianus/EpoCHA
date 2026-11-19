@@ -1186,12 +1186,10 @@ test(caseTitle("widget.expiry-clears-response"), async () => {
     hs[hs.length-1].shadowRoot.querySelector('input.ans').focus();})()`);
   await bidi.send("input.performActions", { context: c, actions: [{
     type: "key", id: "kttl", actions: [...answer].flatMap((ch) => [{ type: "keyDown", value: ch }, { type: "keyUp", value: ch }]) }] });
-  const lastHostSel = `[data-epocha-widget]:nth-of-type(2)`;
   const pos = await bidi.evaluateJSON(c, `(()=>{const hs=[...document.querySelectorAll('[data-epocha-widget]')];
-    const b=hs[hs.length-1].shadowRoot.querySelector('button:nth-of-type(1)');
+    const b=[...hs[hs.length-1].shadowRoot.querySelectorAll('button')].find(el=>el.textContent.trim()==='提交答案');
     b.scrollIntoView({block:'center'}); const r=b.getBoundingClientRect();
     return [Math.round(r.left+r.width/2), Math.round(r.top+r.height/2)];})()`);
-  void lastHostSel;
   await bidi.pointerClick(c, pos[0], pos[1]);
   await bidi.waitUntil(c, `EpoCHA.state(${JSON.stringify(id)})==='verified'`, { timeoutMs: 30000, label: "短 TTL 实例验证通过" });
   const got = await bidi.evaluateJSON(c, `(()=>({token:EpoCHA.getResponse(${JSON.stringify(id)}),

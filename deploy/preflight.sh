@@ -133,6 +133,20 @@ fi
 dir_block data_dir   "$DATA_DIR"
 dir_block keys_dir   "$KEYS_DIR"
 dir_block backup_dir "$BACKUP_DIR"
+# SQLite 的临时语句日志可能不在数据库或 TMPDIR 所在盘；根分区满曾被误判为 SQL 缺陷。
+sqlite_temp_json="["; sqlite_temp_sep=""
+for sqlite_temp_path in "${SQLITE_TMPDIR:-}" "${TMPDIR:-}" /var/tmp /usr/tmp /tmp; do
+  [[ -n "$sqlite_temp_path" ]] || continue
+  sqlite_temp_avail="$(avail_kb_of "$sqlite_temp_path")"
+  [[ "$sqlite_temp_avail" =~ ^[0-9]+$ ]] || sqlite_temp_avail=null
+  sqlite_temp_json+="${sqlite_temp_sep}{\"path\":\"$(esc "$sqlite_temp_path")\",\"avail_kb\":$sqlite_temp_avail}"
+  sqlite_temp_sep=,
+  if [[ "$sqlite_temp_avail" == null || "$sqlite_temp_avail" -lt 262144 ]]; then
+    warn "SQLite 临时目录候选 $sqlite_temp_path 的可用空间不足 256MiB 或不可确定；数据库目录有余量不能排除 SQLITE_FULL。"
+  fi
+done
+sqlite_temp_json+="]"
+f_raw sqlite_temp_candidates "$sqlite_temp_json"
 [[ "$DATA_DIR" == "$BACKUP_DIR" ]] && warn "数据目录与备份目录同路径：一次误删同时带走库与备份，而且恢复没法在隔离目录做（BACKUP-RESTORE §5 第 2 步）。"
 if [[ "$KEYS_DIR" == "$DATA_DIR" ]]; then
   warn "密钥目录与数据目录同路径：pepper 与库同处一地会让摘要保护直接归零（DESIGN §6）。"

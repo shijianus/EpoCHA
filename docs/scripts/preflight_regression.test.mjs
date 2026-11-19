@@ -11,6 +11,7 @@ const PREFLIGHT = join(ROOT, 'deploy/preflight.sh').replaceAll('\\', '/');
 
 // Source the actual script, but never contact Docker, a web server, or a remote host.
 const HARNESS = String.raw`
+unset SQLITE_TMPDIR TMPDIR
 command() {
   if [[ "$1" == -v ]]; then
     case "$2" in
@@ -86,6 +87,7 @@ function runPreflight(t, { tool = 'ss', mode = 'free', dirs = 'writable', format
   const env = {
     ...process.env,
     PF_TOOL: tool, PF_MODE: mode, PF_DIRS: dirs, PF_FORMAT: format, PF_STRICT: strict ? '1' : '', PF_SCAN_KEYS: scanKeys ? '1' : '',
+    SQLITE_TMPDIR: '', TMPDIR: '',
     PF_DATA: join(temp, 'data').replaceAll('\\', '/'),
     PF_KEYS: join(temp, 'keys').replaceAll('\\', '/'),
     PF_BACKUP: join(temp, 'backups').replaceAll('\\', '/'),
@@ -137,6 +139,14 @@ test('directory warnings are also retained in the human-readable report', (t) =>
   const count = stdout.match(/需要人判断的 (\d+) 项/);
   assert.ok(count);
   assert.equal(Number(count[1]), Number(stderr.match(/warn=(\d+)/)[1]));
+});
+
+test('SQLite temporary storage is reported independently of the database filesystem', (t) => {
+  const { report } = runPreflight(t);
+  assert.ok(Array.isArray(report.sqlite_temp_candidates));
+  assert.deepEqual(report.sqlite_temp_candidates.map((item) => item.path), ['/var/tmp', '/usr/tmp', '/tmp']);
+  assert.ok(report.sqlite_temp_candidates.every((item) => item.avail_kb === 99000));
+  assert.ok(report.warnings.some((item) => item.includes('SQLite') && item.includes('临时')));
 });
 
 test('strict mode returns exit 3 outside formal support', (t) => {

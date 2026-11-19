@@ -1,6 +1,6 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, readFile, writeFile, rename } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import net from "node:net";
@@ -263,15 +263,26 @@ export async function createWidgetCaseFixture({ testName, parentDir, serverBin, 
     });
 
     const seedDir = join(workspace, "seed");
-    const seeder = command(scope, devseedBin, [
-      "--db", join(workspace, "epocha.db"), "--out-dir", seedDir,
-      "--generator", "text-image-v1", "--difficulty", "1", "--count", "50",
-    ], serverEnv);
-    const completed = await waitExit(seeder, 20000);
-    if (!completed || seeder.exitCode !== 0) {
-      throw new Error(`devseed did not complete successfully (${seeder.exitCode ?? seeder.signalCode ?? "timeout"})`);
+    await mkdir(seedDir);
+    const records = [];
+    // 刷新会按生产策略抬高难度；每档均提供受控题，不能靠禁用风险策略维持测试。
+    for (let difficulty = 1; difficulty <= 5; difficulty++) {
+      const tierDir = join(workspace, `tier-${difficulty}`);
+      const seeder = command(scope, devseedBin, [
+        "--db", join(workspace, "epocha.db"), "--out-dir", tierDir,
+        "--generator", "text-image-v1", "--difficulty", String(difficulty), "--count", "12",
+      ], serverEnv);
+      const completed = await waitExit(seeder, 20000);
+      if (!completed || seeder.exitCode !== 0) throw new Error(`devseed failed (${seeder.exitCode ?? "timeout"})`);
+      const tier = JSON.parse(await readFile(join(tierDir, "seeded-answers.json"), "utf8"));
+      if (!Array.isArray(tier) || tier.length !== 12) throw new Error("incomplete per-tier question fixture");
+      for (const record of tier) {
+        const name = `d${difficulty}-${record.png}`;
+        await rename(join(tierDir, record.png), join(seedDir, name));
+        records.push({ ...record, png: name });
+      }
     }
-    if (!seeder.output.includes("已注入 50 道题")) throw new Error("devseed did not inject the per-case question pool");
+    await writeFile(join(seedDir, "seeded-answers.json"), JSON.stringify(records), { flag: "wx", mode: 0o600 });
 
     const urls = {
       EPOCHA_API: api,

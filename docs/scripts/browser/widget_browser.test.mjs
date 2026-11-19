@@ -211,17 +211,17 @@ async function statusText(c, container = "#widget") {
 // 分属 shadow root 里不同的容器，:nth-of-type 的计数范围与全局序号对不上。
 // 示例页面语言固定 zh-CN，文案匹配是稳定的。
 async function widgetButtonCenter(c, which, container = "#widget") {
-  const label = which === "submit" ? "提交答案" : "换一张";
+  const labels = which === "submit" ? ["提交答案", "Submit"] : ["换一张", "New image"];
   const pos = await bidi.evaluateJSON(c, `(()=>{
     const host=document.querySelector(${JSON.stringify(hostOf(container))});
     const btns=host&&host.shadowRoot?[...host.shadowRoot.querySelectorAll("button")]:[];
-    const el=btns.find((b)=>b.textContent.trim()===${JSON.stringify(label)});
+    const el=btns.find((b)=>${JSON.stringify(labels)}.includes(b.textContent.trim()));
     if(!el) return null;
     el.scrollIntoView({block:"center"});
     const r=el.getBoundingClientRect();
     return [Math.round(r.left+r.width/2), Math.round(r.top+r.height/2)];
   })()`, true);
-  if (!pos) throw new Error(`shadow DOM 里找不到按钮：${label}`);
+  if (!pos) throw new Error(`shadow DOM 里找不到按钮：${labels.join(" / ")}`);
   return pos;
 }
 
@@ -240,7 +240,7 @@ const NARROW_PROBE = `(()=>{
   const sr=host&&host.shadowRoot; if(!sr) return {noShadow:true};
   const vw=window.innerWidth, vh=window.innerHeight;
   const box=sr.querySelector('.box'), img=sr.querySelector('img'),
-        inp=sr.querySelector('input.ans'), btns=[...sr.querySelectorAll('button')];
+        inp=sr.querySelector('input.ans'), btns=[...sr.querySelectorAll('button')].filter(b=>['提交答案','换一张','Submit','New image'].includes(b.textContent.trim()));
   const R=(el)=>{ if(!el) return null; const r=el.getBoundingClientRect();
     return {x:Math.round(r.x),y:Math.round(r.y),w:Math.round(r.width),h:Math.round(r.height),
       right:Math.round(r.right),bottom:Math.round(r.bottom),
@@ -560,7 +560,7 @@ const lifecycleProbe = (c) => bidi.evaluateJSON(c, `(()=>{
   const buttons=host ? [...host.shadowRoot.querySelectorAll('button')] : [];
   return {state:EpoCHA.state(id),token:EpoCHA.getResponse(id),field:field?field.value:null,
     calls:w.calls.map(r=>({path:r.path,aborted:!!(r.signal&&r.signal.aborted)})),
-    successes:w.successes,errors:w.errors,refreshDisabled:buttons[1]?buttons[1].disabled:null};
+    successes:w.successes,errors:w.errors,refreshDisabled:buttons.find(b=>['换一张','New image'].includes(b.textContent.trim()))?.disabled};
 })()`);
 
 async function waitHeldResponse(c) {
@@ -847,6 +847,7 @@ const FIXTURE_CONTAINER = "#captcha";
 test("文档最小示例 fixture：deferred 脚本顺序确定，init 里 EpoCHA 已定义，字段属于目标 form", async () => {
   await bidi.subscribeEvents(["log.entryAdded"]);
   const c = await openPage(FIXTURE_URL, { container: FIXTURE_CONTAINER });
+  await waitFirstState(c, "ready", 30000, FIXTURE_CONTAINER);
   // 走到这里已经证明：容器被挂载 ⇒ init 脚本执行了 ⇒ 它读到了 EpoCHA。
   // 若 widget 脚本没 defer 或顺序反了，ReferenceError 会让容器根本不出现，openPage 直接超时。
   const handle = await bidi.evaluateJSON(c, `(()=>({
@@ -1077,7 +1078,7 @@ test(caseTitle("widget-browser.image-error"), async () => {
   assert.deepEqual(probe.successes, []);
   assert.deepEqual(probe.errors, ["image-unusable"]);
   assert.equal(probe.calls.filter((request) => request.path === "/api/redeem").length, 0);
-  const controls = await bidi.evaluateJSON(c, `(()=>{const root=document.querySelector('#lifecycle-widget [data-epocha-widget]').shadowRoot;return {image:!!root.querySelector('img'),submit:root.querySelector('button').disabled,refresh:root.querySelectorAll('button')[1].disabled};})()`);
+  const controls = await bidi.evaluateJSON(c, `(()=>{const root=document.querySelector('#lifecycle-widget [data-epocha-widget]').shadowRoot;return {image:!!root.querySelector('img'),submit:[...root.querySelectorAll('button')].find(b=>['提交答案','Submit'].includes(b.textContent.trim())).disabled,refresh:[...root.querySelectorAll('button')].find(b=>['换一张','New image'].includes(b.textContent.trim())).disabled};})()`);
   assert.deepEqual(controls, { image: false, submit: true, refresh: false });
   await clickWidgetButton(c, "submit", "#lifecycle-widget");
   assert.equal((await lifecycleProbe(c)).calls.filter((request) => request.path === "/api/redeem").length, 0,
@@ -1115,7 +1116,7 @@ test(caseTitle("widget-browser.reset-clears-image"), async () => {
   await prepareLifecycleCase(c, null);
   await waitFirstState(c, "ready", 30000, "#lifecycle-widget");
   await bidi.evaluate(c, `EpoCHA.reset(window.__life.id)`);
-  const result = await bidi.evaluateJSON(c, `(()=>{const h=document.querySelector('#lifecycle-widget [data-epocha-widget]');const r=h.shadowRoot;return {state:EpoCHA.state(window.__life.id),image:!!r.querySelector('img'),submit:r.querySelector('button').disabled,refresh:r.querySelectorAll('button')[1].disabled,token:EpoCHA.getResponse(window.__life.id)};})()`);
+  const result = await bidi.evaluateJSON(c, `(()=>{const h=document.querySelector('#lifecycle-widget [data-epocha-widget]');const r=h.shadowRoot;return {state:EpoCHA.state(window.__life.id),image:!!r.querySelector('img'),submit:[...r.querySelectorAll('button')].find(b=>['提交答案','Submit'].includes(b.textContent.trim())).disabled,refresh:[...r.querySelectorAll('button')].find(b=>['换一张','New image'].includes(b.textContent.trim())).disabled,token:EpoCHA.getResponse(window.__life.id)};})()`);
   assert.deepEqual(result, { state: "idle", image: false, submit: true, refresh: false, token: "" });
   await clickWidgetButton(c, "submit", "#lifecycle-widget");
   const idle = await lifecycleProbe(c);

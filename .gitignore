@@ -19,6 +19,8 @@ bin/
 !.env.example
 /tmp/
 .DS_Store
+__pycache__/
+*.pyc
 *.log
 coverage.out
 web/widget/dist/

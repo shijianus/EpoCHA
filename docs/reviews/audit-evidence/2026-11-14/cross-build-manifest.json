@@ -1,0 +1,26 @@
+[
+  {
+    "path": "release-artifacts/audit-2026-11-14-cross/epocha",
+    "bytes": 12255392,
+    "sha256": "d50e3c55fb2abbe416c5ed208e1f67326ba1d533367c8d3039f9ee234392b3e0",
+    "magic_hex": "7f454c460201010000000000000000000200b700",
+    "budget_bytes": 36700160,
+    "within_size_budget": true,
+    "target": "linux/arm64",
+    "cgo_enabled": "0",
+    "executed": false,
+    "version_ldflags": "-s -w only; not a formal version-stamped candidate"
+  },
+  {
+    "path": "release-artifacts/audit-2026-11-14-cross/epocha-ops",
+    "bytes": 10289312,
+    "sha256": "cc11426d24532b13a7e743011d034d2590d5ea671edd542c48ee2149c2bf9c0e",
+    "magic_hex": "7f454c460201010000000000000000000200b700",
+    "budget_bytes": 36700160,
+    "within_size_budget": true,
+    "target": "linux/arm64",
+    "cgo_enabled": "0",
+    "executed": false,
+    "version_ldflags": "-s -w only; not a formal version-stamped candidate"
+  }
+]

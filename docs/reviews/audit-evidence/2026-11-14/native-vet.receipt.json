@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "name": "native-vet",
+  "started_at_utc": "2026-11-14T05:19:42.802782+00:00",
+  "finished_at_utc": "2026-11-14T05:19:45.587677+00:00",
+  "duration_seconds": 2.785,
+  "cwd": "D:\\Users\\Smart Kevin\\OneDrive\\Desktop\\epocha",
+  "argv": [
+    "C:\\Users\\Smart Kevin\\go\\pkg\\mod\\golang.org\\toolchain@v0.0.1-go1.27.3.windows-amd64\\bin\\go.exe",
+    "vet",
+    "./internal/generator",
+    "./internal/dispatch",
+    "./internal/eval",
+    "./internal/pow",
+    "./internal/token",
+    "./internal/risk",
+    "./internal/version",
+    "./internal/m4baseline/...",
+    "./web/widget",
+    "./web/adminui",
+    "./cmd/exampleapp",
+    "./cmd/preview",
+    "./cmd/evalocr",
+    "./cmd/blindtest",
+    "./cmd/devclient",
+    "./cmd/loadtest"
+  ],
+  "raw_exit_code": 0,
+  "execution_error": null,
+  "environment_policy": {
+    "GOTOOLCHAIN": "local",
+    "GOPROXY": "off",
+    "GOSUMDB": "off",
+    "GOENV": "off",
+    "GOWORK": "off",
+    "GOFLAGS": "-mod=readonly"
+  },
+  "stdout": {
+    "path": "native-vet.stdout.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "stderr": {
+    "path": "native-vet.stderr.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "packages": 257,
+  "forbidden_development_dependencies": [],
+  "web_widget_present": true,
+  "cgo_packages": [],
+  "scope": "linux/arm64 CGO_ENABLED=0 go list -deps -json ./cmd/server"
+}

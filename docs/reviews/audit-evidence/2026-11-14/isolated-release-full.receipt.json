@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "name": "isolated-release-full",
+  "cwd": "C:\\Users\\SMARTK~1\\AppData\\Local\\Temp\\epocha-audit-20261114-p3vcgny4\\source",
+  "argv": [
+    "C:\\Program Files\\nodejs\\node.EXE",
+    "docs/scripts/release-check.mjs",
+    "--profile",
+    "full",
+    "--out",
+    "release-artifacts/audit-isolated-full"
+  ],
+  "raw_exit_code": 3,
+  "command_receipt": {
+    "argv": [
+      "C:\\Program Files\\nodejs\\node.EXE",
+      "docs/scripts/release-check.mjs",
+      "--profile",
+      "full",
+      "--out",
+      "release-artifacts/audit-isolated-full"
+    ],
+    "cwd": "C:\\Users\\SMARTK~1\\AppData\\Local\\Temp\\epocha-audit-20261114-p3vcgny4\\source",
+    "started_at_utc": "2026-11-14T05:23:47.983621+00:00",
+    "duration_seconds": 64.926,
+    "raw_exit_code": 3,
+    "stdout_sha256": "0ee68935a2176f5d50dc6d1736cb8698e0b015432022928bf41abb331a1e88d5",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "finished_at_utc": "2026-11-14T05:24:52.911505+00:00",
+  "stdout": {
+    "path": "isolated-release-full.stdout.log",
+    "bytes": 3536,
+    "sha256": "0ee68935a2176f5d50dc6d1736cb8698e0b015432022928bf41abb331a1e88d5"
+  },
+  "stderr": {
+    "path": "isolated-release-full.stderr.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

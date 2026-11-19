@@ -58,6 +58,7 @@ help:
 	@echo "                 退出码只由必需项（受支持 B 路径）决定；A 路径/amd64/65534/公网 TLS 属可选项，如实打印不决定结论"
 	@echo "                 make 把任何非 0 折叠成 2，配方会打印脚本真实码；只验分类逻辑：make stage5b-check GATE_ARGS=--selftest-classify"
 	@echo "make stage5a-check 部署包 + 备份恢复 + 容器语义 + 资源限额 的真实演练（会动 Docker，见 docs/STAGE5A.md）"
+	@echo "make m4-baseline   M4 Gate B 开发期攻击基线（默认 1000 题/型，输出 tmp/m4-baseline-<UTC>；M4_OUT 可指定）"
 	@echo "make loadtest ARGS=\"--base URL --site-key KEY --requests N\"  有界负载实测（需服务已在跑 + EPOCHA_SITE_SECRET）"
 
 .PHONY: build
@@ -78,6 +79,18 @@ loadtest:
 	@test -n "$(ARGS)" || { echo "用法：make loadtest ARGS=\"--base URL --site-key KEY --requests N [--concurrency C]\"（还需 EPOCHA_SITE_SECRET）"; exit 2; }
 	$(GO) build -trimpath -o bin/epocha-loadtest ./cmd/loadtest
 	bin/epocha-loadtest $(ARGS)
+
+# M4 Gate B：开发期攻击基线。只读公开 /api/challenge DTO（白名单 + base64 PNG），
+# 不读 verifier/DB/生成器私有 seed，不进 cmd/server 的依赖图。输出 JSON/CSV 无答案。
+# 默认写时间戳目录，避免覆盖 docs/reviews/evidence 里的正式报告证据；
+# 要重建正式证据用 M4_OUT=docs/reviews/evidence。
+M4_CHALLENGES ?= 1000
+M4_OUT ?= tmp/m4-baseline-$(shell date -u +%Y%m%dT%H%M%SZ)
+.PHONY: m4-baseline
+m4-baseline:
+	@mkdir -p bin
+	$(GO) build -trimpath -o bin/epocha-m4baseline ./cmd/m4baseline
+	bin/epocha-m4baseline --challenges $(M4_CHALLENGES) --out-dir $(M4_OUT)
 
 # 生产镜像的两条构建路径，产物是**同一个运行时层**（deploy/docker/Dockerfile 的 runtime 阶段）：
 #   docker-image        规范配方：toolchain 阶段在容器内 go build。需要 registry 可达，

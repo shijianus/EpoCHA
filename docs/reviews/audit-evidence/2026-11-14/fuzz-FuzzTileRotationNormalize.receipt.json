@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "name": "fuzz-FuzzTileRotationNormalize",
+  "cwd": "C:\\Users\\SMARTK~1\\AppData\\Local\\Temp\\epocha-audit-20261114-p3vcgny4\\source",
+  "argv": [
+    "C:\\Users\\Smart Kevin\\go\\pkg\\mod\\golang.org\\toolchain@v0.0.1-go1.27.3.windows-amd64\\bin\\go.exe",
+    "test",
+    "./internal/generator",
+    "-run=^$",
+    "-fuzz=^FuzzTileRotationNormalize$",
+    "-fuzztime=5s",
+    "-parallel=2"
+  ],
+  "raw_exit_code": 0,
+  "started_at_utc": "2026-11-14T05:28:12.230396+00:00",
+  "finished_at_utc": "2026-11-14T05:28:21.106335+00:00",
+  "duration_seconds": 8.876,
+  "execution_error": null,
+  "extra_environment": {},
+  "stdout": {
+    "path": "fuzz-FuzzTileRotationNormalize.stdout.log",
+    "bytes": 371,
+    "sha256": "af990d24ef14dbc4c6fb8b0e0630f031d35b11bffb759f132a5040ecdf8c2532"
+  },
+  "stderr": {
+    "path": "fuzz-FuzzTileRotationNormalize.stderr.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

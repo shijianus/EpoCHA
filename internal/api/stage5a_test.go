@@ -78,6 +78,17 @@ func TestReadyzFailsClosedWhenDataDirUnwritable(t *testing.T) {
 		t.Skipf("无法把数据目录改成只读（环境限制）: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	probe, probeErr := os.CreateTemp(dir, ".permission-capability-*")
+	if probeErr == nil {
+		probe.Close()
+		if err := os.Remove(probe.Name()); err != nil {
+			t.Fatal(err)
+		}
+		t.Skip("BLOCKED: current identity/filesystem can still create files after chmod 0555")
+	}
+	if !os.IsPermission(probeErr) {
+		t.Fatalf("permission capability probe failed for another reason: %v", probeErr)
+	}
 	r := h.do(http.MethodGet, "/readyz", nil, "", "203.0.113.7:1", nil)
 	if r.status != http.StatusServiceUnavailable {
 		t.Fatalf("WAL 无法创建时仍报就绪（%d）——这正是要防的『进程活着但每次验证都失败』", r.status)

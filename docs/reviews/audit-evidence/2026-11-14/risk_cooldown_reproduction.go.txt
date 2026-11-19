@@ -1,0 +1,30 @@
+package risk
+
+import (
+	"testing"
+	"time"
+)
+
+// Audit-only regression: a configured 15-minute cooldown must survive the
+// 10-minute refresh-bucket rollover. This file is added only to an isolated copy.
+func TestAudit20261114CooldownSurvivesBucketBoundary(t *testing.T) {
+	now := time.Unix(599, 0).UTC()
+	tracker, err := NewRefreshTracker(4096, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var penalty RefreshPenalty
+	for i := 0; i < 10; i++ {
+		penalty = tracker.Observe("audit-site-source")
+	}
+	if penalty.Cooldown != 15*time.Minute {
+		t.Fatalf("setup: expected 15-minute cooldown, got %s", penalty.Cooldown)
+	}
+	now = now.Add(2 * time.Second)
+	before := tracker.RetryAfter("audit-site-source")
+	after := tracker.Observe("audit-site-source")
+	t.Logf("after 2 seconds and bucket rollover: RetryAfter before Observe=%s, Observe cooldown=%s, RetryAfter after Observe=%s", before, after.Cooldown, tracker.RetryAfter("audit-site-source"))
+	if after.Cooldown <= 0 {
+		t.Fatalf("15-minute cooldown erased by fixed-window rollover after only 2 seconds; prior remaining=%s", before)
+	}
+}

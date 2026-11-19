@@ -1266,6 +1266,11 @@ cmd/ops/             阶段 5A：**运维入口**（backup / verify / restore / 
                      但**不是**通用管理平台：每条子命令对应 DEPLOYMENT/BACKUP-RESTORE 里的一个具体步骤
     cmd/loadtest/    阶段 5A：**开发期**有界负载工具（分段时延与失败类别；并发与请求数都有硬上限）。
                      `cmd/server` 不链接它（stage4b.sh 的依赖隔离检查钉住）
+cmd/m4baseline/      M4 Gate B：**开发期**攻击基线（7 个 Wave 1/2 题型的确定性 solver；只读公开
+                     /api/challenge DTO，不读 verifier/DB/生成器私有 seed/管理面；不链进 cmd/server）。
+                     1,000 題/型，输出 docs/reviews/evidence/{m4-summary.json,m4-results.csv}
+    internal/m4baseline/ **开发期**攻击 harness（生成 challenge、构建公开 DTO、量测 CPU/wall/RSS、
+                     用生产 Verify 在 solver 返回后判分）；solver 子包只依赖标准库，不 import generator
 deploy/cloudflare/   Worker + wrangler.toml（阶段 5 之后评估）
 internal/store/migrations/  NNNN_*.sql（阶段 1 起）——偏离"顶层 migrations/"是有意的：
                      go:embed 只能嵌入本包子树，放在仓库根就无法编进单二进制
@@ -1519,6 +1524,16 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
 | R12 | 池容量不足时公共请求直接吃 503（不降级是正确的，但对调用方表现为"暂时不可用"） | 默认水位 50/100 与 20000 行上限都是 `[目标]`，**未经真实流量校准** | 3B/阶段 5 按 `[实测]` 到达率重设水位；运维侧先用 `/api/admin/pool` 观测 |
 
 ## 19. 变更日志
+
+- 2026-11-12 **M4 Gate B（Qualification Gate B，review）**：新增 dev-only `cmd/m4baseline/` +
+  `internal/m4baseline/`（7 个 Wave 1/2 题型的确定性攻击基线；solver 只吃公开 `/api/challenge`
+  DTO，不读 verifier/DB/生成器私有 seed/管理面；`cmd/server` 依赖图不含它，`GOOS=linux
+  GOARCH=arm64 CGO_ENABLED=0` 交叉构建通过）。正式 1,000 題/型 ×7：6,836/7,000（97.66%）；
+  7/7 **FAIL**（≥80% 且 p95 <1 CPU 秒），全部维持 `experimental:true` /
+  `production_ready:false`，权重/默认站点未改。报告与 evidence 在
+  `docs/reviews/CAPTCHA-M4-BASELINE-2026-11-12.md` 与 `docs/reviews/evidence/`。
+  本轮不是阶段完成，不产生 production promotion；`-race` 在本 Windows 参考主机 BLOCKED
+  （无 cgo/C 编译器），全量 Windows build 仍受既有 `syscall.Flock` Linux-only 依赖限制。
 
 - 2026-11-12 **交互原语 Wave 2 + negative polarity（ADR-031）**：新增 `progressive-target-v1`
   （三轮 3×3 定位）、`shell-track-v1`（三轮四容器，服务端预渲染 33 帧 PNG 雪碧图，`Motion:true`）、

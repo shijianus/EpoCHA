@@ -1,0 +1,8 @@
+{
+  "path": "release-artifacts\\audit-2026-11-14-m4baseline.exe",
+  "bytes": 6074368,
+  "sha256": "0dab106a830eb5f94629d9c6d6fcf3f680f54366dece48f2529d158ba6d1492f",
+  "used_for": "m4-replication",
+  "target": "windows/amd64",
+  "source_manifest": "source-initial.json"
+}

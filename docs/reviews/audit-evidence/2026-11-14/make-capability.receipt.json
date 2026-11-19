@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "name": "make-capability",
+  "started_at_utc": "2026-11-14T05:16:01.555033+00:00",
+  "finished_at_utc": "2026-11-14T05:16:01.580957+00:00",
+  "duration_seconds": 0.026,
+  "cwd": "D:\\Users\\Smart Kevin\\OneDrive\\Desktop\\epocha",
+  "argv": [
+    "make",
+    "--version"
+  ],
+  "raw_exit_code": null,
+  "execution_error": "FileNotFoundError",
+  "environment_policy": {
+    "GOTOOLCHAIN": "local",
+    "GOPROXY": "off",
+    "GOSUMDB": "off",
+    "GOENV": "off",
+    "GOWORK": "off",
+    "GOFLAGS": "-mod=readonly"
+  },
+  "stdout": {
+    "path": "make-capability.stdout.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "stderr": {
+    "path": "make-capability.stderr.log",
+    "bytes": 46,
+    "sha256": "22b04ad4e3a1e2446438666ff78ba500017dfbf153994ba516082cbce75bf5fe"
+  }
+}

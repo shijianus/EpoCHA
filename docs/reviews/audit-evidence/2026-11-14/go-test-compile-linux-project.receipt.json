@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "name": "go-test-compile-linux-project",
+  "started_at_utc": "2026-11-14T05:19:00.324799+00:00",
+  "finished_at_utc": "2026-11-14T05:19:02.884754+00:00",
+  "duration_seconds": 2.56,
+  "cwd": "D:\\Users\\Smart Kevin\\OneDrive\\Desktop\\epocha",
+  "argv": [
+    "C:\\Users\\Smart Kevin\\go\\pkg\\mod\\golang.org\\toolchain@v0.0.1-go1.27.3.windows-amd64\\bin\\go.exe",
+    "test",
+    "-c",
+    "-o",
+    "D:\\Users\\Smart Kevin\\OneDrive\\Desktop\\epocha\\release-artifacts\\audit-2026-11-14-cross\\tests",
+    "./cmd/...",
+    "./internal/...",
+    "./web/..."
+  ],
+  "raw_exit_code": 1,
+  "execution_error": null,
+  "environment_policy": {
+    "GOTOOLCHAIN": "local",
+    "GOPROXY": "off",
+    "GOSUMDB": "off",
+    "GOENV": "off",
+    "GOWORK": "off",
+    "GOFLAGS": "-mod=readonly",
+    "GOOS": "linux",
+    "GOARCH": "arm64",
+    "CGO_ENABLED": "0"
+  },
+  "stdout": {
+    "path": "go-test-compile-linux-project.stdout.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "stderr": {
+    "path": "go-test-compile-linux-project.stderr.log",
+    "bytes": 296,
+    "sha256": "2fd0828e2c0331c559aa97a4c14e692b550474f18e174c901ab0b9871ed298aa"
+  }
+}

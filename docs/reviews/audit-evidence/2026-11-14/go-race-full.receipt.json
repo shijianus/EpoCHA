@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "name": "go-race-full",
+  "started_at_utc": "2026-11-14T05:15:36.526060+00:00",
+  "finished_at_utc": "2026-11-14T05:15:36.840007+00:00",
+  "duration_seconds": 0.314,
+  "cwd": "D:\\Users\\Smart Kevin\\OneDrive\\Desktop\\epocha",
+  "argv": [
+    "C:\\Users\\Smart Kevin\\go\\pkg\\mod\\golang.org\\toolchain@v0.0.1-go1.27.3.windows-amd64\\bin\\go.exe",
+    "test",
+    "-race",
+    "-count=1",
+    "./..."
+  ],
+  "raw_exit_code": 2,
+  "execution_error": null,
+  "environment_policy": {
+    "GOTOOLCHAIN": "local",
+    "GOPROXY": "off",
+    "GOSUMDB": "off",
+    "GOENV": "off",
+    "GOWORK": "off",
+    "GOFLAGS": "-mod=readonly"
+  },
+  "stdout": {
+    "path": "go-race-full.stdout.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "stderr": {
+    "path": "go-race-full.stderr.log",
+    "bytes": 60,
+    "sha256": "bcd3567ad97fdf5efa956a2d361fc3af77867bc977f4c224fc26d22ff130f817"
+  }
+}

@@ -48,11 +48,16 @@ func TestRefreshTrackerStateMachine(t *testing.T) {
 		}
 		*now = now.Add(100 * time.Millisecond)
 	}
-	// 窗口重置后从低档重新开始。
+	// 计数窗口到期不解除仍有效的冷却；冷却结束后新窗口才从低档开始。
 	*now = now.Add(RefreshWindow)
 	p := tr.Observe("k")
-	if p.FloorDelta != 0 || p.Score != 0 {
-		t.Fatalf("窗口重置后 = %+v", p)
+	if p.Cooldown <= 0 || p.FloorDelta != 3 {
+		t.Fatalf("窗口切换丢失冷却 = %+v", p)
+	}
+	*now = now.Add(p.Cooldown)
+	p = tr.Observe("k")
+	if p.FloorDelta != 0 || p.Score != 0 || p.Cooldown != 0 {
+		t.Fatalf("冷却结束后 = %+v", p)
 	}
 }
 

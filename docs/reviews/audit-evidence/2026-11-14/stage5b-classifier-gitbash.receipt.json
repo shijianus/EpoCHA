@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "name": "stage5b-classifier-gitbash",
+  "started_at_utc": "2026-11-14T05:24:30.055084+00:00",
+  "finished_at_utc": "2026-11-14T05:24:35.456997+00:00",
+  "duration_seconds": 5.402,
+  "cwd": "D:\\Users\\Smart Kevin\\OneDrive\\Desktop\\epocha",
+  "argv": [
+    "C:/Program Files/Git/bin/bash.exe",
+    "docs/scripts/stage5b.sh",
+    "--selftest-classify"
+  ],
+  "raw_exit_code": 0,
+  "execution_error": null,
+  "environment_policy": {
+    "GOTOOLCHAIN": "local",
+    "GOPROXY": "off",
+    "GOSUMDB": "off",
+    "GOENV": "off",
+    "GOWORK": "off",
+    "GOFLAGS": "-mod=readonly"
+  },
+  "stdout": {
+    "path": "stage5b-classifier-gitbash.stdout.log",
+    "bytes": 161,
+    "sha256": "97ce994651d9fcfbc7d2b57c77dfc90e0a4dd846ca842e5908082eae095460dc"
+  },
+  "stderr": {
+    "path": "stage5b-classifier-gitbash.stderr.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

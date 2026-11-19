@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "name": "server-dependencies",
+  "started_at_utc": "2026-11-14T05:19:21.302579+00:00",
+  "finished_at_utc": "2026-11-14T05:19:23.312437+00:00",
+  "duration_seconds": 2.01,
+  "cwd": "D:\\Users\\Smart Kevin\\OneDrive\\Desktop\\epocha",
+  "argv": [
+    "C:\\Users\\Smart Kevin\\go\\pkg\\mod\\golang.org\\toolchain@v0.0.1-go1.27.3.windows-amd64\\bin\\go.exe",
+    "list",
+    "-deps",
+    "-json",
+    "./cmd/server"
+  ],
+  "raw_exit_code": 0,
+  "execution_error": null,
+  "environment_policy": {
+    "GOTOOLCHAIN": "local",
+    "GOPROXY": "off",
+    "GOSUMDB": "off",
+    "GOENV": "off",
+    "GOWORK": "off",
+    "GOFLAGS": "-mod=readonly",
+    "GOOS": "linux",
+    "GOARCH": "arm64",
+    "CGO_ENABLED": "0"
+  },
+  "stdout": {
+    "path": "server-dependencies.stdout.log",
+    "bytes": 647523,
+    "sha256": "eedc4b7cec807cc916a4ad7e329341728c7c32f7ef0dae039249cea9c6ac5e14"
+  },
+  "stderr": {
+    "path": "server-dependencies.stderr.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

@@ -721,6 +721,7 @@ func (d *DB) transform(ctx context.Context, adminKey string, now time.Time) erro
 	steps := []string{
 		`UPDATE challenges SET status='invalid', redeemed_at=NULL WHERE status <> 'invalid'`,
 		`DELETE FROM responses`,
+		`DELETE FROM accessibility_quotas`,
 		`DELETE FROM pool`,
 		`UPDATE sites SET enabled=0`,
 		`DELETE FROM site_secrets`,

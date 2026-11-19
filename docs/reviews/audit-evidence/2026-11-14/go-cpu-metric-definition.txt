@@ -1,0 +1,12 @@
+Source: installed Go1.27.3 src/runtime/metrics/description.go; local source, no online lookup
+
+167: 	{
+168: 		Name: "/cpu/classes/user:cpu-seconds",
+169: 		Description: "Estimated total CPU time spent running user Go code. This may " +
+170: 			"also include some small amount of time spent in the Go runtime. " +
+171: 			"This metric is an overestimate, and not directly comparable to " +
+172: 			"system CPU time measurements. Compare only with other /cpu/classes " +
+173: 			"metrics.",
+174: 		Kind:       KindFloat64,
+175: 		Cumulative: true,
+176: 	},

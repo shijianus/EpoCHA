@@ -386,14 +386,26 @@ ORDER BY generator_id, version, difficulty`,
 // 领取用"选候选 → 条件更新 → 检查影响行数"，重试上限 claimAttempts；
 // 任一步失败整个事务回滚，因此不会出现"题被标 assigned 但没有 challenge"的孤立绑定。
 func (d *DB) IssueChallengeWithQuestion(ctx context.Context, c *Challenge, caps Caps, spec *PoolSpec) (*PoolQuestion, error) {
-	if c == nil {
-		return nil, fmt.Errorf("%w: challenge 为空", ErrBadConfig)
+	return d.IssueChallengePrepared(ctx, c, caps, spec, "", nil)
+}
+
+// IssueChallengePrepared prepares a bounded public response before committing issuance and its quota.
+// prepare must not access the DB or publish output; any error or panic rolls the transaction back.
+func (d *DB) IssueChallengePrepared(ctx context.Context, c *Challenge, caps Caps, spec *PoolSpec, accessibilitySource string, prepare func(*PoolQuestion) error) (*PoolQuestion, error) {
+	if c == nil || (accessibilitySource != "" && spec == nil) {
+		return nil, fmt.Errorf("%w: challenge 或 accessibility 模式不合法", ErrBadConfig)
 	}
 	tx, err := d.h.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("store: 签发事务: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	if accessibilitySource != "" {
+		if err := d.reserveAccessibilityTx(ctx, tx, c, accessibilitySource); err != nil {
+			return nil, err
+		}
+	}
 
 	// challenge 的模式/生成器是**签发快照**：之后站点改配置不会影响已发出的这张挑战。
 	mode, gen := ModePowOnly, ""
@@ -404,6 +416,11 @@ func (d *DB) IssueChallengeWithQuestion(ctx context.Context, c *Challenge, caps 
 		return nil, err
 	}
 	if spec == nil {
+		if prepare != nil {
+			if err := prepare(nil); err != nil {
+				return nil, err
+			}
+		}
 		if err := tx.Commit(); err != nil {
 			return nil, fmt.Errorf("store: 提交签发: %w", err)
 		}
@@ -449,10 +466,30 @@ WHERE id=? AND status=? AND expires_at>?`,
 		// 池空：整个事务回滚，challenge 也不会留下——不静默降级成 pow_only（ADR-011 #7）
 		return nil, ErrPoolEmpty
 	}
+	if prepare != nil {
+		if err := prepare(claimed); err != nil {
+			return nil, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("store: 提交签发+领题: %w", err)
 	}
 	return claimed, nil
+}
+
+var ErrInvalidQuestion = errors.New("store: question cannot be issued")
+
+// DiscardInvalidReady quarantines a known malformed row after a failed preparation rolled back its claim.
+func (d *DB) DiscardInvalidReady(ctx context.Context, id string) error {
+	res, err := d.h.ExecContext(ctx, `UPDATE pool SET status=? WHERE id=? AND status=?`, PoolTerminal, id, PoolReady)
+	if err != nil {
+		return fmt.Errorf("store: discard invalid question: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil || n != 1 {
+		return fmt.Errorf("%w: discard invalid question", ErrConflict)
+	}
+	return nil
 }
 
 func readQuestionTx(ctx context.Context, tx *sql.Tx, id string) (*PoolQuestion, error) {

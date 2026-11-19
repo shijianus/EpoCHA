@@ -653,7 +653,7 @@ func renderSymbolPath(spec symbolPathSpec) ([]byte, error) {
 	fillGrayRect(img, 0, 0, SymbolPathWidth, SymbolPathHeight, 238)
 	gridX := (SymbolPathWidth - (symbolPathCols*symbolPathCell + (symbolPathCols-1)*symbolPathGap)) / 2
 	// 目标条
-	targetCell := 40
+	targetCell := 36
 	targetGap := 4
 	total := len(spec.Target)*targetCell + (len(spec.Target)-1)*targetGap
 	tx := (SymbolPathWidth - total) / 2

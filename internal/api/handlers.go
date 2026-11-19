@@ -332,14 +332,13 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 				s.challengeUnavailable(w)
 				return
 			}
-			// 闸门按 site+source 计，不按可伪造的 session 计；
-			// 否则每次换 session 就能无限申请"更简单的题"。
-			accessKey := "site:" + strconv.FormatInt(site.ID, 10) + ":ip:" + risk.Key(s.src.ClientIP(r))
-			if s.access == nil || !s.access.Allow(accessKey) {
-				retry := time.Duration(0)
-				if s.access != nil {
-					retry = s.access.RetryAfter(accessKey)
-				}
+			// 只读预检保持冷却时的 429；真正并发判定仍在签发事务内。
+			retry, err := s.db.AccessibilityRetryAfter(ctx, site.ID, risk.Key(s.src.ClientIP(r)), now)
+			if err != nil {
+				s.internalError(w, r, "无障碍额度检查", err)
+				return
+			}
+			if retry > 0 {
 				s.rateLimited(w, retry)
 				return
 			}
@@ -408,50 +407,60 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 		ch.Mode = store.ModePowOnly
 	}
 
-	q, err := s.db.IssueChallengeWithQuestion(ctx, ch, s.caps, spec)
+	seedB64 := base64.RawURLEncoding.EncodeToString(params.Seed)
+	var prepared []byte
+	accessibilitySource := ""
+	if req.Accessibility && spec != nil {
+		accessibilitySource = risk.Key(s.src.ClientIP(r))
+	}
+	var invalidQuestionID string
+	_, err = s.db.IssueChallengePrepared(ctx, ch, s.caps, spec, accessibilitySource, func(q *store.PoolQuestion) error {
+		tok, err := s.signer.Sign(token.PurposeChallenge, token.Claims{
+			Sid: site.ID, Svid: site.Version, CID: id,
+			Exp: ch.ExpiresAt.Unix(), Bits: params.Bits, Seed: seedB64,
+			Mode: ch.Mode, Gen: ch.GeneratorID, Sess: req.Session,
+		}, now)
+		if err != nil {
+			return err
+		}
+		out := challengeResponse{
+			Token: tok, ExpiresIn: int64(site.Policy.ChallengeTTL / time.Second),
+			Pow: powPayload{Algo: params.Algo, Seed: seedB64, Bits: params.Bits}, Mode: ch.Mode,
+		}
+		if q != nil {
+			dto, err := s.questionDTO(q)
+			if err != nil {
+				invalidQuestionID = q.ID
+				return store.ErrInvalidQuestion
+			}
+			out.Question = dto
+		}
+		prepared, err = json.Marshal(out)
+		return err
+	})
 	if err != nil {
+		if invalidQuestionID != "" {
+			if discardErr := s.db.DiscardInvalidReady(ctx, invalidQuestionID); discardErr != nil {
+				s.internalError(w, r, "隔离坏题", discardErr)
+				return
+			}
+		}
+		var quota *store.AccessibilityQuotaError
 		switch {
+		case errors.As(err, &quota):
+			s.rateLimited(w, quota.RetryAfter)
 		case errors.Is(err, store.ErrCapExceeded):
-			// 存量到顶：对外与限流同族，不透露内部原因（红线 8）。
 			s.rateLimited(w, time.Second)
-		case errors.Is(err, store.ErrPoolEmpty):
+		case errors.Is(err, store.ErrPoolEmpty), errors.Is(err, store.ErrInvalidQuestion):
 			s.challengeUnavailable(w)
 		default:
 			s.internalError(w, r, "写入 challenge", err)
 		}
 		return
 	}
-	seedB64 := base64.RawURLEncoding.EncodeToString(params.Seed)
-	tok, err := s.signer.Sign(token.PurposeChallenge, token.Claims{
-		Sid: site.ID, Svid: site.Version, CID: id,
-		Exp: ch.ExpiresAt.Unix(), Bits: params.Bits, Seed: seedB64,
-		Mode: ch.Mode, Gen: ch.GeneratorID, Sess: req.Session,
-	}, now)
-	if err != nil {
-		s.internalError(w, r, "签名", err)
-		return
-	}
-	out := challengeResponse{
-		Token:     tok,
-		ExpiresIn: int64(site.Policy.ChallengeTTL / time.Second),
-		Pow:       powPayload{Algo: params.Algo, Seed: seedB64, Bits: params.Bits},
-		Mode:      ch.Mode,
-	}
-	if q != nil {
-		dto, err := s.questionDTO(q)
-		if err != nil {
-			// 题面读不出合法 DTO：这张 challenge 已经消耗了一条题，必须作废而不是下发坏题面。
-			s.log.Error("题面不合法", "cid8", shortCID(q.ChallengeID))
-			if _, ferr := s.db.RedeemAttempt(ctx, q.ChallengeID, now, time.Second, false); ferr != nil {
-				s.internalError(w, r, "作废题目", ferr)
-				return
-			}
-			s.challengeUnavailable(w)
-			return
-		}
-		out.Question = dto
-	}
-	writeJSON(w, http.StatusOK, out)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(prepared)
 }
 
 // questionDTO 是题面出网的唯一通道：生成器的白名单字段 + 题型标识（+ 图片资产）。

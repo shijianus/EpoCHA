@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "name": "release-full",
+  "started_at_utc": "2026-11-14T05:14:59.608283+00:00",
+  "finished_at_utc": "2026-11-14T05:16:24.150562+00:00",
+  "duration_seconds": 84.542,
+  "cwd": "D:\\Users\\Smart Kevin\\OneDrive\\Desktop\\epocha",
+  "argv": [
+    "node",
+    "docs/scripts/release-check.mjs",
+    "--profile",
+    "full",
+    "--out",
+    "release-artifacts/audit-2026-11-14-full"
+  ],
+  "raw_exit_code": 1,
+  "execution_error": null,
+  "environment_policy": {
+    "GOTOOLCHAIN": "local",
+    "GOPROXY": "off",
+    "GOSUMDB": "off",
+    "GOENV": "off",
+    "GOWORK": "off",
+    "GOFLAGS": "-mod=readonly"
+  },
+  "stdout": {
+    "path": "release-full.stdout.log",
+    "bytes": 4023,
+    "sha256": "9f31a2e2adf58e1fd5dd6ff7bbb4f3ef6d5e1ac72f0091af071fe34f5835e5f7"
+  },
+  "stderr": {
+    "path": "release-full.stderr.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "name": "go-vet-full",
+  "started_at_utc": "2026-11-14T05:15:37.203980+00:00",
+  "finished_at_utc": "2026-11-14T05:16:00.081144+00:00",
+  "duration_seconds": 22.877,
+  "cwd": "D:\\Users\\Smart Kevin\\OneDrive\\Desktop\\epocha",
+  "argv": [
+    "C:\\Users\\Smart Kevin\\go\\pkg\\mod\\golang.org\\toolchain@v0.0.1-go1.27.3.windows-amd64\\bin\\go.exe",
+    "vet",
+    "./..."
+  ],
+  "raw_exit_code": 1,
+  "execution_error": null,
+  "environment_policy": {
+    "GOTOOLCHAIN": "local",
+    "GOPROXY": "off",
+    "GOSUMDB": "off",
+    "GOENV": "off",
+    "GOWORK": "off",
+    "GOFLAGS": "-mod=readonly"
+  },
+  "stdout": {
+    "path": "go-vet-full.stdout.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "stderr": {
+    "path": "go-vet-full.stderr.log",
+    "bytes": 657,
+    "sha256": "76f4111ee397526c0567cc0cc7c3dd685b4bffafcb55dce48b4ed24b95a92daa"
+  }
+}

@@ -123,11 +123,7 @@ func newHarness(t *testing.T, tune func(*config.Config)) *harness {
 	if err != nil {
 		t.Fatalf("risk.NewTracker: %v", err)
 	}
-	gate, err := risk.NewAccessibilityGate(risk.MaxTrackedSources, risk.AccessibilityLimit, risk.AccessibilityWindow, func() time.Time { return h.clock })
-	if err != nil {
-		t.Fatalf("risk.NewAccessibilityGate: %v", err)
-	}
-	h.srv.tracker, h.srv.access = tracker, gate
+	h.srv.tracker = tracker
 	_ = h.gens
 	h.cleanup = append(h.cleanup, func() { _ = db.Close() })
 	t.Cleanup(func() {
@@ -168,6 +164,13 @@ func testRegistry(t *testing.T, master []byte) *generator.Registry {
 	register(generator.NewEnergyWindow(k))
 	register(generator.NewPipeConnect(k))
 	register(generator.NewIntersectionPoint(k))
+	register(generator.NewTileRotation(k))
+	register(generator.NewSymbolPath(k))
+	register(generator.NewCrowdFind(k))
+	register(generator.NewVisualRank(k))
+	register(generator.NewProgressiveTarget(k))
+	register(generator.NewShellTrack(k))
+	register(generator.NewSilhouetteAssembly(k))
 	register(newContractAngle(k))
 	register(newContractPoint(k))
 	register(newContractTiming(k))

@@ -1,0 +1,44 @@
+{
+  "source_path": "C:\\Users\\SMARTK~1\\AppData\\Local\\Temp\\epocha-audit-20261114-p3vcgny4\\source",
+  "created_at_utc": "2026-11-14T05:23:47.882791+00:00",
+  "source_files": 284,
+  "matches_initial_source_manifest": true,
+  "source_snapshot_sha256": "19b05422750a5df45969040b3c734c5e901149335d951296d825a439abf82adb",
+  "scope": "Git-visible tracked and untracked source only; original ignored artifacts intentionally not copied",
+  "clone_commands": [
+    {
+      "argv": [
+        "git",
+        "clone",
+        "--local",
+        "--no-hardlinks",
+        "--no-checkout",
+        "D:\\Users\\Smart Kevin\\OneDrive\\Desktop\\epocha",
+        "C:\\Users\\SMARTK~1\\AppData\\Local\\Temp\\epocha-audit-20261114-p3vcgny4\\source"
+      ],
+      "cwd": "D:\\Users\\Smart Kevin\\OneDrive\\Desktop\\epocha",
+      "started_at_utc": "2026-11-14T05:23:36.162946+00:00",
+      "duration_seconds": 3.603,
+      "raw_exit_code": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "86e0401b1a553fb92f6b8d7c2e642cbe9e404f9ad03e18dc1e4fbfac20c8f467"
+    },
+    {
+      "argv": [
+        "git",
+        "checkout",
+        "--detach",
+        "b5506989075c82927ead14cda0e71a8f9f401803"
+      ],
+      "cwd": "C:\\Users\\SMARTK~1\\AppData\\Local\\Temp\\epocha-audit-20261114-p3vcgny4\\source",
+      "started_at_utc": "2026-11-14T05:23:39.766081+00:00",
+      "duration_seconds": 0.992,
+      "raw_exit_code": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "f0195c6153b5780d3b5219c085b797e64936ebe2186b099f47b616828f105093"
+    }
+  ],
+  "deleted_original_files": false,
+  "created_commits": false,
+  "network_used": false
+}

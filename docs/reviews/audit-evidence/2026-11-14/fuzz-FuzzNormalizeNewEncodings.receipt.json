@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "name": "fuzz-FuzzNormalizeNewEncodings",
+  "cwd": "C:\\Users\\SMARTK~1\\AppData\\Local\\Temp\\epocha-audit-20261114-p3vcgny4\\source",
+  "argv": [
+    "C:\\Users\\Smart Kevin\\go\\pkg\\mod\\golang.org\\toolchain@v0.0.1-go1.27.3.windows-amd64\\bin\\go.exe",
+    "test",
+    "./internal/generator",
+    "-run=^$",
+    "-fuzz=^FuzzNormalizeNewEncodings$",
+    "-fuzztime=5s",
+    "-parallel=2"
+  ],
+  "raw_exit_code": 0,
+  "started_at_utc": "2026-11-14T05:27:04.276975+00:00",
+  "finished_at_utc": "2026-11-14T05:27:28.036073+00:00",
+  "duration_seconds": 23.759,
+  "execution_error": null,
+  "extra_environment": {},
+  "stdout": {
+    "path": "fuzz-FuzzNormalizeNewEncodings.stdout.log",
+    "bytes": 371,
+    "sha256": "4e3b843b2a3732a761086255a60c778f9ee933eecae6f46ab5b1337e55818cde"
+  },
+  "stderr": {
+    "path": "fuzz-FuzzNormalizeNewEncodings.stderr.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

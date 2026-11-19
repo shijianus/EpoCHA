@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "name": "go-list-linux-project",
+  "started_at_utc": "2026-11-14T05:17:57.153986+00:00",
+  "finished_at_utc": "2026-11-14T05:18:04.002363+00:00",
+  "duration_seconds": 6.848,
+  "cwd": "D:\\Users\\Smart Kevin\\OneDrive\\Desktop\\epocha",
+  "argv": [
+    "C:\\Users\\Smart Kevin\\go\\pkg\\mod\\golang.org\\toolchain@v0.0.1-go1.27.3.windows-amd64\\bin\\go.exe",
+    "list",
+    "-json",
+    "./cmd/...",
+    "./internal/...",
+    "./web/..."
+  ],
+  "raw_exit_code": 0,
+  "execution_error": null,
+  "environment_policy": {
+    "GOTOOLCHAIN": "local",
+    "GOPROXY": "off",
+    "GOSUMDB": "off",
+    "GOENV": "off",
+    "GOWORK": "off",
+    "GOFLAGS": "-mod=readonly",
+    "GOOS": "linux",
+    "GOARCH": "arm64",
+    "CGO_ENABLED": "0"
+  },
+  "stdout": {
+    "path": "go-list-linux-project.stdout.log",
+    "bytes": 149352,
+    "sha256": "3ae5529793518f4d5248bd71e4615f8e39e00672a599e62f02fc4f64db451214"
+  },
+  "stderr": {
+    "path": "go-list-linux-project.stderr.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

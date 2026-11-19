@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "name": "isolated-build-receipt-integration",
+  "cwd": "C:\\Users\\SMARTK~1\\AppData\\Local\\Temp\\epocha-audit-20261114-p3vcgny4\\source",
+  "argv": [
+    "C:\\Program Files\\nodejs\\node.EXE",
+    "--test",
+    "--test-reporter=tap",
+    "docs/scripts/build-receipt.integration.test.mjs"
+  ],
+  "raw_exit_code": 0,
+  "started_at_utc": "2026-11-14T05:26:17.413878+00:00",
+  "finished_at_utc": "2026-11-14T05:26:28.481841+00:00",
+  "duration_seconds": 11.068,
+  "execution_error": null,
+  "extra_environment": {},
+  "stdout": {
+    "path": "isolated-build-receipt-integration.stdout.log",
+    "bytes": 499,
+    "sha256": "34fa5a772d3097a66b8a6bbf6c6d853f1ab3f4e6ae4e16527a32897f01b99640"
+  },
+  "stderr": {
+    "path": "isolated-build-receipt-integration.stderr.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

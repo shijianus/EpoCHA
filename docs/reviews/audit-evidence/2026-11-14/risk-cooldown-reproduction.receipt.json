@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "name": "risk-cooldown-reproduction",
+  "cwd": "C:\\Users\\SMARTK~1\\AppData\\Local\\Temp\\epocha-audit-20261114-p3vcgny4\\source",
+  "argv": [
+    "C:\\Users\\Smart Kevin\\go\\pkg\\mod\\golang.org\\toolchain@v0.0.1-go1.27.3.windows-amd64\\bin\\go.exe",
+    "test",
+    "-count=1",
+    "-v",
+    "-run=^TestAudit20261114CooldownSurvivesBucketBoundary$",
+    "./internal/risk"
+  ],
+  "raw_exit_code": 1,
+  "started_at_utc": "2026-11-14T05:31:56.201179+00:00",
+  "finished_at_utc": "2026-11-14T05:32:01.258095+00:00",
+  "duration_seconds": 5.056917900001281,
+  "note": "Deliberately added regression test in isolated clone only; EXPECTED FAIL demonstrates observed defect; production sources unchanged",
+  "stdout": {
+    "path": "risk-cooldown-reproduction.stdout.log",
+    "bytes": 484,
+    "sha256": "cdb55f59ed33477e17673a0e6ffeb6e1cd9c032c342ac0a4768d34edb388ca58"
+  },
+  "stderr": {
+    "path": "risk-cooldown-reproduction.stderr.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

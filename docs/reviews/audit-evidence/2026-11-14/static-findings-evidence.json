@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "method": "Source control-flow and geometry verification only; not a browser or Linux HTTP runtime test",
+  "findings": [
+    {
+      "id": "F-12",
+      "status": "CONFIRMED_STATIC",
+      "public_root_mux": "internal/api/api.go:123-145",
+      "registered_widget_parent_routes": ["GET /widget/v1.js", "GET /widget/v1.worker.js"],
+      "unregistered_widget_parent_route": "GET /widget/v1.interactive.js",
+      "child_handler_route_present": "web/widget/widget.go:71-73",
+      "client_loader": "web/widget/v1.js:756-790,2011-2030",
+      "consequence": "The child handler is never reached for the interactive URL under the standard public root mux; seven interactive generators cannot load their renderer without an external workaround.",
+      "runtime_http_reproduction": "BLOCKED: native Windows cannot compile store flock; no Linux runtime or stub used"
+    },
+    {
+      "id": "F-09",
+      "status": "CONFIRMED_STATIC_CONTROL_FLOW",
+      "loader_no_timeout": "web/widget/v1.js:765-790",
+      "ui_disabled": "web/widget/v1.js:1833-1835",
+      "deadline_only_armed_after_load": "web/widget/v1.js:2007-2008,2014-2030",
+      "browser_reproduction": "NOT_RUN"
+    },
+    {
+      "id": "F-10",
+      "status": "STATIC_LAYOUT_INFERENCE",
+      "css_constraint": "web/widget/v1.js:594,621",
+      "fixed_pixel_sprite": "web/widget/v1.js:1578-1600",
+      "shell_fixed_pixel_sprite_and_percentage_hitboxes": "web/widget/v1.interactive.js:802-819,836-840",
+      "browser_reproduction": "BLOCKED"
+    },
+    {
+      "id": "F-11",
+      "status": "CONFIRMED_STATIC_GEOMETRY",
+      "source": "internal/generator/symbolpath.go:31-42,656-664",
+      "canvas_width": 320,
+      "target_length": 8,
+      "target_card_width": 40,
+      "target_gap": 4,
+      "computed_strip_width": 348,
+      "computed_left_x": -14,
+      "right_edge": 334,
+      "clipped_each_side_pixels": 14,
+      "public_target_h": 48,
+      "rendered_card_height": 40,
+      "rendered_image_review": "NOT_RUN; no image claimed to be archived"
+    },
+    {
+      "id": "F-03",
+      "status": "CONFIRMED_STATIC_CONTROL_FLOW",
+      "accessibility_allow_consumes_before_ready_check": "internal/api/handlers.go:337-345",
+      "later_pool_empty_failure": "internal/api/handlers.go:353-360",
+      "later_issue_failure": "internal/api/handlers.go:411-422",
+      "http_reproduction": "BLOCKED"
+    }
+  ]
+}

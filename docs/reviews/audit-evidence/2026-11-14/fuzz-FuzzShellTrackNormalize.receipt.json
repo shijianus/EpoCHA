@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "name": "fuzz-FuzzShellTrackNormalize",
+  "cwd": "C:\\Users\\SMARTK~1\\AppData\\Local\\Temp\\epocha-audit-20261114-p3vcgny4\\source",
+  "argv": [
+    "C:\\Users\\Smart Kevin\\go\\pkg\\mod\\golang.org\\toolchain@v0.0.1-go1.27.3.windows-amd64\\bin\\go.exe",
+    "test",
+    "./internal/generator",
+    "-run=^$",
+    "-fuzz=^FuzzShellTrackNormalize$",
+    "-fuzztime=5s",
+    "-parallel=2"
+  ],
+  "raw_exit_code": 0,
+  "started_at_utc": "2026-11-14T05:27:45.802541+00:00",
+  "finished_at_utc": "2026-11-14T05:27:54.691073+00:00",
+  "duration_seconds": 8.889,
+  "execution_error": null,
+  "extra_environment": {},
+  "stdout": {
+    "path": "fuzz-FuzzShellTrackNormalize.stdout.log",
+    "bytes": 371,
+    "sha256": "7d43170fdcca542dc8c12b3f1598a8caad8359e9ef3986ddc86fc772a984bc99"
+  },
+  "stderr": {
+    "path": "fuzz-FuzzShellTrackNormalize.stderr.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

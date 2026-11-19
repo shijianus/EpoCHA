@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "name": "go-native-coverage",
+  "started_at_utc": "2026-11-14T05:17:20.822423+00:00",
+  "finished_at_utc": "2026-11-14T05:17:57.128179+00:00",
+  "duration_seconds": 36.306,
+  "cwd": "D:\\Users\\Smart Kevin\\OneDrive\\Desktop\\epocha",
+  "argv": [
+    "C:\\Users\\Smart Kevin\\go\\pkg\\mod\\golang.org\\toolchain@v0.0.1-go1.27.3.windows-amd64\\bin\\go.exe",
+    "test",
+    "-json",
+    "-coverprofile=release-artifacts/audit-2026-11-14-native-cover.out",
+    "-count=1",
+    "./internal/generator",
+    "./internal/dispatch",
+    "./internal/eval",
+    "./internal/pow",
+    "./internal/token",
+    "./internal/risk",
+    "./internal/version",
+    "./internal/m4baseline",
+    "./internal/m4baseline/solver",
+    "./web/widget",
+    "./web/adminui",
+    "./cmd/exampleapp",
+    "./cmd/preview",
+    "./cmd/evalocr",
+    "./cmd/blindtest",
+    "./cmd/devclient",
+    "./cmd/loadtest"
+  ],
+  "raw_exit_code": 0,
+  "execution_error": null,
+  "environment_policy": {
+    "GOTOOLCHAIN": "local",
+    "GOPROXY": "off",
+    "GOSUMDB": "off",
+    "GOENV": "off",
+    "GOWORK": "off",
+    "GOFLAGS": "-mod=readonly"
+  },
+  "stdout": {
+    "path": "go-native-coverage.stdout.log",
+    "bytes": 369457,
+    "sha256": "fb6ed787df8f61fbeed1fa395f094444295b65919c3123ac66af3203e98dab5f"
+  },
+  "stderr": {
+    "path": "go-native-coverage.stderr.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

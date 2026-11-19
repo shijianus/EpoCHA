@@ -1,0 +1,1964 @@
+{
+  "schema_version": 1,
+  "purpose": "Auditable measurements, not release approval",
+  "project_inventory": {
+    "cmd": {
+      "go_files": 27,
+      "test_files": 15,
+      "go_lines": 10873
+    },
+    "internal": {
+      "go_files": 149,
+      "test_files": 84,
+      "go_lines": 45260
+    },
+    "web": {
+      "go_files": 5,
+      "test_files": 2,
+      "go_lines": 765
+    },
+    "top_level_test_functions_static_count": 680,
+    "fuzz_functions_static_count": 8
+  },
+  "receipts_log_hashes_verified": true,
+  "receipts": [
+    {
+      "file": "binary-ops-metadata.receipt.json",
+      "name": "binary-ops-metadata",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 0.271
+    },
+    {
+      "file": "binary-server-metadata.receipt.json",
+      "name": "binary-server-metadata",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 0.248
+    },
+    {
+      "file": "build-linux-ops.receipt.json",
+      "name": "build-linux-ops",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 3.87
+    },
+    {
+      "file": "build-linux-server.receipt.json",
+      "name": "build-linux-server",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 14.521
+    },
+    {
+      "file": "build-m4-baseline.receipt.json",
+      "name": "build-m4-baseline",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 29.033
+    },
+    {
+      "file": "build-receipt-integration.receipt.json",
+      "name": "build-receipt-integration",
+      "raw_exit_code": 1,
+      "execution_error": null,
+      "duration_seconds": 8.289
+    },
+    {
+      "file": "docker-capability.receipt.json",
+      "name": "docker-capability",
+      "raw_exit_code": 1,
+      "execution_error": null,
+      "duration_seconds": 0.221
+    },
+    {
+      "file": "fuzz-FuzzCrowdFindNormalize.receipt.json",
+      "name": "fuzz-FuzzCrowdFindNormalize",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 9.271
+    },
+    {
+      "file": "fuzz-FuzzNormalizeNewEncodings.receipt.json",
+      "name": "fuzz-FuzzNormalizeNewEncodings",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 23.759
+    },
+    {
+      "file": "fuzz-FuzzProgressiveTargetNormalize.receipt.json",
+      "name": "fuzz-FuzzProgressiveTargetNormalize",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 8.486
+    },
+    {
+      "file": "fuzz-FuzzShellTrackNormalize.receipt.json",
+      "name": "fuzz-FuzzShellTrackNormalize",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 8.889
+    },
+    {
+      "file": "fuzz-FuzzSilhouetteNormalize.receipt.json",
+      "name": "fuzz-FuzzSilhouetteNormalize",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 8.9
+    },
+    {
+      "file": "fuzz-FuzzSymbolPathNormalize.receipt.json",
+      "name": "fuzz-FuzzSymbolPathNormalize",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 8.576
+    },
+    {
+      "file": "fuzz-FuzzTileRotationNormalize.receipt.json",
+      "name": "fuzz-FuzzTileRotationNormalize",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 8.876
+    },
+    {
+      "file": "fuzz-FuzzVisualRankNormalize.receipt.json",
+      "name": "fuzz-FuzzVisualRankNormalize",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 9.031
+    },
+    {
+      "file": "go-env.receipt.json",
+      "name": "go-env",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 0.328
+    },
+    {
+      "file": "go-list-linux-project.receipt.json",
+      "name": "go-list-linux-project",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 6.848
+    },
+    {
+      "file": "go-module-verify.receipt.json",
+      "name": "go-module-verify",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 63.536
+    },
+    {
+      "file": "go-native-coverage.receipt.json",
+      "name": "go-native-coverage",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 36.306
+    },
+    {
+      "file": "go-race-cgo-explicit.receipt.json",
+      "name": "go-race-cgo-explicit",
+      "raw_exit_code": 2,
+      "execution_error": null,
+      "duration_seconds": 0.363
+    },
+    {
+      "file": "go-race-full.receipt.json",
+      "name": "go-race-full",
+      "raw_exit_code": 2,
+      "execution_error": null,
+      "duration_seconds": 0.314
+    },
+    {
+      "file": "go-race-with-cgo.receipt.json",
+      "name": "go-race-with-cgo",
+      "raw_exit_code": 1,
+      "execution_error": null,
+      "duration_seconds": 39.159
+    },
+    {
+      "file": "go-test-compile-linux-project.receipt.json",
+      "name": "go-test-compile-linux-project",
+      "raw_exit_code": 1,
+      "execution_error": null,
+      "duration_seconds": 2.56
+    },
+    {
+      "file": "go-test-full.receipt.json",
+      "name": "go-test-full",
+      "raw_exit_code": 1,
+      "execution_error": null,
+      "duration_seconds": 57.196
+    },
+    {
+      "file": "go-vet-full.receipt.json",
+      "name": "go-vet-full",
+      "raw_exit_code": 1,
+      "execution_error": null,
+      "duration_seconds": 22.877
+    },
+    {
+      "file": "go-vet-linux-project.receipt.json",
+      "name": "go-vet-linux-project",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 56.317
+    },
+    {
+      "file": "isolated-build-receipt-integration.receipt.json",
+      "name": "isolated-build-receipt-integration",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 11.068
+    },
+    {
+      "file": "isolated-go-full.receipt.json",
+      "name": "isolated-go-full",
+      "raw_exit_code": 1,
+      "execution_error": null,
+      "duration_seconds": 30.778
+    },
+    {
+      "file": "isolated-go-vet-linux-full.receipt.json",
+      "name": "isolated-go-vet-linux-full",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 5.008
+    },
+    {
+      "file": "isolated-release-full.receipt.json",
+      "name": "isolated-release-full",
+      "raw_exit_code": 3,
+      "execution_error": null,
+      "duration_seconds": null
+    },
+    {
+      "file": "linux-test-compile-00.receipt.json",
+      "name": "linux-test-compile-00",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 26.678
+    },
+    {
+      "file": "linux-test-compile-01.receipt.json",
+      "name": "linux-test-compile-01",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 9.208
+    },
+    {
+      "file": "linux-test-compile-02.receipt.json",
+      "name": "linux-test-compile-02",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 6.834
+    },
+    {
+      "file": "linux-test-compile-04.receipt.json",
+      "name": "linux-test-compile-04",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 2.392
+    },
+    {
+      "file": "linux-test-compile-05.receipt.json",
+      "name": "linux-test-compile-05",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 4.903
+    },
+    {
+      "file": "linux-test-compile-06.receipt.json",
+      "name": "linux-test-compile-06",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 3.031
+    },
+    {
+      "file": "linux-test-compile-08.receipt.json",
+      "name": "linux-test-compile-08",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 3.201
+    },
+    {
+      "file": "linux-test-compile-09.receipt.json",
+      "name": "linux-test-compile-09",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 3.082
+    },
+    {
+      "file": "linux-test-compile-10.receipt.json",
+      "name": "linux-test-compile-10",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 4.4
+    },
+    {
+      "file": "linux-test-compile-11.receipt.json",
+      "name": "linux-test-compile-11",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 3.544
+    },
+    {
+      "file": "linux-test-compile-12.receipt.json",
+      "name": "linux-test-compile-12",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 3.783
+    },
+    {
+      "file": "linux-test-compile-13.receipt.json",
+      "name": "linux-test-compile-13",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 2.421
+    },
+    {
+      "file": "linux-test-compile-14.receipt.json",
+      "name": "linux-test-compile-14",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 2.044
+    },
+    {
+      "file": "linux-test-compile-15.receipt.json",
+      "name": "linux-test-compile-15",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 1.961
+    },
+    {
+      "file": "linux-test-compile-16.receipt.json",
+      "name": "linux-test-compile-16",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 2.71
+    },
+    {
+      "file": "linux-test-compile-17.receipt.json",
+      "name": "linux-test-compile-17",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 2.133
+    },
+    {
+      "file": "linux-test-compile-18.receipt.json",
+      "name": "linux-test-compile-18",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 2.03
+    },
+    {
+      "file": "linux-test-compile-19.receipt.json",
+      "name": "linux-test-compile-19",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 2.611
+    },
+    {
+      "file": "linux-test-compile-20.receipt.json",
+      "name": "linux-test-compile-20",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 2.117
+    },
+    {
+      "file": "linux-test-compile-21.receipt.json",
+      "name": "linux-test-compile-21",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 2.881
+    },
+    {
+      "file": "linux-test-compile-22.receipt.json",
+      "name": "linux-test-compile-22",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 4.038
+    },
+    {
+      "file": "linux-test-compile-23.receipt.json",
+      "name": "linux-test-compile-23",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 1.887
+    },
+    {
+      "file": "linux-test-compile-24.receipt.json",
+      "name": "linux-test-compile-24",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 1.826
+    },
+    {
+      "file": "linux-test-compile-25.receipt.json",
+      "name": "linux-test-compile-25",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 2.55
+    },
+    {
+      "file": "linux-test-compile-27.receipt.json",
+      "name": "linux-test-compile-27",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 2.424
+    },
+    {
+      "file": "m4-replication.receipt.json",
+      "name": "m4-replication",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 147.434
+    },
+    {
+      "file": "make-capability.receipt.json",
+      "name": "make-capability",
+      "raw_exit_code": null,
+      "execution_error": "FileNotFoundError",
+      "duration_seconds": 0.026
+    },
+    {
+      "file": "native-vet.receipt.json",
+      "name": "native-vet",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 2.785
+    },
+    {
+      "file": "release-full.receipt.json",
+      "name": "release-full",
+      "raw_exit_code": 1,
+      "execution_error": null,
+      "duration_seconds": 84.542
+    },
+    {
+      "file": "server-dependencies.receipt.json",
+      "name": "server-dependencies",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 2.01
+    },
+    {
+      "file": "stage5b-classifier-gitbash.receipt.json",
+      "name": "stage5b-classifier-gitbash",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 5.402
+    },
+    {
+      "file": "stage5b-classifier.receipt.json",
+      "name": "stage5b-classifier",
+      "raw_exit_code": 1,
+      "execution_error": null,
+      "duration_seconds": 0.149
+    },
+    {
+      "file": "toolchain.receipt.json",
+      "name": "toolchain",
+      "raw_exit_code": 0,
+      "execution_error": null,
+      "duration_seconds": 0.378
+    },
+    {
+      "file": "wsl-capability.receipt.json",
+      "name": "wsl-capability",
+      "raw_exit_code": 4294967295,
+      "execution_error": null,
+      "duration_seconds": 0.131
+    }
+  ],
+  "go_native_coverage": {
+    "receipt": "go-native-coverage.receipt.json",
+    "raw_exit_code": 0,
+    "test_event_counts": {
+      "pass": 408
+    },
+    "top_level_tests": {
+      "pass": 306
+    },
+    "package_outcomes": [
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/version",
+        "action": "pass",
+        "elapsed": 3.169
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/m4baseline/solver",
+        "action": "pass",
+        "elapsed": 6.881
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/eval",
+        "action": "pass",
+        "elapsed": 7.265
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/dispatch",
+        "action": "pass",
+        "elapsed": 7.2780000000000005
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/token",
+        "action": "pass",
+        "elapsed": 7.272
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/exampleapp",
+        "action": "pass",
+        "elapsed": 9.261
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/m4baseline",
+        "action": "pass",
+        "elapsed": 11.22
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/evalocr",
+        "action": "pass",
+        "elapsed": 11.475999999999999
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/risk",
+        "action": "pass",
+        "elapsed": 14.108
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/devclient",
+        "action": "pass",
+        "elapsed": 14.364
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/web/widget",
+        "action": "pass",
+        "elapsed": 14.96
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/pow",
+        "action": "pass",
+        "elapsed": 15.173
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/loadtest",
+        "action": "pass",
+        "elapsed": 15.617
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/preview",
+        "action": "pass",
+        "elapsed": 18.119
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/web/adminui",
+        "action": "pass",
+        "elapsed": 19.171
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/blindtest",
+        "action": "pass",
+        "elapsed": 19.456
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/generator",
+        "action": "pass",
+        "elapsed": 23.764
+      }
+    ],
+    "coverage": [
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/version",
+        "text": "coverage: [no statements]"
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/m4baseline/solver",
+        "text": "coverage: 28.0% of statements"
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/eval",
+        "text": "coverage: 97.5% of statements"
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/dispatch",
+        "text": "coverage: 80.3% of statements"
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/token",
+        "text": "coverage: 93.4% of statements"
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/exampleapp",
+        "text": "coverage: 66.0% of statements"
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/m4baseline",
+        "text": "coverage: 16.1% of statements"
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/evalocr",
+        "text": "coverage: 58.3% of statements"
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/risk",
+        "text": "coverage: 84.2% of statements"
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/devclient",
+        "text": "coverage: 18.4% of statements"
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/web/widget",
+        "text": "coverage: 85.2% of statements"
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/pow",
+        "text": "coverage: 96.9% of statements"
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/loadtest",
+        "text": "coverage: 80.7% of statements"
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/preview",
+        "text": "coverage: 66.0% of statements"
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/web/adminui",
+        "text": "coverage: 91.3% of statements"
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/blindtest",
+        "text": "coverage: 86.3% of statements"
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/generator",
+        "text": "coverage: 80.1% of statements"
+      }
+    ],
+    "build_errors": []
+  },
+  "go_full_original": {
+    "receipt": "go-test-full.receipt.json",
+    "raw_exit_code": 1,
+    "test_event_counts": {
+      "pass": 408
+    },
+    "top_level_tests": {
+      "pass": 306
+    },
+    "package_outcomes": [
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/evalgen",
+        "action": "skip",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/devseed",
+        "action": "fail",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/m4baseline",
+        "action": "skip",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/ops",
+        "action": "fail",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/server",
+        "action": "fail",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/admin",
+        "action": "fail",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/api",
+        "action": "fail",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/config",
+        "action": "fail",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/pool",
+        "action": "fail",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/store",
+        "action": "fail",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/release-artifacts/c04-c08-20261102T142021Z-6471",
+        "action": "fail",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/release-artifacts/convergence-development-2026-11-02-XQrGGI/auth",
+        "action": "skip",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/tmp/gui-harness",
+        "action": "fail",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/tmp/m4debug",
+        "action": "skip",
+        "elapsed": 0.001
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/tmp/measure",
+        "action": "skip",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/tmp/renderq",
+        "action": "skip",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/tmp-manual-test/serve-a11y",
+        "action": "skip",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/tmp-preview-export",
+        "action": "skip",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/web/preview",
+        "action": "skip",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/evalocr",
+        "action": "pass",
+        "elapsed": 1.5030000000000001
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/devclient",
+        "action": "pass",
+        "elapsed": 2.596
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/eval",
+        "action": "pass",
+        "elapsed": 1.221
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/blindtest",
+        "action": "pass",
+        "elapsed": 2.868
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/dispatch",
+        "action": "pass",
+        "elapsed": 1.833
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/version",
+        "action": "pass",
+        "elapsed": 2.324
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/pow",
+        "action": "pass",
+        "elapsed": 2.839
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/token",
+        "action": "pass",
+        "elapsed": 2.924
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/web/widget",
+        "action": "pass",
+        "elapsed": 2.925
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/web/adminui",
+        "action": "pass",
+        "elapsed": 2.941
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/risk",
+        "action": "pass",
+        "elapsed": 3.056
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/preview",
+        "action": "pass",
+        "elapsed": 3.177
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/loadtest",
+        "action": "pass",
+        "elapsed": 3.36
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/m4baseline/solver",
+        "action": "pass",
+        "elapsed": 3.923
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/m4baseline",
+        "action": "pass",
+        "elapsed": 4.4
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/exampleapp",
+        "action": "pass",
+        "elapsed": 8.305
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/generator",
+        "action": "pass",
+        "elapsed": 25.934
+      }
+    ],
+    "coverage": [],
+    "build_errors": [
+      "# github.com/shijianus/EpoCHA/release-artifacts/c04-c08-20261102T142021Z-6471",
+      "release-artifacts\\c04-c08-20261102T142021Z-6471\\red-audit.go:32:10: undefined: DB",
+      "release-artifacts\\c04-c08-20261102T142021Z-6471\\red-audit.go:67:10: undefined: DB",
+      "release-artifacts\\c04-c08-20261102T142021Z-6471\\red-audit.go:107:10: undefined: DB",
+      "release-artifacts\\c04-c08-20261102T142021Z-6471\\red-secrets.go:49:10: undefined: DB",
+      "release-artifacts\\c04-c08-20261102T142021Z-6471\\red-secrets.go:116:10: undefined: DB",
+      "release-artifacts\\c04-c08-20261102T142021Z-6471\\red-secrets.go:121:10: undefined: DB",
+      "release-artifacts\\c04-c08-20261102T142021Z-6471\\red-secrets.go:125:10: undefined: DB",
+      "release-artifacts\\c04-c08-20261102T142021Z-6471\\red-secrets.go:164:10: undefined: DB",
+      "release-artifacts\\c04-c08-20261102T142021Z-6471\\red-secrets.go:191:10: undefined: DB",
+      "release-artifacts\\c04-c08-20261102T142021Z-6471\\red-secrets.go:223:10: undefined: DB",
+      "release-artifacts\\c04-c08-20261102T142021Z-6471\\red-secrets.go:223:10: too many errors",
+      "# github.com/shijianus/EpoCHA/internal/store",
+      "internal\\store\\lock.go:113:20: undefined: syscall.Flock",
+      "internal\\store\\lock.go:113:47: undefined: syscall.LOCK_EX",
+      "internal\\store\\lock.go:113:63: undefined: syscall.LOCK_NB",
+      "internal\\store\\lock.go:142:20: undefined: syscall.Flock",
+      "internal\\store\\lock.go:142:47: undefined: syscall.LOCK_UN"
+    ]
+  },
+  "go_full_isolated": {
+    "receipt": "isolated-go-full.receipt.json",
+    "raw_exit_code": 1,
+    "test_event_counts": {
+      "pass": 408
+    },
+    "top_level_tests": {
+      "pass": 306
+    },
+    "package_outcomes": [
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/devseed",
+        "action": "fail",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/evalgen",
+        "action": "skip",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/m4baseline",
+        "action": "skip",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/ops",
+        "action": "fail",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/server",
+        "action": "fail",
+        "elapsed": 0.001
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/admin",
+        "action": "fail",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/api",
+        "action": "fail",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/config",
+        "action": "fail",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/pool",
+        "action": "fail",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/store",
+        "action": "fail",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/web/preview",
+        "action": "skip",
+        "elapsed": 0
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/version",
+        "action": "pass",
+        "elapsed": 2.57
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/exampleapp",
+        "action": "pass",
+        "elapsed": 6.41
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/dispatch",
+        "action": "pass",
+        "elapsed": 6.1
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/devclient",
+        "action": "pass",
+        "elapsed": 6.572
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/risk",
+        "action": "pass",
+        "elapsed": 7.922
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/evalocr",
+        "action": "pass",
+        "elapsed": 8.439
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/m4baseline/solver",
+        "action": "pass",
+        "elapsed": 8.43
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/pow",
+        "action": "pass",
+        "elapsed": 9.833
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/token",
+        "action": "pass",
+        "elapsed": 10.749
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/m4baseline",
+        "action": "pass",
+        "elapsed": 12.646
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/eval",
+        "action": "pass",
+        "elapsed": 14.892
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/web/widget",
+        "action": "pass",
+        "elapsed": 14.827
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/blindtest",
+        "action": "pass",
+        "elapsed": 15.658
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/preview",
+        "action": "pass",
+        "elapsed": 16.174
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/web/adminui",
+        "action": "pass",
+        "elapsed": 18.15
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/cmd/loadtest",
+        "action": "pass",
+        "elapsed": 18.248
+      },
+      {
+        "package": "github.com/shijianus/EpoCHA/internal/generator",
+        "action": "pass",
+        "elapsed": 22.754
+      }
+    ],
+    "coverage": [],
+    "build_errors": [
+      "# github.com/shijianus/EpoCHA/internal/store",
+      "internal\\store\\lock.go:113:20: undefined: syscall.Flock",
+      "internal\\store\\lock.go:113:47: undefined: syscall.LOCK_EX",
+      "internal\\store\\lock.go:113:63: undefined: syscall.LOCK_NB",
+      "internal\\store\\lock.go:142:20: undefined: syscall.Flock",
+      "internal\\store\\lock.go:142:47: undefined: syscall.LOCK_UN"
+    ]
+  },
+  "release_isolated": {
+    "result": "INCOMPLETE",
+    "raw_exit_code": 3,
+    "release_ready": false,
+    "check_counts": {
+      "PASS": 15,
+      "BLOCKED": 19,
+      "NOT_RUN": 8
+    },
+    "node_suites": [
+      {
+        "id": "engineering-rules",
+        "tests": 26,
+        "pass": 26,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      {
+        "id": "widget-regressions",
+        "tests": 50,
+        "pass": 50,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      {
+        "id": "adminui-regressions",
+        "tests": 22,
+        "pass": 22,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      {
+        "id": "tooling-regressions",
+        "tests": 57,
+        "pass": 57,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      }
+    ],
+    "node_unique_tests_in_profile": 155,
+    "checks": [
+      {
+        "id": "source-identity",
+        "required": true,
+        "status": "PASS",
+        "executed": true,
+        "raw_exit_code": 0,
+        "evidence": {
+          "commit": "b5506989075c82927ead14cda0e71a8f9f401803",
+          "dirty": true,
+          "snapshot_sha256": "763650b959cbee1f394a40547b82af381c49b8be8f0d8df07c142f36e8f24b86"
+        }
+      },
+      {
+        "id": "node24",
+        "required": true,
+        "status": "PASS",
+        "executed": true,
+        "raw_exit_code": 0,
+        "evidence": "v24.14.0"
+      },
+      {
+        "id": "linux-host",
+        "required": true,
+        "status": "BLOCKED",
+        "executed": true,
+        "raw_exit_code": null,
+        "reason": "Linux required for flock/race/deployment; actual win32/x64"
+      },
+      {
+        "id": "key-permission-and-rerun",
+        "required": true,
+        "status": "BLOCKED",
+        "executed": false,
+        "raw_exit_code": null,
+        "reason": "needs Node 24 and actual Linux under the non-root service identity; Windows/root refusal selftest is not a permission test"
+      },
+      {
+        "id": "go-toolchain",
+        "required": true,
+        "status": "PASS",
+        "executed": true,
+        "raw_exit_code": 0,
+        "evidence": "go1.27.3"
+      },
+      {
+        "id": "go-package-inventory",
+        "required": true,
+        "status": "PASS",
+        "executed": true,
+        "raw_exit_code": 0,
+        "evidence": {
+          "packages": 28,
+          "source_files_checked": 194
+        }
+      },
+      {
+        "id": "gnu-make",
+        "required": true,
+        "status": "BLOCKED",
+        "executed": true,
+        "raw_exit_code": null,
+        "reason": "make failed: spawnSync make ENOENT"
+      },
+      {
+        "id": "bash",
+        "required": true,
+        "status": "PASS",
+        "executed": true,
+        "raw_exit_code": 0,
+        "evidence": "GNU bash, version 5.2.37(1)-release (x86_64-pc-msys)"
+      },
+      {
+        "id": "race-compiler",
+        "required": true,
+        "status": "BLOCKED",
+        "executed": false,
+        "raw_exit_code": null,
+        "reason": "Linux and the pinned Go toolchain required"
+      },
+      {
+        "id": "engineering-rules",
+        "required": true,
+        "status": "PASS",
+        "counts": {
+          "tests": 26,
+          "pass": 26,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0
+        },
+        "executed": true,
+        "raw_exit_code": 0,
+        "duration_ms": 1380,
+        "log": "engineering-rules.log",
+        "log_sha256": "75ef81dac44291d6279ce8ae1c0bc25af4fc6b2ad82fd418d7a9f6cc0acee2e2"
+      },
+      {
+        "id": "widget-regressions",
+        "required": true,
+        "status": "PASS",
+        "counts": {
+          "tests": 50,
+          "pass": 50,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0
+        },
+        "executed": true,
+        "raw_exit_code": 0,
+        "duration_ms": 884,
+        "log": "widget-regressions.log",
+        "log_sha256": "4ca4573b9458abb966f499ccb236cc30d2c47caf3fe36d894df9a7f0ead640e8"
+      },
+      {
+        "id": "adminui-regressions",
+        "required": true,
+        "status": "PASS",
+        "counts": {
+          "tests": 22,
+          "pass": 22,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0
+        },
+        "executed": true,
+        "raw_exit_code": 0,
+        "duration_ms": 444,
+        "log": "adminui-regressions.log",
+        "log_sha256": "9bad4186372b673764c5135f5e2b580234c36980a8c71f3cdb8ce9e73330027f"
+      },
+      {
+        "id": "tooling-regressions",
+        "required": true,
+        "status": "PASS",
+        "counts": {
+          "tests": 57,
+          "pass": 57,
+          "fail": 0,
+          "cancelled": 0,
+          "skipped": 0,
+          "todo": 0
+        },
+        "executed": true,
+        "raw_exit_code": 0,
+        "duration_ms": 51598,
+        "log": "tooling-regressions.log",
+        "log_sha256": "6b7f9e995e6e77f1d7b2c067150edb7aef0f1a85c6d6c4f14b9fe117bfc66017"
+      },
+      {
+        "id": "javascript-syntax",
+        "required": true,
+        "status": "PASS",
+        "executed": true,
+        "raw_exit_code": 0,
+        "evidence": "23 JavaScript files checked"
+      },
+      {
+        "id": "widget-size",
+        "required": true,
+        "status": "PASS",
+        "executed": true,
+        "raw_exit_code": 0,
+        "evidence": "widget 110465 B; gzip 28968 B < 30720 B; interactive 48751 B; gzip 10311 B < 30720 B; core+interactive gzip 39279 B < 40960 B; main+worker gzip 33678 B"
+      },
+      {
+        "id": "shell-syntax",
+        "required": true,
+        "status": "PASS",
+        "executed": true,
+        "raw_exit_code": 0,
+        "evidence": "17 actual shell scripts checked"
+      },
+      {
+        "id": "fmt-check",
+        "required": true,
+        "status": "PASS",
+        "executed": true,
+        "raw_exit_code": 0,
+        "evidence": "gofmt checked 181 actual Go files"
+      },
+      {
+        "id": "diff-check",
+        "required": true,
+        "status": "PASS",
+        "executed": true,
+        "raw_exit_code": 0,
+        "duration_ms": 152,
+        "log": "diff-check.log",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "id": "go-vet",
+        "required": true,
+        "status": "BLOCKED",
+        "executed": false,
+        "raw_exit_code": null,
+        "reason": "legitimate Linux + go1.27.3 required; not attempted on native Windows"
+      },
+      {
+        "id": "go-test",
+        "required": true,
+        "status": "BLOCKED",
+        "executed": false,
+        "raw_exit_code": null,
+        "reason": "legitimate Linux + go1.27.3 required; not attempted on native Windows"
+      },
+      {
+        "id": "go-race",
+        "required": true,
+        "status": "BLOCKED",
+        "executed": false,
+        "raw_exit_code": null,
+        "reason": "legitimate Linux + go1.27.3 required; not attempted on native Windows"
+      },
+      {
+        "id": "static-build",
+        "required": true,
+        "status": "BLOCKED",
+        "executed": false,
+        "raw_exit_code": null,
+        "reason": "legitimate Linux + go1.27.3 required; not attempted on native Windows"
+      },
+      {
+        "id": "binary-size",
+        "required": true,
+        "status": "BLOCKED",
+        "executed": false,
+        "raw_exit_code": null,
+        "reason": "legitimate Linux + go1.27.3 required; not attempted on native Windows"
+      },
+      {
+        "id": "secret-scan",
+        "required": true,
+        "status": "BLOCKED",
+        "executed": false,
+        "raw_exit_code": null,
+        "reason": "legitimate Linux + go1.27.3 required; not attempted on native Windows"
+      },
+      {
+        "id": "release-platform",
+        "required": true,
+        "status": "BLOCKED",
+        "executed": true,
+        "raw_exit_code": null,
+        "reason": "formal scope remains B / linux/arm64 / UID:GID 1000:1000; other hosts are test-only"
+      },
+      {
+        "id": "candidate-clean",
+        "required": true,
+        "status": "BLOCKED",
+        "executed": false,
+        "raw_exit_code": null,
+        "reason": "a formal candidate requires a clean committed source OID; this tool will not commit for you"
+      },
+      {
+        "id": "gate-tools",
+        "required": true,
+        "status": "BLOCKED",
+        "executed": false,
+        "raw_exit_code": null,
+        "reason": "full Linux/arm64 toolchain, UID and gate tools unavailable"
+      },
+      {
+        "id": "dedicated-docker",
+        "required": true,
+        "status": "BLOCKED",
+        "executed": false,
+        "raw_exit_code": null,
+        "reason": "dedicated Docker inventory cannot be checked before platform prerequisites"
+      },
+      {
+        "id": "ocr-container",
+        "required": true,
+        "status": "BLOCKED",
+        "executed": false,
+        "raw_exit_code": null,
+        "reason": "isolated Docker prerequisites unavailable"
+      },
+      {
+        "id": "stage4b",
+        "required": true,
+        "status": "BLOCKED",
+        "executed": false,
+        "raw_exit_code": null,
+        "reason": "required Linux/arm64 or isolated Docker prerequisites unavailable"
+      },
+      {
+        "id": "stage5a",
+        "required": true,
+        "status": "BLOCKED",
+        "executed": false,
+        "raw_exit_code": null,
+        "reason": "required Linux/arm64 or isolated Docker prerequisites unavailable"
+      },
+      {
+        "id": "stage5b",
+        "required": true,
+        "status": "BLOCKED",
+        "executed": false,
+        "raw_exit_code": null,
+        "reason": "clean committed candidate required by stage5b"
+      },
+      {
+        "id": "admin-ui",
+        "required": true,
+        "status": "BLOCKED",
+        "executed": false,
+        "raw_exit_code": null,
+        "reason": "required Linux/arm64 or isolated Docker prerequisites unavailable"
+      },
+      {
+        "id": "manual-stage4a.human-readability",
+        "required": true,
+        "status": "NOT_RUN",
+        "exit_code": 3,
+        "check_id": "stage4a.human-readability",
+        "reason": "manual-evidence-not-provided",
+        "executed": true,
+        "raw_exit_code": 3,
+        "duration_ms": 148,
+        "log": "manual-stage4a.human-readability.log",
+        "log_sha256": "5240dffb1b9e0fd98e149d709304bdf706900e979b8e300bd484c7df36860342"
+      },
+      {
+        "id": "manual-stage4b.human-readability",
+        "required": true,
+        "status": "NOT_RUN",
+        "exit_code": 3,
+        "check_id": "stage4b.human-readability",
+        "reason": "manual-evidence-not-provided",
+        "executed": true,
+        "raw_exit_code": 3,
+        "duration_ms": 143,
+        "log": "manual-stage4b.human-readability.log",
+        "log_sha256": "e0d4cf21812df754e2109ca75b679cdb2d8e188a7bee7a724575082a8aa40ba2"
+      },
+      {
+        "id": "manual-adminui.http-errors",
+        "required": true,
+        "status": "NOT_RUN",
+        "exit_code": 3,
+        "check_id": "adminui.http-errors",
+        "reason": "manual-evidence-not-provided",
+        "executed": true,
+        "raw_exit_code": 3,
+        "duration_ms": 133,
+        "log": "manual-adminui.http-errors.log",
+        "log_sha256": "daf9df85c3925878ed968c54eba84e5a34324d1f36db7af0808a93e753dfb4be"
+      },
+      {
+        "id": "manual-adminui.clipboard-write",
+        "required": true,
+        "status": "NOT_RUN",
+        "exit_code": 3,
+        "check_id": "adminui.clipboard-write",
+        "reason": "manual-evidence-not-provided",
+        "executed": true,
+        "raw_exit_code": 3,
+        "duration_ms": 142,
+        "log": "manual-adminui.clipboard-write.log",
+        "log_sha256": "33d873a0f4aed37f7d53a32500fc2e9aa8ec9e31c79200fa43433f447b4892f4"
+      },
+      {
+        "id": "manual-adminui.real-mobile",
+        "required": true,
+        "status": "NOT_RUN",
+        "exit_code": 3,
+        "check_id": "adminui.real-mobile",
+        "reason": "manual-evidence-not-provided",
+        "executed": true,
+        "raw_exit_code": 3,
+        "duration_ms": 140,
+        "log": "manual-adminui.real-mobile.log",
+        "log_sha256": "9f40adbaeed6232deeedcc3fe355bdedec441a3c3cbb7beb739188c5480eba73"
+      },
+      {
+        "id": "assistive-technology-and-real-mobile",
+        "required": false,
+        "status": "NOT_RUN",
+        "executed": false,
+        "raw_exit_code": null,
+        "reason": "real devices and assistive technology not exercised by this command"
+      },
+      {
+        "id": "public-deployment",
+        "required": false,
+        "status": "NOT_RUN",
+        "executed": false,
+        "raw_exit_code": null,
+        "reason": "no authorization to push, tag, publish ports, change DNS or issue public certificates"
+      },
+      {
+        "id": "captcha-production-readiness",
+        "required": false,
+        "status": "NOT_RUN",
+        "executed": false,
+        "raw_exit_code": null,
+        "reason": "engineering evidence does not change experimental:true / production_ready:false"
+      },
+      {
+        "id": "source-stability",
+        "required": true,
+        "status": "PASS",
+        "executed": true,
+        "raw_exit_code": 0,
+        "evidence": "763650b959cbee1f394a40547b82af381c49b8be8f0d8df07c142f36e8f24b86"
+      }
+    ]
+  },
+  "cross_test_compilation": [
+    {
+      "package": "github.com/shijianus/EpoCHA/cmd/blindtest",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-00.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\00-main.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/cmd/devclient",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-01.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\01-main.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/cmd/devseed",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-02.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\02-main.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/cmd/evalgen",
+      "status": "NO_TEST_FILES"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/cmd/evalocr",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-04.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\04-main.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/cmd/exampleapp",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-05.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\05-main.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/cmd/loadtest",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-06.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\06-main.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/cmd/m4baseline",
+      "status": "NO_TEST_FILES"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/cmd/ops",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-08.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\08-main.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/cmd/preview",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-09.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\09-main.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/cmd/server",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-10.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\10-main.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/internal/admin",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-11.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\11-admin.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/internal/api",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-12.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\12-api.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/internal/config",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-13.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\13-config.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/internal/dispatch",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-14.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\14-dispatch.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/internal/eval",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-15.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\15-eval.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/internal/generator",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-16.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\16-generator.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/internal/m4baseline",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-17.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\17-m4baseline.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/internal/m4baseline/solver",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-18.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\18-solver.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/internal/pool",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-19.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\19-pool.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/internal/pow",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-20.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\20-pow.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/internal/risk",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-21.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\21-risk.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/internal/store",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-22.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\22-store.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/internal/token",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-23.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\23-token.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/internal/version",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-24.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\24-version.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/web/adminui",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-25.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\25-adminui.test"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/web/preview",
+      "status": "NO_TEST_FILES"
+    },
+    {
+      "package": "github.com/shijianus/EpoCHA/web/widget",
+      "status": "COMPILE_PASS",
+      "executed": false,
+      "receipt": "linux-test-compile-27.receipt.json",
+      "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\27-widget.test"
+    }
+  ],
+  "cross_builds": [
+    {
+      "path": "release-artifacts/audit-2026-11-14-cross/epocha",
+      "bytes": 12255392,
+      "sha256": "d50e3c55fb2abbe416c5ed208e1f67326ba1d533367c8d3039f9ee234392b3e0",
+      "magic_hex": "7f454c460201010000000000000000000200b700",
+      "budget_bytes": 36700160,
+      "within_size_budget": true,
+      "target": "linux/arm64",
+      "cgo_enabled": "0",
+      "executed": false,
+      "version_ldflags": "-s -w only; not a formal version-stamped candidate"
+    },
+    {
+      "path": "release-artifacts/audit-2026-11-14-cross/epocha-ops",
+      "bytes": 10289312,
+      "sha256": "cc11426d24532b13a7e743011d034d2590d5ea671edd542c48ee2149c2bf9c0e",
+      "magic_hex": "7f454c460201010000000000000000000200b700",
+      "budget_bytes": 36700160,
+      "within_size_budget": true,
+      "target": "linux/arm64",
+      "cgo_enabled": "0",
+      "executed": false,
+      "version_ldflags": "-s -w only; not a formal version-stamped candidate"
+    }
+  ],
+  "m4_new": {
+    "directory": "docs/reviews/audit-evidence/2026-11-14/m4-replication",
+    "aggregate_integrity_pass": true,
+    "total": 7000,
+    "solved": 6824,
+    "rate": 0.9748571428571429,
+    "wilson95": [
+      0.9709209039691385,
+      0.9782724835578528
+    ],
+    "results": [
+      {
+        "generator": "tile-rotation-v1",
+        "total": 1000,
+        "solved": 1000,
+        "rate": 1.0,
+        "independent_wilson95": [
+          0.996173241514445,
+          1.0
+        ],
+        "p95_cpu_ms_reported": 3.9746699999997017,
+        "p95_wall_ms_reported": 0.698275,
+        "parse_failed": 0,
+        "gave_up": 0,
+        "generation_retries": 0,
+        "unique_indexes_and_summary_counts_match": true,
+        "measured_verdict": "FAIL"
+      },
+      {
+        "generator": "symbol-path-v1",
+        "total": 1000,
+        "solved": 996,
+        "rate": 0.996,
+        "independent_wilson95": [
+          0.9897604437227377,
+          0.9984434118595916
+        ],
+        "p95_cpu_ms_reported": 0,
+        "p95_wall_ms_reported": 7.2537199999999995,
+        "parse_failed": 0,
+        "gave_up": 4,
+        "generation_retries": 0,
+        "unique_indexes_and_summary_counts_match": true,
+        "measured_verdict": "FAIL"
+      },
+      {
+        "generator": "crowd-find-v1",
+        "total": 1000,
+        "solved": 828,
+        "rate": 0.828,
+        "independent_wilson95": [
+          0.8033660485432,
+          0.8501235978902758
+        ],
+        "p95_cpu_ms_reported": 0,
+        "p95_wall_ms_reported": 4.406584999999999,
+        "parse_failed": 0,
+        "gave_up": 0,
+        "generation_retries": 0,
+        "unique_indexes_and_summary_counts_match": true,
+        "measured_verdict": "FAIL"
+      },
+      {
+        "generator": "visual-rank-v1",
+        "total": 1000,
+        "solved": 1000,
+        "rate": 1.0,
+        "independent_wilson95": [
+          0.996173241514445,
+          1.0
+        ],
+        "p95_cpu_ms_reported": 17.923049999999492,
+        "p95_wall_ms_reported": 11.29366999999999,
+        "parse_failed": 0,
+        "gave_up": 0,
+        "generation_retries": 0,
+        "unique_indexes_and_summary_counts_match": true,
+        "measured_verdict": "FAIL"
+      },
+      {
+        "generator": "progressive-target-v1",
+        "total": 1000,
+        "solved": 1000,
+        "rate": 1.0,
+        "independent_wilson95": [
+          0.996173241514445,
+          1.0
+        ],
+        "p95_cpu_ms_reported": 24.061699999992168,
+        "p95_wall_ms_reported": 6.1234649999999995,
+        "parse_failed": 0,
+        "gave_up": 0,
+        "generation_retries": 0,
+        "unique_indexes_and_summary_counts_match": true,
+        "measured_verdict": "FAIL"
+      },
+      {
+        "generator": "shell-track-v1",
+        "total": 1000,
+        "solved": 1000,
+        "rate": 1.0,
+        "independent_wilson95": [
+          0.996173241514445,
+          1.0
+        ],
+        "p95_cpu_ms_reported": 30.78919000000367,
+        "p95_wall_ms_reported": 8.698524999999998,
+        "parse_failed": 0,
+        "gave_up": 0,
+        "generation_retries": 0,
+        "unique_indexes_and_summary_counts_match": true,
+        "measured_verdict": "FAIL"
+      },
+      {
+        "generator": "silhouette-assembly-v1",
+        "total": 1000,
+        "solved": 1000,
+        "rate": 1.0,
+        "independent_wilson95": [
+          0.996173241514445,
+          1.0
+        ],
+        "p95_cpu_ms_reported": 0,
+        "p95_wall_ms_reported": 1.5823849999999995,
+        "parse_failed": 0,
+        "gave_up": 0,
+        "generation_retries": 0,
+        "unique_indexes_and_summary_counts_match": true,
+        "measured_verdict": "FAIL"
+      }
+    ],
+    "validation_scope": "CSV indexing/counts/denominators/Wilson independently recomputed; no claim of signed provenance or end-to-end HTTP/PoW cost"
+  },
+  "m4_existing": {
+    "directory": "docs/reviews/evidence",
+    "aggregate_integrity_pass": true,
+    "total": 7000,
+    "solved": 6836,
+    "rate": 0.9765714285714285,
+    "wilson95": [
+      0.9727579495485454,
+      0.9798621289081462
+    ],
+    "results": [
+      {
+        "generator": "tile-rotation-v1",
+        "total": 1000,
+        "solved": 1000,
+        "rate": 1.0,
+        "independent_wilson95": [
+          0.996173241514445,
+          1.0
+        ],
+        "p95_cpu_ms_reported": 4.63650000000002,
+        "p95_wall_ms_reported": 1.001465,
+        "parse_failed": 0,
+        "gave_up": 0,
+        "generation_retries": 0,
+        "unique_indexes_and_summary_counts_match": true,
+        "measured_verdict": "FAIL"
+      },
+      {
+        "generator": "symbol-path-v1",
+        "total": 1000,
+        "solved": 991,
+        "rate": 0.991,
+        "independent_wilson95": [
+          0.982984183834662,
+          0.9952579393325229
+        ],
+        "p95_cpu_ms_reported": 0,
+        "p95_wall_ms_reported": 4.149775,
+        "parse_failed": 0,
+        "gave_up": 9,
+        "generation_retries": 0,
+        "unique_indexes_and_summary_counts_match": true,
+        "measured_verdict": "FAIL"
+      },
+      {
+        "generator": "crowd-find-v1",
+        "total": 1000,
+        "solved": 845,
+        "rate": 0.845,
+        "independent_wilson95": [
+          0.821253161260159,
+          0.866106375384808
+        ],
+        "p95_cpu_ms_reported": 0,
+        "p95_wall_ms_reported": 6.243544999999998,
+        "parse_failed": 0,
+        "gave_up": 0,
+        "generation_retries": 0,
+        "unique_indexes_and_summary_counts_match": true,
+        "measured_verdict": "FAIL"
+      },
+      {
+        "generator": "visual-rank-v1",
+        "total": 1000,
+        "solved": 1000,
+        "rate": 1.0,
+        "independent_wilson95": [
+          0.996173241514445,
+          1.0
+        ],
+        "p95_cpu_ms_reported": 13.66081499999936,
+        "p95_wall_ms_reported": 2.58043,
+        "parse_failed": 0,
+        "gave_up": 0,
+        "generation_retries": 0,
+        "unique_indexes_and_summary_counts_match": true,
+        "measured_verdict": "FAIL"
+      },
+      {
+        "generator": "progressive-target-v1",
+        "total": 1000,
+        "solved": 1000,
+        "rate": 1.0,
+        "independent_wilson95": [
+          0.996173241514445,
+          1.0
+        ],
+        "p95_cpu_ms_reported": 22.755244999989085,
+        "p95_wall_ms_reported": 6.256624999999995,
+        "parse_failed": 0,
+        "gave_up": 0,
+        "generation_retries": 0,
+        "unique_indexes_and_summary_counts_match": true,
+        "measured_verdict": "FAIL"
+      },
+      {
+        "generator": "shell-track-v1",
+        "total": 1000,
+        "solved": 1000,
+        "rate": 1.0,
+        "independent_wilson95": [
+          0.996173241514445,
+          1.0
+        ],
+        "p95_cpu_ms_reported": 57.20993999999492,
+        "p95_wall_ms_reported": 16.735959999999988,
+        "parse_failed": 0,
+        "gave_up": 0,
+        "generation_retries": 0,
+        "unique_indexes_and_summary_counts_match": true,
+        "measured_verdict": "FAIL"
+      },
+      {
+        "generator": "silhouette-assembly-v1",
+        "total": 1000,
+        "solved": 1000,
+        "rate": 1.0,
+        "independent_wilson95": [
+          0.996173241514445,
+          1.0
+        ],
+        "p95_cpu_ms_reported": 6.932895000016952,
+        "p95_wall_ms_reported": 1.4325699999999997,
+        "parse_failed": 0,
+        "gave_up": 0,
+        "generation_retries": 0,
+        "unique_indexes_and_summary_counts_match": true,
+        "measured_verdict": "FAIL"
+      }
+    ],
+    "validation_scope": "CSV indexing/counts/denominators/Wilson independently recomputed; no claim of signed provenance or end-to-end HTTP/PoW cost"
+  },
+  "exclusions": [
+    "Linux runtime/race/server DB integration",
+    "real browsers and human accessibility/mobile",
+    "target-host soak and public TLS",
+    "fresh external OCR/AI model evaluation"
+  ]
+}

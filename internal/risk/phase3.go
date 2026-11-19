@@ -60,8 +60,7 @@ func NewRefreshTracker(maxStates int, now func() time.Time) (*RefreshTracker, er
 	return &RefreshTracker{states: make(map[string]*refreshState), maxStates: maxStates, now: now}, nil
 }
 
-// Observe 必须在每次成功签发 challenge 前调用。它只记录与返回惩罚，不阻塞请求；
-// 冷却由调用方按 RetryAfter 决定是否返回 429。
+// Observe 在签发前记录刷新；冷却中的重试不计数、不续期（ADR-032）。
 func (t *RefreshTracker) Observe(key string) RefreshPenalty {
 	if t == nil {
 		return RefreshPenalty{}
@@ -71,15 +70,21 @@ func (t *RefreshTracker) Observe(key string) RefreshPenalty {
 	now := t.now().UTC()
 	bucket := now.Unix() / int64(RefreshWindow/time.Second)
 	st, ok := t.states[key]
-	if !ok || st.bucket != bucket {
-		if !ok {
-			t.ensureRoom(bucket)
+	if ok && now.Before(st.cooldownUntil) {
+		return refreshPenalty(st, now)
+	}
+	if !ok {
+		if retry := t.ensureRoom(bucket, now); retry > 0 {
+			return RefreshPenalty{Cooldown: retry}
 		}
 		st = &refreshState{bucket: bucket}
 		t.states[key] = st
+	} else if st.bucket != bucket {
+		*st = refreshState{bucket: bucket}
 	}
 	st.count++
 	st.last = now
+	st.cooldownUntil = time.Time{}
 	switch {
 	case st.count <= 2:
 		// 正常浏览/换一张，不加压。
@@ -103,6 +108,10 @@ func (t *RefreshTracker) Observe(key string) RefreshPenalty {
 			st.cooldownUntil = now.Add(15 * time.Minute)
 		}
 	}
+	return refreshPenalty(st, now)
+}
+
+func refreshPenalty(st *refreshState, now time.Time) RefreshPenalty {
 	retry := time.Duration(0)
 	if now.Before(st.cooldownUntil) {
 		retry = st.cooldownUntil.Sub(now)
@@ -139,28 +148,37 @@ func (t *RefreshTracker) Len() int {
 	return len(t.states)
 }
 
-func (t *RefreshTracker) ensureRoom(bucket int64) {
+func (t *RefreshTracker) ensureRoom(bucket int64, now time.Time) time.Duration {
 	if len(t.states) < t.maxStates {
-		return
+		return 0
 	}
 	for k, st := range t.states {
-		if st.bucket != bucket {
+		if st.bucket != bucket && !now.Before(st.cooldownUntil) {
 			delete(t.states, k)
 		}
 	}
 	if len(t.states) < t.maxStates {
-		return
+		return 0
 	}
 	var oldestKey string
-	var oldest time.Time
+	var oldest, earliestCooldown time.Time
 	for k, st := range t.states {
+		if now.Before(st.cooldownUntil) {
+			if earliestCooldown.IsZero() || st.cooldownUntil.Before(earliestCooldown) {
+				earliestCooldown = st.cooldownUntil
+			}
+			continue
+		}
 		if oldestKey == "" || st.last.Before(oldest) {
 			oldestKey, oldest = k, st.last
 		}
 	}
 	if oldestKey != "" {
 		delete(t.states, oldestKey)
+		return 0
 	}
+	// 满表时宁可拒绝新 key；驱逐冷却会让随机 session 抹掉既有惩罚。
+	return earliestCooldown.Sub(now)
 }
 
 // Telemetry 是 Widget 上报的摘要，不是轨迹。字段与 ADR-027 一一对应。

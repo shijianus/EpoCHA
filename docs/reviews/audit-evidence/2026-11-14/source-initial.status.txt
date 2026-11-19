@@ -1,0 +1,29 @@
+ M Makefile
+ M docs/DESIGN.md
+?? cmd/m4baseline/main.go
+?? docs/reviews/CAPTCHA-M4-BASELINE-2026-11-12.md
+?? docs/reviews/audit-evidence/2026-11-14/audit_runner.py
+?? docs/reviews/audit-evidence/2026-11-14/source-initial.json
+?? docs/reviews/evidence/m4-results.csv
+?? docs/reviews/evidence/m4-summary.json
+?? internal/m4baseline/host.go
+?? internal/m4baseline/host_linux.go
+?? internal/m4baseline/host_other.go
+?? internal/m4baseline/host_windows.go
+?? internal/m4baseline/rss_linux.go
+?? internal/m4baseline/rss_windows.go
+?? internal/m4baseline/run.go
+?? internal/m4baseline/run_test.go
+?? internal/m4baseline/solver/crowdfind.go
+?? internal/m4baseline/solver/glyph.go
+?? internal/m4baseline/solver/imageutil.go
+?? internal/m4baseline/solver/payload.go
+?? internal/m4baseline/solver/progressivetarget.go
+?? internal/m4baseline/solver/shelltrack.go
+?? internal/m4baseline/solver/silhouette.go
+?? internal/m4baseline/solver/solver.go
+?? internal/m4baseline/solver/solver_test.go
+?? internal/m4baseline/solver/symbolpath.go
+?? internal/m4baseline/solver/tilerotation.go
+?? internal/m4baseline/solver/visualrank.go
+?? internal/m4baseline/stats.go

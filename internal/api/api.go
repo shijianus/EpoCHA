@@ -74,7 +74,6 @@ type Server struct {
 	caps      store.Caps
 	demoPage  bool
 	tracker   *risk.Tracker
-	access    *risk.AccessibilityGate
 	scheduler *dispatch.Scheduler
 }
 
@@ -104,14 +103,10 @@ func New(cfg *config.Config, db *store.DB, signer *token.Signer, gens *generator
 	if err != nil {
 		return nil, err
 	}
-	access, err := risk.NewAccessibilityGate(risk.MaxTrackedSources, risk.AccessibilityLimit, risk.AccessibilityWindow, time.Now)
-	if err != nil {
-		return nil, err
-	}
 	return &Server{
 		db: db, signer: signer, gens: gens, src: src, ipLimit: ipLimit, siteLimit: siteLimit,
 		log: log, now: time.Now, demoPage: cfg.DemoPage,
-		tracker: tracker, access: access, scheduler: dispatch.NewScheduler(),
+		tracker: tracker, scheduler: dispatch.NewScheduler(),
 		caps: store.Caps{MaxTotal: cfg.MaxLedgerRows, MaxActive: cfg.MaxActiveChallenges, MaxActivePerSite: cfg.MaxActivePerSite},
 	}, nil
 }
@@ -133,10 +128,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	// widget 静态资源挂在**公共**监听器上（DESIGN §10.1、D10）：浏览器要在业务页面上
 	// 用 `<script src>` 跨域取它，且它不含任何按身份变化的内容。
-	// 只有这两条固定版本化路径，没有目录、没有按参数拼路径。
+	// 只有三条固定版本化路径，没有目录、没有按参数拼路径。
 	widgetAssets := widget.Handler()
 	mux.Handle("GET "+widget.URLJS, widgetAssets)
 	mux.Handle("GET "+widget.URLWorker, widgetAssets)
+	mux.Handle("GET "+widget.URLInteractive, widgetAssets)
 	// 只读测试页：默认关闭，测试部署用 EPOCHA_DEMO_PAGE=1 打开。
 	// 它只调用公开 challenge/redeem，不读 secret、不碰管理面、不写业务数据。
 	if s.demoPage {

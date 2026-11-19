@@ -1471,3 +1471,66 @@ ADR-030 只交付了 Wave 1 四个题型，并把 Wave 2、negative polarity 与
 `cmd/{server,preview,devseed}`、`web/widget/{v1.js,v1.interactive.js}`、
 `docs/{DESIGN,QUESTION-TYPES,WIDGET}.md` 与审计文档。不新增依赖；不改变现有 12 个题型的
 verifier 与历史结果；`shape-grid-v1` 的旧池行（无 polarity 字段）按 positive 解释。
+
+---
+
+## ADR-032 2026-11-14：审计缺陷整改的冷却、加载与证据边界
+
+### 背景与授权
+
+用户要求按 2026-11-14 审计逐项先红后绿修复，保留未提交开发、历史效果失败与正式平台验收门槛。
+原始源码已在模块外备份并逐文件核验；本次结果独立写入 `docs/reviews/next-phase-2026-11-14/`。
+
+### 决策
+
+1. **刷新计数与冷却各用自己的期限**。10 分钟窗口到期只重置计数；尚未到期的 3 秒/15 分钟冷却保留
+   原 deadline、难度/PoW 地板及风险分。被冷却拒绝的重试不累计刷新、不延长 deadline。
+   容量清理只淘汰不在冷却中的条目；全部条目仍在冷却时，新 key 在最早 deadline 前返回 429，
+   不驱逐有效冷却、不突破条目上限。这是有界状态耗尽时的保守拒绝，仍受来源/站点限流保护。
+   session 来自客户端且可更换，进程重启丢弃弱风险状态；本机制不提供强身份或持久防重放保证。
+2. **公共交互资源仍是固定白名单 URL**。在 API 根 mux 显式挂载 `/widget/v1.interactive.js`，
+   与 core/worker 同样的类型、缓存及 nosniff 头；不挂目录，不改变公共/管理监听器边界。
+3. **Windows 诊断测试与正式验收分别记录**。模块外副本可用显式 Go overlay，把 Linux 锁实现替换为
+   永远拒绝取锁的诊断工装，仅运行不使用运行锁的 HTTP/SQLite 回归；工装不进生产源码，
+   不改变正式 gate，不代替 Linux 测试、flock、进程/容器或 race 验收。内嵌浏览器可用时记录其
+   实际引擎，不冒充缺失的 Firefox、WebKit、真机或辅助技术。
+4. **不提高题型安全等级**。保留 2026-11-12 与 2026-11-14 两组 M4 历史结果；功能、几何、
+   测量口径修复不改变 `experimental:true` / `production_ready:false` 或 Gate B 的失败事实。
+
+### 无障碍额度生命周期（F-03）
+
+5. **24h 额度与 challenge 同事务持久化**。新增 0007 `accessibility_quotas`，主键为
+   `site_id + HMAC-SHA256(pepper, domain || risk.Key(source))`；不保存原始地址、session 或遥测。
+   额度固定从成功签发准备时起 24 小时，最多 4096 行；只删除已到期行，满表保守返回 429。
+   同一 SQL 的条件 upsert 判定旧期限与容量，检查 `RowsAffected==1`；与 challenge 插入、领题、
+   提交前签名/DTO/JSON 准备处于同一事务。准备函数不得再读写数据库，避免单连接自锁。
+   池空、调度失败、准备失败、panic、取消或提交失败均无已提交额度；进程在提交前崩溃由 SQLite
+   回滚，在提交后崩溃或响应传输失败仍计一次签发。无重发协议，不声称 exactly-once delivery。
+   额度重启后保留；旧版本升级时没有历史内存额度可导入，第一次升级从空表开始；不能把此边界
+   写成既有额度得到了追溯保护。恢复清空额度并沿用站点全禁用/新凭据/新 master 的保守语义。
+   匿名来源聚合仍可能让同一 NAT 的用户共享额度；pepper HMAC 是可关联假名而非匿名证明。
+   不改变 SQLite `synchronous=NORMAL`：掉电时已提交状态丢失的 B-03 仍是发布阻断。
+
+6. **模块等待与几何（F-09/10/11）**：交互模块沿用已有 `fetchTimeoutMs`（默认 10 秒，1–60 秒上限），
+   每个实例独立等待/取消，共享一次下载；最后一个等待者取消时清脚本与计时器。challenge deadline 在等待前装表，
+   所以实际预算取网络预算和剩余 TTL 较短者；过期换代防迟到回调复活。页面后台恢复复核绝对 deadline。
+   sprite 的容器使用原始宽高比，背景大小和帧位置统一用百分比，与按钮归一化坐标使用同一外框；
+   symbol-path 目标卡宽从 40 调整为 36，间距 4，8 卡总宽 316，保留 32px glyph，不改变题目答案/判分。
+   窄屏自动测试不等于真机触摸或人类可读性；这些独立验收仍需证据。
+
+7. **M4 计时与证据（F-04/08）**：新测量 schema 2 将 OS user+system process CPU、Go runtime user
+   estimate、wall、生成/准备/判分/harness 与 GC 分列；CPU 0 表示本次分辨率不足的可能观测，绝不解释为零成本。
+   只有所有逐题 OS 采集有效且非零时才用 OS CPU p95，否则明确 wall-proxy，保留 CPU 原值和状态。
+   进程 CPU 包含并发 runtime/GC，不是 solver 独占 CPU；API 单位精度与实际计数器分辨率分开说明。
+   输出默认模块外唯一目录，显式目录必须不存在。CSV/JSON 先写 staging 并 sync/close，对账成功后
+   发布 manifest 完成标记；只有有完整标记且逐文件 hash 对账的 bundle 才可用于评审。
+   Linux 同卷目录 rename 可作原子命名交付；Windows 只声明此完整标记协议，不宣称 `os.Rename`
+   有跨平台崩溃原子性。保留实际源码清单/工作树身份、工具二进制 hash、build info、参数、公开样本 hash、
+   失败行和中断状态；hash 无签名，不证明可信来源。没有构建收据绑定时不得声称运行时源码与二进制已证明对应。
+   solver 冻结不调参，新随机复测不视为独立正式 holdout；历史结果原样保留，工具退出 0 仍不等于 Gate B PASS。
+
+### 兼容性与验收
+
+不改变 token、题目答案、secret 校验或 `/siteverify` 协议；冷却中的重试与容量耗尽方向更严格。
+逐项回归、精确命令与尚未执行的目标机验收见本次交付目录；未取得真实证据前不登记阶段完成。
+

@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "name": "go-race-with-cgo",
+  "started_at_utc": "2026-11-14T05:20:21.477640+00:00",
+  "finished_at_utc": "2026-11-14T05:21:00.636909+00:00",
+  "duration_seconds": 39.159,
+  "cwd": "D:\\Users\\Smart Kevin\\OneDrive\\Desktop\\epocha",
+  "argv": [
+    "C:\\Users\\Smart Kevin\\go\\pkg\\mod\\golang.org\\toolchain@v0.0.1-go1.27.3.windows-amd64\\bin\\go.exe",
+    "test",
+    "-race",
+    "-count=1",
+    "./internal/pow",
+    "./internal/token"
+  ],
+  "raw_exit_code": 1,
+  "execution_error": null,
+  "environment_policy": {
+    "GOTOOLCHAIN": "local",
+    "GOPROXY": "off",
+    "GOSUMDB": "off",
+    "GOENV": "off",
+    "GOWORK": "off",
+    "GOFLAGS": "-mod=readonly",
+    "CGO_ENABLED": "1"
+  },
+  "stdout": {
+    "path": "go-race-with-cgo.stdout.log",
+    "bytes": 129,
+    "sha256": "705639c79d9fa894600d39fb0e0692269e0d312cee6bd1c33e6c58fe4e840061"
+  },
+  "stderr": {
+    "path": "go-race-with-cgo.stderr.log",
+    "bytes": 96,
+    "sha256": "5018641a276730c2c9eacf94f0525516ff192ade0b2896931a6ab41bedb93e60"
+  }
+}

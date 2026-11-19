@@ -1,0 +1,189 @@
+[
+  {
+    "package": "github.com/shijianus/EpoCHA/cmd/blindtest",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-00.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\00-main.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/cmd/devclient",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-01.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\01-main.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/cmd/devseed",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-02.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\02-main.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/cmd/evalgen",
+    "status": "NO_TEST_FILES"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/cmd/evalocr",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-04.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\04-main.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/cmd/exampleapp",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-05.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\05-main.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/cmd/loadtest",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-06.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\06-main.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/cmd/m4baseline",
+    "status": "NO_TEST_FILES"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/cmd/ops",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-08.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\08-main.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/cmd/preview",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-09.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\09-main.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/cmd/server",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-10.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\10-main.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/internal/admin",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-11.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\11-admin.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/internal/api",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-12.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\12-api.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/internal/config",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-13.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\13-config.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/internal/dispatch",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-14.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\14-dispatch.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/internal/eval",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-15.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\15-eval.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/internal/generator",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-16.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\16-generator.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/internal/m4baseline",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-17.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\17-m4baseline.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/internal/m4baseline/solver",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-18.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\18-solver.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/internal/pool",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-19.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\19-pool.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/internal/pow",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-20.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\20-pow.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/internal/risk",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-21.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\21-risk.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/internal/store",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-22.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\22-store.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/internal/token",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-23.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\23-token.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/internal/version",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-24.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\24-version.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/web/adminui",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-25.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\25-adminui.test"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/web/preview",
+    "status": "NO_TEST_FILES"
+  },
+  {
+    "package": "github.com/shijianus/EpoCHA/web/widget",
+    "status": "COMPILE_PASS",
+    "executed": false,
+    "receipt": "linux-test-compile-27.receipt.json",
+    "binary": "release-artifacts\\audit-2026-11-14-cross\\tests\\27-widget.test"
+  }
+]

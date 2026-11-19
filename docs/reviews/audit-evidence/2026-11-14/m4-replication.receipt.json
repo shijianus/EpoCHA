@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "name": "m4-replication",
+  "started_at_utc": "2026-11-14T05:22:07.344919+00:00",
+  "finished_at_utc": "2026-11-14T05:24:34.778636+00:00",
+  "duration_seconds": 147.434,
+  "cwd": "D:\\Users\\Smart Kevin\\OneDrive\\Desktop\\epocha",
+  "argv": [
+    "release-artifacts/audit-2026-11-14-m4baseline.exe",
+    "--challenges",
+    "1000",
+    "--difficulty",
+    "3",
+    "--lang",
+    "zh-CN",
+    "--out-dir",
+    "docs/reviews/audit-evidence/2026-11-14/m4-replication"
+  ],
+  "raw_exit_code": 0,
+  "execution_error": null,
+  "environment_policy": {
+    "GOTOOLCHAIN": "local",
+    "GOPROXY": "off",
+    "GOSUMDB": "off",
+    "GOENV": "off",
+    "GOWORK": "off",
+    "GOFLAGS": "-mod=readonly"
+  },
+  "stdout": {
+    "path": "m4-replication.stdout.log",
+    "bytes": 1074,
+    "sha256": "1640f64be5b3281d8e5dec3210517754d9227ad75224cba740909359ad614087"
+  },
+  "stderr": {
+    "path": "m4-replication.stderr.log",
+    "bytes": 4696,
+    "sha256": "dbdf8bbda30ca2c85738ec5613064970c8191e89088fd62afe4d72802f550e8a"
+  }
+}

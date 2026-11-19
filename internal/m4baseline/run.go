@@ -4,15 +4,15 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/hex"
-	"errors"
-	"runtime"
 	"encoding/base64"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
+	"runtime"
 	"sort"
 	"strconv"
 	"time"
@@ -289,14 +289,20 @@ func Run(ctx context.Context, cfg Config, logf func(string, ...any)) (Summary, [
 			gradeStarted := time.Now()
 			status := "wrong"
 			note := out.Note
-			if out.ParseFailed { status = "parse_failed" } else if out.GaveUp || out.Answer == "" { status = "gave_up" }
+			if out.ParseFailed {
+				status = "parse_failed"
+			} else if out.GaveUp || out.Answer == "" {
+				status = "gave_up"
+			}
 			if !out.ParseFailed && !out.GaveUp && out.Answer != "" {
 				if canon, ok := g.NormalizeAnswer(out.Answer); !ok {
 					note = "invalid-answer-format"
 					status = "invalid_answer"
 				} else {
 					solved = g.Verify(q.Verifier, canon)
-					if solved { status = "solved" }
+					if solved {
+						status = "solved"
+					}
 				}
 			}
 			gradingMs := float64(time.Since(gradeStarted).Nanoseconds()) / 1e6
@@ -314,12 +320,12 @@ func Run(ctx context.Context, cfg Config, logf func(string, ...any)) (Summary, [
 				PayloadBytes:       payloadBytes,
 				GenerationAttempts: attempts,
 				Note:               note,
-				Status: status, PublicSHA256: hex.EncodeToString(publicHash[:]), AssetSHA256: hex.EncodeToString(assetHash[:]),
+				Status:             status, PublicSHA256: hex.EncodeToString(publicHash[:]), AssetSHA256: hex.EncodeToString(assetHash[:]),
 				OSCPUStatus: cpuStatus, OSUserMs: userMs, OSSystemMs: systemMs,
-				RuntimeEstimateMs: (estimate1-estimate0)*1000,
-				GenerationWallMs: generationMs, PreparationWallMs: prepMs, GradingWallMs: gradingMs,
+				RuntimeEstimateMs: (estimate1 - estimate0) * 1000,
+				GenerationWallMs:  generationMs, PreparationWallMs: prepMs, GradingWallMs: gradingMs,
 				HarnessWallMs: math.Max(0, float64(time.Since(sampleStarted).Nanoseconds())/1e6-generationMs-prepMs-wallMs-gradingMs),
-				GCCount: gc1.NumGC-gc0.NumGC, GCPauseMs: float64(gc1.PauseTotalNs-gc0.PauseTotalNs)/1e6,
+				GCCount:       gc1.NumGC - gc0.NumGC, GCPauseMs: float64(gc1.PauseTotalNs-gc0.PauseTotalNs) / 1e6,
 			}
 			genRecords = append(genRecords, rec)
 			records = append(records, rec)
@@ -335,7 +341,7 @@ func Run(ctx context.Context, cfg Config, logf func(string, ...any)) (Summary, [
 	}
 	finished := time.Now().UTC()
 	sum := Summary{
-			SchemaVersion: 2,
+		SchemaVersion: 2,
 		Gate:          "M4 Qualification Gate B",
 		Baseline:      cfg.Baseline,
 		StartedAt:     started.Format(time.RFC3339),
@@ -350,10 +356,10 @@ func Run(ctx context.Context, cfg Config, logf func(string, ...any)) (Summary, [
 			"entropy":                  "crypto/rand.Reader (fresh per challenge)",
 			"solver_input":             "public /api/challenge question DTO only (whitelist + base64 PNG)",
 			"solver_forbidden":         "verifier, DB answers, generator private seed, admin API",
-			"measurement_method": "os-process-cpu-v2; wall-proxy when any sample has insufficient resolution",
-			"cpu_unit_seconds": "Windows FILETIME 100ns / Linux timeval 1us; unit is not effective resolution",
+			"measurement_method":       "os-process-cpu-v2; wall-proxy when any sample has insufficient resolution",
+			"cpu_unit_seconds":         "Windows FILETIME 100ns / Linux timeval 1us; unit is not effective resolution",
 			"cpu_effective_resolution": "not calibrated; per-sample zero/error marked and CPU p95 not used",
-			"requested": cfg.Challenges*len(cfg.Generators), "completed": len(records),
+			"requested":                cfg.Challenges * len(cfg.Generators), "completed": len(records),
 			"interrupted": runError != nil,
 		},
 		Criteria: Criteria{
@@ -509,7 +515,9 @@ func summarizeGenerator(res GeneratorResult, recs []ChallengeRecord) GeneratorRe
 	}
 	validCPU := true
 	for _, r := range recs {
-		if r.OSCPUStatus != "ok" || r.SolverCPUMs <= 0 { validCPU = false }
+		if r.OSCPUStatus != "ok" || r.SolverCPUMs <= 0 {
+			validCPU = false
+		}
 	}
 	res.P95TimingBasis = "wall-proxy"
 	if validCPU {

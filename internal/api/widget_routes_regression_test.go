@@ -44,8 +44,8 @@ func TestPublicWidgetAssetsExactRoutes(t *testing.T) {
 				t.Fatalf("public resource status=%d bytes=%d exact=%v", res.StatusCode, len(body), bytes.Equal(body, want))
 			}
 			for header, value := range map[string]string{
-				"Content-Type": "text/javascript; charset=utf-8",
-				"Cache-Control": "public, max-age=3600",
+				"Content-Type":           "text/javascript; charset=utf-8",
+				"Cache-Control":          "public, max-age=3600",
 				"X-Content-Type-Options": "nosniff",
 			} {
 				if got := res.Header.Get(header); got != value {

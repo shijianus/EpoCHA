@@ -6,10 +6,9 @@
 // 环境变量（全部缺失即抛错，不静默跳过 —— 必需项"跳过并算过"比失败更危险）：
 //   BIDI_WS            ws://127.0.0.1:PORT/session   Firefox BiDi 端点
 //   ADMIN_UI_URL       http://127.0.0.1:PORT/admin    管理控制台页面
-//   ADMIN_API          http://127.0.0.1:PORT          管理监听器基址（Node 侧对账用）
+//   ADMIN_API          http://127.0.0.1:PORT          管理监听器基址（代理上游，Node 侧对账用）
 //   ADMIN_KEY_FILE     运行时生成的演示管理密钥文件（0600）
 //   BAD_ADMIN_KEY      形状合法但**未登记**的管理密钥（测 401 与 429 文案）
-//   ADMIN_SERVER_PID   本轮服务进程 PID（只用于最后一个用例：真断网时的文案）
 //
 // 已知边界（如实标注，不冒充通过）：
 //   - 403 与 5xx 两个分支**没有**被执行过：管理 API 在当前实现里不产生这两种响应
@@ -27,6 +26,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { BiDi } from "./bidi.mjs";
 import { BROWSER_CASE_TITLES } from "./cases.mjs";
+import { createFailureFixture } from "./adminui_failure_fixture.mjs";
 
 function caseTitle(id) {
   const title = BROWSER_CASE_TITLES[id];
@@ -41,18 +41,19 @@ const need = (name) => {
 };
 
 const BIDI_WS = need("BIDI_WS");
-const ADMIN_UI_URL = need("ADMIN_UI_URL");
+const ADMIN_UI_UPSTREAM_URL = need("ADMIN_UI_URL");
+let ADMIN_UI_URL = ADMIN_UI_UPSTREAM_URL;
 const ADMIN_API = need("ADMIN_API").replace(/\/+$/, "");
 const ADMIN_KEY_FILE = need("ADMIN_KEY_FILE");
 const BAD_ADMIN_KEY = need("BAD_ADMIN_KEY");
-const ADMIN_SERVER_PID = need("ADMIN_SERVER_PID");
 
 const ADMIN_KEY = readFileSync(ADMIN_KEY_FILE, "utf8").trim();
 if (!ADMIN_KEY) throw new Error("演示管理密钥为空");
-const ADMIN_ORIGIN = new URL(ADMIN_UI_URL).origin;
+let ADMIN_ORIGIN = new URL(ADMIN_UI_URL).origin;
 
 let bidi = null;
 let ctx = null;
+let failureFixture = null;
 // 本轮创建的资源（退出时清掉临时数据；服务与库本身由脚本的 cleanup 负责）。
 let createdSiteID = 0;
 let createdSiteKey = "";
@@ -187,6 +188,10 @@ function requireSite(what) {
 // ---------- 会话装配 ----------
 
 before(async () => {
+  failureFixture = await createFailureFixture(ADMIN_API);
+  const upstreamPage = new URL(ADMIN_UI_UPSTREAM_URL);
+  ADMIN_UI_URL = new URL(upstreamPage.pathname + upstreamPage.search, failureFixture.baseURL).toString();
+  ADMIN_ORIGIN = new URL(ADMIN_UI_URL).origin;
   bidi = new BiDi(BIDI_WS);
   await bidi.connect();
   await bidi.startSession();
@@ -196,8 +201,13 @@ before(async () => {
 });
 
 after(async () => {
-  if (ctx) await bidi.closeTab(ctx);
-  if (bidi) bidi.close();
+  try {
+    if (ctx && bidi) await bidi.closeTab(ctx);
+    if (bidi) await bidi.send("session.end", {}).catch(() => {});
+  } finally {
+    if (bidi) bidi.close();
+    await failureFixture?.close();
+  }
 });
 
 // ---------- 1. 错误凭据：真实 401，文案不是"网络问题"，输入框已清空 ----------
@@ -646,22 +656,8 @@ test(caseTitle("adminui.rate-limit-and-network-error"), async () => {
     { label: "正确凭据仍可登录" });
   await clickText("退出");
 
-  // 服务进程停掉 ⇒ fetch 失败。这条必须在最后：之后没有可用的服务了。
-  process.kill(Number(ADMIN_SERVER_PID), "SIGTERM");
-  const t0 = Date.now();
-  for (;;) {
-    try {
-      const r = await fetch(ADMIN_API + "/api/admin/whoami", { headers: { Authorization: "Bearer " + ADMIN_KEY } });
-      await r.text();
-    } catch {
-      break;                                  // 端口已关闭
-    }
-    if (Date.now() - t0 > 15000) throw new Error("服务进程没有在 15s 内退出");
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  // 保留已经加载的登录页面，导航到已停服地址会换成浏览器错误页。
-  assert.equal(await bidi.evaluate(ctx, `!!document.getElementById("admin-key") && !document.getElementById("login").hidden`), true,
-    "停服测试必须保留可操作的登录表单");
+  // 浏览器通过独占的本机代理访问服务；只断开管理 API 上游连接，避免终止门禁共享服务。
+  failureFixture.setAPIUnavailable(true);
   await typeInto("#admin-key", ADMIN_KEY);
   await clickText("验证身份");
   await bidi.waitUntil(ctx,
@@ -670,4 +666,5 @@ test(caseTitle("adminui.rate-limit-and-network-error"), async () => {
   const dead = await status("#login-status");
   assert.match(dead, /无法连接管理 API/);
   assert.ok(!dead.includes("凭据无效"), `连接失败被说成了凭据问题：${dead}`);
+  assert.ok(failureFixture.blockedRequests > 0, "代理没有实际截断浏览器的管理 API 请求");
 });

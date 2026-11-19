@@ -21,10 +21,10 @@ N_PASS=0
 N_FAIL=0
 N_BLOCKED=0
 N_NOTRUN=0
-SERVER_PID=""
 FF_PID=""
+SERVER_PID=""
 WORK=""
-TMPFS_SCRATCH=""
+TMPFS_SCRATCH=()
 
 log()     { printf '[adminui] %s\n' "$*"; }
 pass()    { STEP=$((STEP + 1)); N_PASS=$((N_PASS + 1)); printf '[adminui] PASS %d: %s\n' "$STEP" "$*"; }
@@ -43,28 +43,92 @@ manual_result() {
   esac
   return "$rc"
 }
+cleanup_child() {
+  local pid="$1" i
+  [[ -n "$pid" ]] || return 0
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    for i in $(seq 1 50); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+}
+start_admin_service() {
+  local up=0 c1="000" c2="000" i
+  cleanup_child "$SERVER_PID"
+  SERVER_PID=""
+  EPOCHA_DB="$WORK/data/epocha.db" \
+  EPOCHA_LISTEN="127.0.0.1:$PUBLIC_PORT" \
+  EPOCHA_ADMIN_LISTEN="127.0.0.1:$ADMIN_PORT" \
+  EPOCHA_MASTER_KEY_FILE="$WORK/keys/master" \
+  EPOCHA_PEPPER_FILE="$WORK/keys/pepper" \
+  EPOCHA_ADMIN_KEY_FILE="$WORK/keys/admin" \
+  EPOCHA_POOL_ENABLED=false \
+    "$WORK/bin/epocha" >>"$WORK/server.log" 2>&1 &
+  SERVER_PID=$!
+  for i in $(seq 1 30); do
+    kill -0 "$SERVER_PID" 2>/dev/null || break
+    c1="$(code_of "http://127.0.0.1:$PUBLIC_PORT/readyz" "$WORK/http/readyz")"
+    c2="$(code_of "http://127.0.0.1:$ADMIN_PORT/admin" "$WORK/http/admin")"
+    if [[ "$c1" == "200" && "$c2" == "200" ]]; then up=1; break; fi
+    sleep 0.2
+  done
+  if [[ $up -eq 1 ]]; then
+    log "本轮服务已就绪（pid=$SERVER_PID readyz=$c1 admin=$c2）"
+    return 0
+  fi
+  cleanup_child "$SERVER_PID"
+  SERVER_PID=""
+  log "服务启动/恢复未就绪（readyz=$c1 admin=$c2）；日志尾部：$(tail -n 10 "$WORK/server.log" 2>/dev/null)" >&2
+  return 1
+}
+assert_admin_service() {
+  local when="${1:-}"
+  local ready_rc admin_rc
+  ready_rc="$(code_of "http://127.0.0.1:$PUBLIC_PORT/readyz" "$WORK/http/owner-readyz")"
+  admin_rc="$(code_of "http://127.0.0.1:$ADMIN_PORT/admin" "$WORK/http/owner-admin")"
+  if [[ "$ready_rc" != "200" || "$admin_rc" != "200" ]] || ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    fail "${when:-服务归属检查}：本轮服务不存活或响应不对（pid=$SERVER_PID readyz=$ready_rc admin=$admin_rc）；日志尾部：$(tail -n 10 "$WORK/server.log" 2>/dev/null)"
+    log "服务归属检查失败已记 FAIL，尝试用本轮原数据库与密钥恢复"
+    if start_admin_service; then
+      log "服务恢复完成；保留既有 FAIL 结论并继续后续诊断（不重放管理写入）"
+    else
+      fail "服务恢复失败；后续诊断仍将以有界 HTTP 请求继续"
+      SERVER_PID=""
+    fi
+  fi
+}
 cleanup() {
   local rc=$?
   trap - EXIT INT TERM
   set +e
-  [[ -n "$TMPFS_SCRATCH" ]] && rm -rf "$TMPFS_SCRATCH"
-  [[ -n "$FF_PID" ]] && kill -TERM "$FF_PID" 2>/dev/null
-  [[ -n "$SERVER_PID" ]] && kill -TERM "$SERVER_PID" 2>/dev/null
-  wait "$FF_PID" 2>/dev/null
-  wait "$SERVER_PID" 2>/dev/null
+  cleanup_child "$FF_PID"
+  cleanup_child "$SERVER_PID"
+  for path in "${TMPFS_SCRATCH[@]}"; do [[ -n "$path" ]] && rm -rf -- "$path"; done
   [[ -n "$WORK" && -d "$WORK" ]] && rm -rf "$WORK"
   exit $rc
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-# 取状态码与响应头，都落到文件；不用 `| head` 掩盖上游失败。
-code_of() { curl -s -o "$2" -w '%{http_code}' "$1" 2>/dev/null || echo 000; }
-# acode_of：带管理凭据的读取。
-# 分开写是因为把无凭据的 code_of 拿去读管理 API，拿到的是 401 的**错误体**：
-# "错误体里没有 secret 明文"于是永远成立——那是"把空输入当成检查通过"的现场版。
-# 同理，"复读未反映新字段"的三条 grep 会一起失败，却看不出真正的原因是根本没读到站点。
-acode_of() { curl -s -H "Authorization: Bearer $ADMIN_KEY_VAL" -o "$2" -w '%{http_code}' "$1" 2>/dev/null || echo 000; }
-hdr_of() { curl -s -D "$2" -o /dev/null "$1" 2>/dev/null || return 1; }
+curl_status() {
+  local outfile="$1" rc=0 code
+  shift
+  code="$(curl --connect-timeout 2 --max-time 5 -s -o "$outfile" -w '%{http_code}' "$@" 2>/dev/null)" || rc=$?
+  printf '%s' "${code:-000}"
+  return 0
+}
+code_of() { curl_status "$2" "$1"; }
+# acode_of：带管理凭据的读取；可传第三参数覆盖凭据用于 401 负例。
+acode_of() {
+  local key="${3:-$ADMIN_KEY_VAL}"
+  curl_status "$2" -H "Authorization: Bearer $key" "$1"
+}
+hdr_of() { curl --connect-timeout 2 --max-time 5 -s -D "$2" -o /dev/null "$1" 2>/dev/null; }
 
 log "第 0 步：端口空闲检查（连到遗留进程会让整轮结论静默失真）"
 for port in "$PUBLIC_PORT" "$ADMIN_PORT" "$BIDI_PORT"; do
@@ -80,7 +144,7 @@ if [[ -n "$FREE_KB" && "$FREE_KB" -lt 400000 && -w /dev/shm ]]; then
   export GOCACHE="/dev/shm/epocha-adminui-gocache.$$"
   export TMPDIR="/dev/shm/epocha-adminui-tmp.$$"
   mkdir -p "$GOCACHE" "$TMPDIR"
-  TMPFS_SCRATCH="$GOCACHE $TMPDIR"
+  TMPFS_SCRATCH=("$GOCACHE" "$TMPDIR")
 fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/epocha-adminui.XXXXXX")"
@@ -114,26 +178,7 @@ for f in master pepper admin wrong; do
   chmod 600 "$WORK/keys/$f"
   [[ -s "$WORK/keys/$f" ]] || abort "演示凭据文件为空：$WORK/keys/$f"
 done
-
-EPOCHA_DB="$WORK/data/epocha.db" \
-EPOCHA_LISTEN="127.0.0.1:$PUBLIC_PORT" \
-EPOCHA_ADMIN_LISTEN="127.0.0.1:$ADMIN_PORT" \
-EPOCHA_MASTER_KEY_FILE="$WORK/keys/master" \
-EPOCHA_PEPPER_FILE="$WORK/keys/pepper" \
-EPOCHA_ADMIN_KEY_FILE="$WORK/keys/admin" \
-EPOCHA_POOL_ENABLED=false \
-  "$WORK/bin/epocha" >"$WORK/server.log" 2>&1 &
-SERVER_PID=$!
-
-up=0
-for _ in $(seq 1 100); do
-  kill -0 "$SERVER_PID" 2>/dev/null || break
-  c1="$(code_of "http://127.0.0.1:$PUBLIC_PORT/readyz" "$WORK/http/readyz")"
-  c2="$(code_of "http://127.0.0.1:$ADMIN_PORT/admin" "$WORK/http/admin")"
-  if [[ "$c1" == "200" && "$c2" == "200" ]]; then up=1; break; fi
-  sleep 0.2
-done
-[[ $up -eq 1 ]] || abort "实例未就绪（readyz=$c1 admin=$c2）；日志尾部：$(tail -n 10 "$WORK/server.log")"
+start_admin_service || abort "实例未就绪；日志尾部：$(tail -n 10 "$WORK/server.log")"
 ADMIN_KEY_VAL="$(cat "$WORK/keys/admin")"
 BAD_KEY_VAL="$(cat "$WORK/keys/wrong")"
 
@@ -174,10 +219,9 @@ ctjs="$(tr -d '\r' <"$WORK/http/h-js" | awk 'BEGIN{IGNORECASE=1}/^Content-Type:/
 log "第 6 步：页面壳未登录可取，管理 API 仍逐个要凭据"
 shell_rc="$(code_of "http://127.0.0.1:$ADMIN_PORT/admin" "$WORK/http/shell")"
 [[ "$shell_rc" == "200" ]] && pass "未鉴权可取页面壳（$shell_rc，纯静态、不含数据）" || fail "未鉴权取页面壳得到 $shell_rc"
-api_rc="$(curl -s -o "$WORK/http/noauth" -w '%{http_code}' "http://127.0.0.1:$ADMIN_PORT/api/admin/whoami" 2>/dev/null || echo 000)"
+api_rc="$(curl_status "$WORK/http/noauth" "http://127.0.0.1:$ADMIN_PORT/api/admin/whoami")"
 [[ "$api_rc" == "401" ]] && pass "未鉴权 /api/admin/whoami = 401（挂页面没有变成鉴权旁路）" || fail "未鉴权 whoami 得到 $api_rc"
-bad_rc="$(curl -s -o "$WORK/http/badkey" -w '%{http_code}' -H "Authorization: Bearer $BAD_KEY_VAL" \
-  "http://127.0.0.1:$ADMIN_PORT/api/admin/sites" 2>/dev/null || echo 000)"
+bad_rc="$(curl_status "$WORK/http/badkey" -H "Authorization: Bearer $BAD_KEY_VAL" "http://127.0.0.1:$ADMIN_PORT/api/admin/sites")"
 [[ "$bad_rc" == "401" ]] && pass "错误凭据 /api/admin/sites = 401" || fail "错误凭据得到 $bad_rc"
 if grep -q "$ADMIN_KEY_VAL" "$WORK/http/badkey" "$WORK/http/noauth"; then
   fail "401 响应里出现了凭据片段"
@@ -211,7 +255,9 @@ if ! command -v firefox >/dev/null 2>&1; then
 elif ! node --version >/dev/null 2>&1; then
   fail "没有 node，无法运行 BiDi 测试（工程项，不是外部条件）"
 else
-  FF_PROFILE="$WORK/ffprofile"
+    assert_admin_service "浏览器验收前"
+    FF_PROFILE="$WORK/ffprofile"
+
   mkdir -p "$FF_PROFILE"
   firefox --headless --no-remote --profile "$FF_PROFILE" --remote-debugging-port "$BIDI_PORT" about:blank \
     >"$WORK/firefox.log" 2>&1 &
@@ -232,11 +278,12 @@ else
     ADMIN_API="http://127.0.0.1:$ADMIN_PORT" \
     ADMIN_KEY_FILE="$WORK/keys/admin" \
     BAD_ADMIN_KEY="$BAD_KEY_VAL" \
-    ADMIN_SERVER_PID="$SERVER_PID" \
       node --test --test-reporter=tap docs/scripts/browser/adminui_browser.test.mjs 2>&1 | tee "$WORK/browser.log"
     browser_rc=${PIPESTATUS[0]}
     set -e
     [[ $browser_rc -eq 0 ]] || { tail -n 60 "$WORK/browser.log"; fail "浏览器交互验收未通过（node --test 退出码 $browser_rc）"; }
+
+    assert_admin_service "浏览器验收后"
 
     manifest_rc=0
     node docs/scripts/release-check.mjs --check-browser-manifest docs/scripts/browser/cases.mjs docs/scripts/browser/adminui_browser.test.mjs "$WORK/browser.log" || manifest_rc=$?
@@ -249,10 +296,10 @@ else
 fi
 
 log "第 9 步：真实写入一轮，确认只读接口不回显 secret"
-created="$(curl -s -o "$WORK/http/create.json" -w '%{http_code}' -X POST \
+created="$(curl_status "$WORK/http/create.json" -X POST \
   -H "Authorization: Bearer $ADMIN_KEY_VAL" -H 'Content-Type: application/json' \
   -d '{"name":"门禁站点","verify_mode":"pow_question","generator_id":"arithmetic-baseline-v1","difficulty":3}' \
-  "http://127.0.0.1:$ADMIN_PORT/api/admin/sites" 2>/dev/null || echo 000)"
+  "http://127.0.0.1:$ADMIN_PORT/api/admin/sites")"
 [[ "$created" == "201" ]] || fail "创建站点应 201，实得 $created：$(cat "$WORK/http/create.json" 2>/dev/null)"
 # 提取失败（例如创建就没成功）会得到空串：这里刻意 `|| true` 让流程继续走到
 # "前提不成立 ⇒ FAIL"的显式分支，而不是被 set -e 掐死在第 9 步中间。
@@ -282,10 +329,10 @@ else
     fail "只确认了 $scanned/6 个只读接口不回显 secret"
   fi
 
-  upd="$(curl -s -o "$WORK/http/upd.json" -w '%{http_code}' -X PUT \
+  upd="$(curl_status "$WORK/http/upd.json" -X PUT \
     -H "Authorization: Bearer $ADMIN_KEY_VAL" -H 'Content-Type: application/json' \
     -d '{"name":"门禁站点-改名","pow_bits":15,"rate_site_rpm":321}' \
-    "http://127.0.0.1:$ADMIN_PORT/api/admin/sites/$SITE_ID" 2>/dev/null || echo 000)"
+    "http://127.0.0.1:$ADMIN_PORT/api/admin/sites/$SITE_ID")"
   [[ "$upd" == "200" ]] || fail "改名称/策略应 200，实得 $upd：$(cat "$WORK/http/upd.json" 2>/dev/null)"
   reread="$WORK/http/reread.json"
   rrc="$(acode_of "http://127.0.0.1:$ADMIN_PORT/api/admin/sites/$SITE_ID" "$reread")"
@@ -304,17 +351,17 @@ else
     fi
   fi
 
-  dup="$(curl -s -o /dev/null -w '%{http_code}' -X PUT \
+  dup="$(curl_status /dev/null -X PUT \
     -H "Authorization: Bearer $ADMIN_KEY_VAL" -H 'Content-Type: application/json' \
-    -d '{"name":"门禁站点-改名"}' "http://127.0.0.1:$ADMIN_PORT/api/admin/sites/$SITE_ID" 2>/dev/null || echo 000)"
+    -d '{"name":"门禁站点-改名"}' "http://127.0.0.1:$ADMIN_PORT/api/admin/sites/$SITE_ID")"
   # 同一个站点把名字改成它自己已经有的值：不该被自己的 UNIQUE 判成冲突。
   [[ "$dup" == "200" ]] || fail "同名重提到自己应 200（不是自撞 UNIQUE），实得 $dup"
-  bad="$(curl -s -o /dev/null -w '%{http_code}' -X PUT \
+  bad="$(curl_status /dev/null -X PUT \
     -H "Authorization: Bearer $ADMIN_KEY_VAL" -H 'Content-Type: application/json' \
-    -d '{"name":"  带空白  "}' "http://127.0.0.1:$ADMIN_PORT/api/admin/sites/$SITE_ID" 2>/dev/null || echo 000)"
-  over="$(curl -s -o /dev/null -w '%{http_code}' -X PUT \
+    -d '{"name":"  带空白  "}' "http://127.0.0.1:$ADMIN_PORT/api/admin/sites/$SITE_ID")"
+  over="$(curl_status /dev/null -X PUT \
     -H "Authorization: Bearer $ADMIN_KEY_VAL" -H 'Content-Type: application/json' \
-    -d '{"pow_bits":99}' "http://127.0.0.1:$ADMIN_PORT/api/admin/sites/$SITE_ID" 2>/dev/null || echo 000)"
+    -d '{"pow_bits":99}' "http://127.0.0.1:$ADMIN_PORT/api/admin/sites/$SITE_ID")"
   [[ "$bad" == "400" ]] || fail "带空白的名称应 400，实得 $bad"
   [[ "$over" == "400" ]] || fail "pow_bits=99 应 400，实得 $over"
   # 被拒的写入不得留下痕迹：只验证 400 是不够的（半生效比全不生效难查得多）。
@@ -330,14 +377,14 @@ else
     pass "名称与越界值由服务端拒绝（400），且被拒的写入没有落库"
   fi
 
-  dis="$(curl -s -o "$WORK/http/dis.json" -w '%{http_code}' -X POST \
+  dis="$(curl_status "$WORK/http/dis.json" -X POST \
     -H "Authorization: Bearer $ADMIN_KEY_VAL" -d '{}' \
-    "http://127.0.0.1:$ADMIN_PORT/api/admin/sites/$SITE_ID/disable" 2>/dev/null || echo 000)"
+    "http://127.0.0.1:$ADMIN_PORT/api/admin/sites/$SITE_ID/disable")"
   [[ "$dis" == "200" ]] || fail "停用应 200，实得 $dis"
   grep -q '"enabled":false' "$WORK/http/dis.json" || fail "停用响应未反映 enabled=false"
-  en="$(curl -s -o "$WORK/http/en.json" -w '%{http_code}' -X POST \
+  en="$(curl_status "$WORK/http/en.json" -X POST \
     -H "Authorization: Bearer $ADMIN_KEY_VAL" -H 'Content-Type: application/json' -d '{}' \
-    "http://127.0.0.1:$ADMIN_PORT/api/admin/sites/$SITE_ID/enable" 2>/dev/null || echo 000)"
+    "http://127.0.0.1:$ADMIN_PORT/api/admin/sites/$SITE_ID/enable")"
   [[ "$en" == "200" ]] || fail "启用应 200，实得 $en：$(cat "$WORK/http/en.json" 2>/dev/null)"
   if [[ "$dis" == "200" && "$en" == "200" ]] && grep -q '"enabled":false' "$WORK/http/dis.json"; then
     pass "停用/启用走真实端点且状态可见"

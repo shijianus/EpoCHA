@@ -1,0 +1,3 @@
+commit=b3a2599f8fcb8cff36ffba1f4aca0424f9e39442
+command=node docs/scripts/release-check.mjs --profile full --out full-gate
+exit_code=1

@@ -1,0 +1,56 @@
+=== RUN   TestAcquireDataLockIsExclusive
+--- PASS: TestAcquireDataLockIsExclusive (0.00s)
+=== RUN   TestLockFileIsCreatedPrivateAndNeverRemoved
+--- PASS: TestLockFileIsCreatedPrivateAndNeverRemoved (0.00s)
+=== RUN   TestStaleLockFileDoesNotBlockStartup
+--- PASS: TestStaleLockFileDoesNotBlockStartup (0.00s)
+=== RUN   TestAcquireDataLockErrorFamilies
+=== RUN   TestAcquireDataLockErrorFamilies/空路径直接拒绝
+=== RUN   TestAcquireDataLockErrorFamilies/目录不存在是_access_不是_held
+=== RUN   TestAcquireDataLockErrorFamilies/锁文件不可写是_access_不是_held
+--- PASS: TestAcquireDataLockErrorFamilies (0.00s)
+    --- PASS: TestAcquireDataLockErrorFamilies/空路径直接拒绝 (0.00s)
+    --- PASS: TestAcquireDataLockErrorFamilies/目录不存在是_access_不是_held (0.00s)
+    --- PASS: TestAcquireDataLockErrorFamilies/锁文件不可写是_access_不是_held (0.00s)
+=== RUN   TestDataLockCloseIsSafeWhenNilOrAlreadyClosed
+--- PASS: TestDataLockCloseIsSafeWhenNilOrAlreadyClosed (0.00s)
+=== RUN   TestLockPerIsOnOpenFileDescription
+--- PASS: TestLockPerIsOnOpenFileDescription (0.01s)
+=== RUN   TestAcquireDirLockRejectsFileAsDir
+--- PASS: TestAcquireDirLockRejectsFileAsDir (0.00s)
+PASS
+ok  	github.com/shijianus/EpoCHA/internal/store	0.203s
+=== RUN   TestAdminRecoverRefusesWhileLockHeldByAnotherProcess
+--- PASS: TestAdminRecoverRefusesWhileLockHeldByAnotherProcess (0.58s)
+=== RUN   TestAdminRecoverSucceedsAfterHolderExit
+--- PASS: TestAdminRecoverSucceedsAfterHolderExit (0.21s)
+=== RUN   TestAdminRecoverWritesKeyFileAndTakesEffect
+--- PASS: TestAdminRecoverWritesKeyFileAndTakesEffect (0.10s)
+=== RUN   TestAdminRecoverGuardsItsOwnInputs
+--- PASS: TestAdminRecoverGuardsItsOwnInputs (0.01s)
+=== RUN   TestAdminRecoverNormalPathKeepsAndAdopts
+--- PASS: TestAdminRecoverNormalPathKeepsAndAdopts (0.09s)
+=== RUN   TestAdminRecoverRemovesFileWhenConfirmedNotAdopted
+--- PASS: TestAdminRecoverRemovesFileWhenConfirmedNotAdopted (0.09s)
+=== RUN   TestAdminRecoverKeepsFileWhenCloseFailsAfterCommit
+--- PASS: TestAdminRecoverKeepsFileWhenCloseFailsAfterCommit (0.02s)
+=== RUN   TestAdminRecoverKeepsFileWhenAdoptedDespiteCommitError
+--- PASS: TestAdminRecoverKeepsFileWhenAdoptedDespiteCommitError (0.01s)
+=== RUN   TestAdminRecoverKeepsFileWhenVerificationFailed
+--- PASS: TestAdminRecoverKeepsFileWhenVerificationFailed (0.08s)
+PASS
+ok  	github.com/shijianus/EpoCHA/cmd/ops	1.390s
+=== RUN   TestSecondServerCannotOpenSameDataDir
+--- PASS: TestSecondServerCannotOpenSameDataDir (0.58s)
+=== RUN   TestGracefulStopAllowsRestart
+--- PASS: TestGracefulStopAllowsRestart (0.50s)
+=== RUN   TestSIGKILLReleasesLock
+--- PASS: TestSIGKILLReleasesLock (0.31s)
+=== RUN   TestStaleLockFileDoesNotBlockServer
+--- PASS: TestStaleLockFileDoesNotBlockServer (0.20s)
+=== RUN   TestStartupVersusOfflineHolderIsMutuallyExclusive
+--- PASS: TestStartupVersusOfflineHolderIsMutuallyExclusive (12.10s)
+=== RUN   TestHolderAndServerOnSameDirConflictViaDirLock
+--- PASS: TestHolderAndServerOnSameDirConflictViaDirLock (0.19s)
+PASS
+ok  	github.com/shijianus/EpoCHA/cmd/server	13.885s

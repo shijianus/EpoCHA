@@ -1,0 +1,370 @@
+TAP version 13
+# Subtest: 摘要向量：worker 的 SHA-256 与 Go 侧逐条一致
+ok 1 - 摘要向量：worker 的 SHA-256 与 Go 侧逐条一致
+  ---
+  duration_ms: 75.464214
+  type: 'test'
+  ...
+# Subtest: 前导零计数：与 internal/pow.LeadingZeroBits 同义（字节序、高位优先）
+ok 2 - 前导零计数：与 internal/pow.LeadingZeroBits 同义（字节序、高位优先）
+  ---
+  duration_ms: 0.85887
+  type: 'test'
+  ...
+# Subtest: PoW：worker 解出的第一个解与共享向量一致（含尝试次数）
+ok 3 - PoW：worker 解出的第一个解与共享向量一致（含尝试次数）
+  ---
+  duration_ms: 1212.260798
+  type: 'test'
+  ...
+# Subtest: 非法输入一律明确失败，不猜实现
+ok 4 - 非法输入一律明确失败，不猜实现
+  ---
+  duration_ms: 2.111181
+  type: 'test'
+  ...
+# Subtest: 取消：cancel 之后不得再出现该 job 的 solved
+ok 5 - 取消：cancel 之后不得再出现该 job 的 solved
+  ---
+  duration_ms: 288.964567
+  type: 'test'
+  ...
+# Subtest: 内嵌副本不漂移：v1.js 里的 String.raw 块 == v1.worker.js
+ok 6 - 内嵌副本不漂移：v1.js 里的 String.raw 块 == v1.worker.js
+  ---
+  duration_ms: 0.71605
+  type: 'test'
+  ...
+# Subtest: 预算耗尽是可诊断的失败，不是无限循环
+ok 7 - 预算耗尽是可诊断的失败，不是无限循环
+  ---
+  duration_ms: 318.611358
+  type: 'test'
+  ...
+# Subtest: reset during redeem ignores late success
+ok 8 - reset during redeem ignores late success
+  ---
+  duration_ms: 199.105832
+  type: 'test'
+  ...
+# Subtest: reset during redeem ignores late network failure
+ok 9 - reset during redeem ignores late network failure
+  ---
+  duration_ms: 77.037885
+  type: 'test'
+  ...
+# Subtest: reset during challenge load ignores late success
+ok 10 - reset during challenge load ignores late success
+  ---
+  duration_ms: 3.651412
+  type: 'test'
+  ...
+# Subtest: reset during challenge load ignores abort rejection
+ok 11 - reset during challenge load ignores abort rejection
+  ---
+  duration_ms: 2.402742
+  type: 'test'
+  ...
+# Subtest: reset during challenge load ignores late 503
+ok 12 - reset during challenge load ignores late 503
+  ---
+  duration_ms: 1.685681
+  type: 'test'
+  ...
+# Subtest: reset cancels a 503 retry, including an already queued callback
+ok 13 - reset cancels a 503 retry, including an already queued callback
+  ---
+  duration_ms: 3.349533
+  type: 'test'
+  ...
+# Subtest: refresh cancels a 503 retry, including an already queued callback
+ok 14 - refresh cancels a 503 retry, including an already queued callback
+  ---
+  duration_ms: 3.275792
+  type: 'test'
+  ...
+# Subtest: destroy cancels a 503 retry, including an already queued callback
+ok 15 - destroy cancels a 503 retry, including an already queued callback
+  ---
+  duration_ms: 2.666732
+  type: 'test'
+  ...
+# Subtest: hung redeem times out even when transport ignores abort, then only a fresh challenge can retry
+ok 16 - hung redeem times out even when transport ignores abort, then only a fresh challenge can retry
+  ---
+  duration_ms: 3.691343
+  type: 'test'
+  ...
+# Subtest: redeem timeout covers a hung response body and discards its late success
+ok 17 - redeem timeout covers a hung response body and discards its late success
+  ---
+  duration_ms: 81.379808
+  type: 'test'
+  ...
+# Subtest: redeem network errors are recoverable network failures, not PoW failures
+ok 18 - redeem network errors are recoverable network failures, not PoW failures
+  ---
+  duration_ms: 2.681082
+  type: 'test'
+  ...
+# Subtest: refresh aborts redeem; stale completion and timeout cannot cancel the new request
+ok 19 - refresh aborts redeem; stale completion and timeout cannot cancel the new request
+  ---
+  duration_ms: 6.753485
+  type: 'test'
+  ...
+# Subtest: destroy during redeem aborts and releases timers, worker, Blob, listeners and DOM
+ok 20 - destroy during redeem aborts and releases timers, worker, Blob, listeners and DOM
+  ---
+  duration_ms: 3.625943
+  type: 'test'
+  ...
+# Subtest: reset cancels pending PoW timers and rejects queued worker/image/deadline callbacks
+ok 21 - reset cancels pending PoW timers and rejects queued worker/image/deadline callbacks
+  ---
+  duration_ms: 2.187351
+  type: 'test'
+  ...
+# Subtest: reset from onState(submitting) prevents the interrupted callback from continuing
+ok 22 - reset from onState(submitting) prevents the interrupted callback from continuing
+  ---
+  duration_ms: 2.739622
+  type: 'test'
+  ...
+# Subtest: reset from onState(verified) prevents the interrupted callback from continuing
+ok 23 - reset from onState(verified) prevents the interrupted callback from continuing
+  ---
+  duration_ms: 2.110422
+  type: 'test'
+  ...
+# Subtest: reset from onState(error) prevents the interrupted callback from continuing
+ok 24 - reset from onState(error) prevents the interrupted callback from continuing
+  ---
+  duration_ms: 80.144037
+  type: 'test'
+  ...
+# Subtest: reset from the 503 state observer cannot schedule a retry in the new generation
+ok 25 - reset from the 503 state observer cannot schedule a retry in the new generation
+  ---
+  duration_ms: 3.854843
+  type: 'test'
+  ...
+# Subtest: maxAutoRetry=0（Node 工装）：challenge-unavailable 不自动重试
+ok 26 - maxAutoRetry=0（Node 工装）：challenge-unavailable 不自动重试
+  ---
+  duration_ms: 2.804892
+  type: 'test'
+  ...
+# Subtest: 图片解码失败（Node 工装）：进入 error、清理旧题且零兑换请求
+ok 27 - 图片解码失败（Node 工装）：进入 error、清理旧题且零兑换请求
+  ---
+  duration_ms: 6.175054
+  type: 'test'
+  ...
+# Subtest: 答案框 label 绑定（Node 工装）：点击标签聚焦输入框且可访问名称正确
+ok 28 - 答案框 label 绑定（Node 工装）：点击标签聚焦输入框且可访问名称正确
+  ---
+  duration_ms: 2.330411
+  type: 'test'
+  ...
+# Subtest: reset 清旧图并禁用提交（Node 工装）：只有刷新才能恢复作答
+ok 29 - reset 清旧图并禁用提交（Node 工装）：只有刷新才能恢复作答
+  ---
+  duration_ms: 2.745792
+  type: 'test'
+  ...
+# Subtest: 短 TTL 延迟（Node 工装）：客户端保守扣除兑换耗时，迟到成功不发放过期 token
+ok 30 - 短 TTL 延迟（Node 工装）：客户端保守扣除兑换耗时，迟到成功不发放过期 token
+  ---
+  duration_ms: 80.544238
+  type: 'test'
+  ...
+# Subtest: 领题延迟（Node 工装）：客户端按请求起点保守计算 challenge deadline
+ok 31 - 领题延迟（Node 工装）：客户端按请求起点保守计算 challenge deadline
+  ---
+  duration_ms: 1.988411
+  type: 'test'
+  ...
+# Subtest: 在途兑换时图片失败（Node 工装）：旧响应不能复活 token
+ok 32 - 在途兑换时图片失败（Node 工装）：旧响应不能复活 token
+  ---
+  duration_ms: 1.926012
+  type: 'test'
+  ...
+# Subtest: getResponse rechecks an expired token after a suspended timer
+ok 33 - getResponse rechecks an expired token after a suspended timer
+  ---
+  duration_ms: 2.826642
+  type: 'test'
+  ...
+# Subtest: successful redeem clears its HTTP timeout and duplicate submit does not consume twice
+ok 34 - successful redeem clears its HTTP timeout and duplicate submit does not consume twice
+  ---
+  duration_ms: 3.545742
+  type: 'test'
+  ...
+# Subtest: zh-CN answer placeholder follows the question length
+ok 35 - zh-CN answer placeholder follows the question length
+  ---
+  duration_ms: 5.371034
+  type: 'test'
+  ...
+# Subtest: cells 输入（Node 工装）：9 个可点击格子、选中集合排序去重后提交
+ok 36 - cells 输入（Node 工装）：9 个可点击格子、选中集合排序去重后提交
+  ---
+  duration_ms: 81.958549
+  type: 'test'
+  ...
+# Subtest: pairs 输入（Node 工装）：两个数字输入合成为 a,b
+ok 37 - pairs 输入（Node 工装）：两个数字输入合成为 a,b
+  ---
+  duration_ms: 16.886242
+  type: 'test'
+  ...
+# Subtest: cells 几何越界（Node 工装）：fail closed，不渲染可点击区域
+ok 38 - cells 几何越界（Node 工装）：fail closed，不渲染可点击区域
+  ---
+  duration_ms: 87.922123
+  type: 'test'
+  ...
+# Subtest: interactive pending request times out and refresh starts a fresh attempt
+ok 39 - interactive pending request times out and refresh starts a fresh attempt
+  ---
+  duration_ms: 5.142664
+  type: 'test'
+  ...
+# Subtest: interactive challenge TTL expires before module timeout and late callback
+ok 40 - interactive challenge TTL expires before module timeout and late callback
+  ---
+  duration_ms: 2.510042
+  type: 'test'
+  ...
+# Subtest: interactive reset releases the pending attempt and ignores callbacks
+ok 41 - interactive reset releases the pending attempt and ignores callbacks
+  ---
+  duration_ms: 2.488481
+  type: 'test'
+  ...
+# Subtest: interactive destroy releases the pending attempt and ignores callbacks
+ok 42 - interactive destroy releases the pending attempt and ignores callbacks
+  ---
+  duration_ms: 1.819562
+  type: 'test'
+  ...
+# Subtest: interactive shared attempt survives one instance reset and cleans up after the last
+ok 43 - interactive shared attempt survives one instance reset and cleans up after the last
+  ---
+  duration_ms: 2.458812
+  type: 'test'
+  ...
+# Subtest: interactive background resume rechecks TTL while loading
+ok 44 - interactive background resume rechecks TTL while loading
+  ---
+  duration_ms: 79.591607
+  type: 'test'
+  ...
+# Subtest: tile-rotation 输入：旋转后才有答案，Reset 清空本地操作
+ok 45 - tile-rotation 输入：旋转后才有答案，Reset 清空本地操作
+  ---
+  duration_ms: 4.475173
+  type: 'test'
+  ...
+# Subtest: 交互模块按需加载成功：同一状态机进入 ready 并渲染控件
+ok 46 - 交互模块按需加载成功：同一状态机进入 ready 并渲染控件
+  ---
+  duration_ms: 3.502482
+  type: 'test'
+  ...
+# Subtest: 交互模块加载失败：明确失败，不渲染半成品
+ok 47 - 交互模块加载失败：明确失败，不渲染半成品
+  ---
+  duration_ms: 3.366783
+  type: 'test'
+  ...
+# Subtest: 交互模块失败后刷新可以重试，不会把页面永久钉死
+ok 48 - 交互模块失败后刷新可以重试，不会把页面永久钉死
+  ---
+  duration_ms: 3.245242
+  type: 'test'
+  ...
+# Subtest: 新交互题型的中文文案：指令与说明都来自既有 i18n 表
+ok 49 - 新交互题型的中文文案：指令与说明都来自既有 i18n 表
+  ---
+  duration_ms: 3.592333
+  type: 'test'
+  ...
+# Subtest: symbol-path 输入：相邻点击组成固定两位索引串，Backspace 撤销
+ok 50 - symbol-path 输入：相邻点击组成固定两位索引串，Backspace 撤销
+  ---
+  duration_ms: 82.514939
+  type: 'test'
+  ...
+# Subtest: symbol-path 拖动在 pointerup 后结束，释放到格子外不会粘住命中状态
+ok 51 - symbol-path 拖动在 pointerup 后结束，释放到格子外不会粘住命中状态
+  ---
+  duration_ms: 4.299923
+  type: 'test'
+  ...
+# Subtest: symbol-path 粗指针布局过密时 fail closed，不渲染不可用命中盒
+ok 52 - symbol-path 粗指针布局过密时 fail closed，不渲染不可用命中盒
+  ---
+  duration_ms: 2.728522
+  type: 'test'
+  ...
+# Subtest: visual-rank 输入：五张卡按选择顺序合成排列，Undo 撤销最后一张
+ok 53 - visual-rank 输入：五张卡按选择顺序合成排列，Undo 撤销最后一张
+  ---
+  duration_ms: 3.008402
+  type: 'test'
+  ...
+# Subtest: crowd-find 输入：单格选择，改选只保留最后一个索引
+ok 54 - crowd-find 输入：单格选择，改选只保留最后一个索引
+  ---
+  duration_ms: 3.270443
+  type: 'test'
+  ...
+# Subtest: progressive-target 输入：三轮逐轮推进，第三轮后才合成答案
+ok 55 - progressive-target 输入：三轮逐轮推进，第三轮后才合成答案
+  ---
+  duration_ms: 86.670312
+  type: 'test'
+  ...
+# Subtest: sprite geometry uses the same responsive percentages as its hit targets
+ok 56 - sprite geometry uses the same responsive percentages as its hit targets
+  ---
+  duration_ms: 4.078033
+  type: 'test'
+  ...
+# Subtest: shell-track 输入：动画结束前不可选，三轮后合成答案
+ok 57 - shell-track 输入：动画结束前不可选，三轮后合成答案
+  ---
+  duration_ms: 2.739852
+  type: 'test'
+  ...
+# Subtest: shell-track + prefers-reduced-motion：明确失败，不强迫完成运动题
+ok 58 - shell-track + prefers-reduced-motion：明确失败，不强迫完成运动题
+  ---
+  duration_ms: 2.476791
+  type: 'test'
+  ...
+# Subtest: silhouette-assembly 输入：选择/旋转/放置，五格填满才合成答案
+ok 59 - silhouette-assembly 输入：选择/旋转/放置，五格填满才合成答案
+  ---
+  duration_ms: 4.361763
+  type: 'test'
+  ...
+# Subtest: silhouette-assembly 不覆盖已占用槽位，部件不会凭空丢失
+ok 60 - silhouette-assembly 不覆盖已占用槽位，部件不会凭空丢失
+  ---
+  duration_ms: 6.182204
+  type: 'test'
+  ...
+1..60
+# tests 60
+# suites 0
+# pass 60
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 2101.949973

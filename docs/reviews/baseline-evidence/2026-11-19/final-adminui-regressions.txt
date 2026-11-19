@@ -1,0 +1,142 @@
+TAP version 13
+# Subtest: admin cancel toggle removes its dialog, keeps focus in DOM and sends no write
+ok 1 - admin cancel toggle removes its dialog, keeps focus in DOM and sends no write
+  ---
+  duration_ms: 91.653155
+  type: 'test'
+  ...
+# Subtest: admin cancel toggle sends no write even when its dialog is reopened
+ok 2 - admin cancel toggle sends no write even when its dialog is reopened
+  ---
+  duration_ms: 10.527888
+  type: 'test'
+  ...
+# Subtest: admin late generator loading cannot dirty or populate the next session
+ok 3 - admin late generator loading cannot dirty or populate the next session
+  ---
+  duration_ms: 9.682347
+  type: 'test'
+  ...
+# Subtest: admin changed name is reflected in toggle confirmation without dropping drafts
+ok 4 - admin changed name is reflected in toggle confirmation without dropping drafts
+  ---
+  duration_ms: 89.715844
+  type: 'test'
+  ...
+# Subtest: admin abandoning policy reloads only that form and preserves origin draft
+ok 5 - admin abandoning policy reloads only that form and preserves origin draft
+  ---
+  duration_ms: 96.94463
+  type: 'test'
+  ...
+# Subtest: admin oversized and malformed successful bodies fail closed with restored controls
+ok 6 - admin oversized and malformed successful bodies fail closed with restored controls
+  ---
+  duration_ms: 98.43563
+  type: 'test'
+  ...
+# Subtest: admin stale detail response cannot replace a newly selected list
+ok 7 - admin stale detail response cannot replace a newly selected list
+  ---
+  duration_ms: 6.348795
+  type: 'test'
+  ...
+# Subtest: admin origin mismatch remains visible and keeps dirty edits
+ok 8 - admin origin mismatch remains visible and keeps dirty edits
+  ---
+  duration_ms: 97.86981
+  type: 'test'
+  ...
+# Subtest: admin explicit discard does not resurrect an origin draft on return
+ok 9 - admin explicit discard does not resurrect an origin draft on return
+  ---
+  duration_ms: 9.687937
+  type: 'test'
+  ...
+# Subtest: admin policy save preserves visible confirmed result and sibling origin draft
+ok 10 - admin policy save preserves visible confirmed result and sibling origin draft
+  ---
+  duration_ms: 6.240384
+  type: 'test'
+  ...
+# Subtest: admin policy save preserves visible mismatch result and sibling origin draft
+ok 11 - admin policy save preserves visible mismatch result and sibling origin draft
+  ---
+  duration_ms: 74.839234
+  type: 'test'
+  ...
+# Subtest: admin policy save preserves visible read failure result and sibling origin draft
+ok 12 - admin policy save preserves visible read failure result and sibling origin draft
+  ---
+  duration_ms: 6.583015
+  type: 'test'
+  ...
+# Subtest: admin policy write freezes its own controls and allows an independent origin save
+ok 13 - admin policy write freezes its own controls and allows an independent origin save
+  ---
+  duration_ms: 6.067904
+  type: 'test'
+  ...
+# Subtest: admin toggle preserves policy and origin drafts and their navigation guard
+ok 14 - admin toggle preserves policy and origin drafts and their navigation guard
+  ---
+  duration_ms: 5.754764
+  type: 'test'
+  ...
+# Subtest: admin 500 write says unconfirmed and its review button performs only a read
+ok 15 - admin 500 write says unconfirmed and its review button performs only a read
+  ---
+  duration_ms: 82.442179
+  type: 'test'
+  ...
+# Subtest: admin origin success makes an independent GET before claiming reread
+ok 16 - admin origin success makes an independent GET before claiming reread
+  ---
+  duration_ms: 4.542654
+  type: 'test'
+  ...
+# Subtest: admin fetch timeout restores controls and ignores a late successful write
+ok 17 - admin fetch timeout restores controls and ignores a late successful write
+  ---
+  duration_ms: 6.111314
+  type: 'test'
+  ...
+# Subtest: admin body timeout restores controls and ignores a late successful write
+ok 18 - admin body timeout restores controls and ignores a late successful write
+  ---
+  duration_ms: 3.669083
+  type: 'test'
+  ...
+# Subtest: admin rejected response body restores controls without throwing
+ok 19 - admin rejected response body restores controls without throwing
+  ---
+  duration_ms: 82.736299
+  type: 'test'
+  ...
+# Subtest: admin logout discards late creation plaintext and late view loading
+ok 20 - admin logout discards late creation plaintext and late view loading
+  ---
+  duration_ms: 5.731564
+  type: 'test'
+  ...
+# Subtest: admin old 401 cannot invalidate a newer authenticated session
+ok 21 - admin old 401 cannot invalidate a newer authenticated session
+  ---
+  duration_ms: 5.790684
+  type: 'test'
+  ...
+# Subtest: admin policy confirmation 401 clears the current session
+ok 22 - admin policy confirmation 401 clears the current session
+  ---
+  duration_ms: 3.285723
+  type: 'test'
+  ...
+1..22
+# tests 22
+# suites 0
+# pass 22
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1102.925889

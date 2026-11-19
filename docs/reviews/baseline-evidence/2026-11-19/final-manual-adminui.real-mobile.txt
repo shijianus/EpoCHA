@@ -1,0 +1,1 @@
+{"status":"NOT_RUN","exit_code":3,"check_id":"adminui.real-mobile","reason":"manual-evidence-not-provided"}

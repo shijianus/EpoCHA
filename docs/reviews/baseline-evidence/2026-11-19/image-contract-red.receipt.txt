@@ -1,0 +1,3 @@
+commit=84dee4a0af7a6f33f4f9c5905f4ace3698cdfd1f
+command=go test -count=1 -run TestQuestionDTOImage -v ./internal/api
+exit_code=1

@@ -1,0 +1,118 @@
+TAP version 13
+# Subtest: browser network failure never signals the shared gate-owned server
+ok 1 - browser network failure never signals the shared gate-owned server
+  ---
+  duration_ms: 0.953381
+  type: 'test'
+  ...
+# Subtest: real network-failure case uses an independently owned HTTP proxy fixture
+ok 2 - real network-failure case uses an independently owned HTTP proxy fixture
+  ---
+  duration_ms: 0.35187
+  type: 'test'
+  ...
+# Subtest: proxy failure is a real browser-visible connection refusal while upstream and normal forwarding remain live
+ok 3 - proxy failure is a real browser-visible connection refusal while upstream and normal forwarding remain live
+  ---
+  duration_ms: 300.924815
+  type: 'test'
+  ...
+# Subtest: shared-service recovery reuses this run's DB and keys without replaying admin writes
+ok 4 - shared-service recovery reuses this run's DB and keys without replaying admin writes
+  ---
+  duration_ms: 0.9463
+  type: 'test'
+  ...
+# Subtest: all admin gate HTTP helpers use bounded connection and total timeouts without duplicate 000
+ok 5 - all admin gate HTTP helpers use bounded connection and total timeouts without duplicate 000
+  ---
+  duration_ms: 0.29891
+  type: 'test'
+  ...
+# Subtest: the parent shell verifies its shared service before and after browser work
+ok 6 - the parent shell verifies its shared service before and after browser work
+  ---
+  duration_ms: 0.16589
+  type: 'test'
+  ...
+# Subtest: gate cleanup reaps owned children and removes each tmpfs path separately
+ok 7 - gate cleanup reaps owned children and removes each tmpfs path separately
+  ---
+  duration_ms: 0.34708
+  type: 'test'
+  ...
+# Subtest: browser after hook closes owned browser resources even when tab/session cleanup fails
+ok 8 - browser after hook closes owned browser resources even when tab/session cleanup fails
+  ---
+  duration_ms: 0.34344
+  type: 'test'
+  ...
+# Subtest: baseline evidence binds commands and raw logs to exact candidate and environment
+ok 9 - baseline evidence binds commands and raw logs to exact candidate and environment
+  ---
+  duration_ms: 2.834462
+  type: 'test'
+  ...
+# Subtest: baseline evidence fails closed on empty, missing or contradictory evidence
+ok 10 - baseline evidence fails closed on empty, missing or contradictory evidence
+  ---
+  duration_ms: 2.040342
+  type: 'test'
+  ...
+# Subtest: BLOCKED and NOT_RUN preserve absent execution instead of manufacturing an exit code
+ok 11 - BLOCKED and NOT_RUN preserve absent execution instead of manufacturing an exit code
+  ---
+  duration_ms: 0.53792
+  type: 'test'
+  ...
+# Subtest: baseline command runner records actual exit codes and preserves every run
+ok 12 - baseline command runner records actual exit codes and preserves every run
+  ---
+  duration_ms: 606.505324
+  type: 'test'
+  ...
+# Subtest: image contract accepts proportional CSS scaling while checking intrinsic and declared dimensions
+ok 13 - image contract accepts proportional CSS scaling while checking intrinsic and declared dimensions
+  ---
+  duration_ms: 1.614391
+  type: 'test'
+  ...
+# Subtest: image contract rejects mismatched declared dimensions and stretched rendering
+ok 14 - image contract rejects mismatched declared dimensions and stretched rendering
+  ---
+  duration_ms: 2.478112
+  type: 'test'
+  ...
+# Subtest: real browser suite reads HTML attributes rather than CSS-dependent img.width getters
+ok 15 - real browser suite reads HTML attributes rather than CSS-dependent img.width getters
+  ---
+  duration_ms: 0.819701
+  type: 'test'
+  ...
+# Subtest: each widget case owns a distinct workspace and closes only its own processes
+ok 16 - each widget case owns a distinct workspace and closes only its own processes
+  ---
+  duration_ms: 14.23593
+  type: 'test'
+  ...
+# Subtest: startup readiness wait is cancelled promptly
+ok 17 - startup readiness wait is cancelled promptly
+  ---
+  duration_ms: 24.230757
+  type: 'test'
+  ...
+# Subtest: process cleanup has a bounded TERM-to-KILL escalation
+ok 18 - process cleanup has a bounded TERM-to-KILL escalation
+  ---
+  duration_ms: 178.033198
+  type: 'test'
+  ...
+1..18
+# tests 18
+# suites 0
+# pass 18
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1394.249318

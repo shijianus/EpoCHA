@@ -1,0 +1,4 @@
+commit=196a35f75935b2d10d5e87471fe83e2794e63167
+command=go test -race -json -count=1 ./...
+exit_code=0
+arch=x86_64

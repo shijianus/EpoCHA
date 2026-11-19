@@ -1,0 +1,3 @@
+commit=629befa2e7d89345a917108561a1a303cfaac1c1
+command=bash deploy/preflight.sh --strict --json --data-dir source --keys-dir no-keys --backup-dir evidence
+exit_code=3

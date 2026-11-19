@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "test": "fmt-final",
+  "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+  "dirty": false,
+  "environment": {
+    "os": "linux",
+    "arch": "x64",
+    "node": "v24.22.3"
+  },
+  "command": [
+    "node",
+    "docs/scripts/release-check.mjs",
+    "--fmt-check"
+  ],
+  "started_at_utc": "2026-11-19T04:11:14.219Z",
+  "finished_at_utc": "2026-11-19T04:11:15.138Z",
+  "exit_code": 0,
+  "status": "PASS",
+  "signal": null,
+  "log": "fmt-final.log",
+  "log_sha256": "d44e2d2eb5cdb90a623a5bf8db0db34a4b301e2f0c5ebc9f2506703c95e27aec"
+}

@@ -22,3 +22,6 @@
 *.db -text
 *.db-wal -text
 *.db-shm -text
+
+# Raw test output is immutable evidence; preserve bytes and diagnostic whitespace.
+docs/reviews/baseline-evidence/2026-11-19/*.txt -text -whitespace

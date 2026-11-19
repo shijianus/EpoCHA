@@ -1,0 +1,3 @@
+command=go test -count=1 -run TestWave[12]Generators -v ./internal/api
+commit=adcbe0b42328231ec801098f390ba817fe8e057a
+exit_code=1

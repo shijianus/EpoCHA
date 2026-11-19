@@ -1,0 +1,1113 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-11-19T04:24:54.142Z",
+  "release_approved": false,
+  "purpose": "Traceable baseline evidence; formal release-check remains authoritative.",
+  "tests": [
+    {
+      "test": "A-old-baseline",
+      "commit": "adcbe0b42328231ec801098f390ba817fe8e057a",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "go test -count=1 -run TestWave[12]Generators -v ./internal/api"
+      ],
+      "exit_code": 1,
+      "status": "FAIL",
+      "log": "a-baseline.txt",
+      "defects": [
+        "A"
+      ],
+      "fixes": [
+        "25e518cc580d954ca7206c16b6702db302b31878"
+      ],
+      "log_sha256": "640e8d87ba6408fe36f7d71c2f458b53e57a107cac230a25be5e635e0c34718b"
+    },
+    {
+      "test": "A-fixture-repaired",
+      "commit": "fb1fb2f9dddce7bdeff9b345c8321af6691f50c0",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "go test -count=1 -run TestWave[12]Generators -v ./internal/api"
+      ],
+      "exit_code": 0,
+      "status": "PASS",
+      "log": "a-inherited-wip.txt",
+      "defects": [
+        "A"
+      ],
+      "fixes": [
+        "25e518cc580d954ca7206c16b6702db302b31878"
+      ],
+      "log_sha256": "7e3b87c44cb4ed15b8ecbf049df9f3a0a24b8ab3316e933ac5d8f04816ca10e6"
+    },
+    {
+      "test": "B-old-lifecycle",
+      "commit": "adcbe0b42328231ec801098f390ba817fe8e057a",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "timeout 300s bash docs/scripts/admin-ui-check.sh"
+      ],
+      "exit_code": 1,
+      "status": "FAIL",
+      "log": "b-admin-baseline.txt",
+      "defects": [
+        "B"
+      ],
+      "fixes": [
+        "75de8264fd8a37401f532049913f8242e768d413"
+      ],
+      "log_sha256": "ed76cf0569e98c700bca5ccdfe8ab4a1702b6cf4521373630e7283d2cd9bbbb2"
+    },
+    {
+      "test": "B-intermediate-narrow-failure",
+      "commit": "75de8264fd8a37401f532049913f8242e768d413",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "timeout 300s bash docs/scripts/admin-ui-check.sh"
+      ],
+      "exit_code": 1,
+      "status": "FAIL",
+      "log": "b-admin-green.txt",
+      "defects": [
+        "B"
+      ],
+      "fixes": [
+        "866df09"
+      ],
+      "log_sha256": "4ef5d79e369d0ab6de11886a8746ef1e5f05ff3b0107dc42b1effae460b3b1a1"
+    },
+    {
+      "test": "B-fixed-engineering-manual-incomplete",
+      "commit": "b3a2599f8fcb8cff36ffba1f4aca0424f9e39442",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "timeout 240s bash docs/scripts/admin-ui-check.sh"
+      ],
+      "exit_code": 124,
+      "status": "BLOCKED",
+      "log": "b-admin-green2.txt",
+      "defects": [
+        "B"
+      ],
+      "fixes": [
+        "75de8264fd8a37401f532049913f8242e768d413",
+        "866df09"
+      ],
+      "reason": "External or manual prerequisites remain; raw command and exit retained",
+      "log_sha256": "f0d7a40960ea9018aab8190dc561e06ac3f92fa1c22b591209e8b28b62741edb"
+    },
+    {
+      "test": "C-DTO-red",
+      "commit": "84dee4a0af7a6f33f4f9c5905f4ace3698cdfd1f",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "go test -count=1 -run TestQuestionDTOImage -v ./internal/api"
+      ],
+      "exit_code": 1,
+      "status": "FAIL",
+      "log": "image-contract-red.txt",
+      "defects": [
+        "C"
+      ],
+      "fixes": [
+        "9fada47b63f873c1bc72f0b2b75dc2ffd729f00f"
+      ],
+      "log_sha256": "3b4c5c8adc3948ceb1fb1e37323f4619b4a212f44152e844181e532264ffdd0f"
+    },
+    {
+      "test": "C-generator-properties",
+      "commit": "84dee4a0af7a6f33f4f9c5905f4ace3698cdfd1f",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "go test -count=1 -run TestTextImagePayloadDimensionsMatchPNG -v ./internal/generator"
+      ],
+      "exit_code": 0,
+      "status": "PASS",
+      "log": "generator-properties-red.txt",
+      "defects": [
+        "C"
+      ],
+      "fixes": [],
+      "log_sha256": "83151ba0178b2dda7e58515517a72e629ab7dbb993bed1f77a41e29da50a32a6"
+    },
+    {
+      "test": "D-initial-full-go",
+      "commit": "fb1fb2f9dddce7bdeff9b345c8321af6691f50c0",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "go test -json -count=1 ./..."
+      ],
+      "exit_code": 1,
+      "status": "FAIL",
+      "log": "go-test-inherited-wip.jsonl",
+      "defects": [
+        "D"
+      ],
+      "fixes": [],
+      "log_sha256": "c9a5a4a6d16d3597fe9a5091e273368f1e411dba78d8d36803c80d3e4cedd62d"
+    },
+    {
+      "test": "D-serial-purge-red",
+      "commit": "84dee4a0af7a6f33f4f9c5905f4ace3698cdfd1f",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "go test -p 1 -count=3 -run purge-repro -v ./internal/store"
+      ],
+      "exit_code": 1,
+      "status": "FAIL",
+      "log": "d-purge-serial.txt",
+      "defects": [
+        "D"
+      ],
+      "fixes": [],
+      "log_sha256": "e9ddf2b301fa2c086b9e7fe97bfba0522fc3ca45971ec4425721238f1d9836c8"
+    },
+    {
+      "test": "D-tiny-database-red",
+      "commit": "2dcb11805228c4b395c217e8aeaefbafec7b5be1",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "go test -count=1 -run TestPurgeSQLiteFullIndependentOfDiskAndPool -v ./internal/store"
+      ],
+      "exit_code": 1,
+      "status": "FAIL",
+      "log": "d-purge-independent-red.txt",
+      "defects": [
+        "D"
+      ],
+      "fixes": [],
+      "log_sha256": "af3a87af35c309627462768dfa3760f48d026315ac0e01bc7af85b9db50608db"
+    },
+    {
+      "test": "D-explicit-sqlite-temp",
+      "commit": "90b8b8a7a1c8480f2ed0f83e4c45ef4b0a192ff9",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "SQLITE_TMPDIR=isolated-data-dir go test -count=1 -run purge-regressions -v ./internal/store"
+      ],
+      "exit_code": 0,
+      "status": "PASS",
+      "log": "d-purge-dedicated-tmp.txt",
+      "defects": [
+        "D"
+      ],
+      "fixes": [],
+      "log_sha256": "0668cab1c8e147f4b145aa9aa72106cbfbcbefa9d6b713cfc4ea88325dc96a42"
+    },
+    {
+      "test": "ACD-target-regression",
+      "commit": "9fada47b63f873c1bc72f0b2b75dc2ffd729f00f",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "go test -json -count=1 ./internal/api ./internal/generator ./internal/store ./cmd/server"
+      ],
+      "exit_code": 0,
+      "status": "PASS",
+      "log": "acd-target-green.jsonl",
+      "defects": [
+        "A",
+        "C",
+        "D"
+      ],
+      "fixes": [
+        "9fada47b63f873c1bc72f0b2b75dc2ffd729f00f"
+      ],
+      "log_sha256": "4d3f3d880055c8840ed332fc7c332291fb5c406d67c7731295f32ba5b4d84c22"
+    },
+    {
+      "test": "Go-full-race",
+      "commit": "196a35f75935b2d10d5e87471fe83e2794e63167",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "go test -race -json -count=1 ./..."
+      ],
+      "exit_code": 0,
+      "status": "PASS",
+      "log": "go-race-full.jsonl",
+      "defects": [
+        "D"
+      ],
+      "fixes": [],
+      "log_sha256": "6ce17b58ceef2575ce3a3e65fbcb6cdfef8107f40ee7d3a8502afb1d983d0b87"
+    },
+    {
+      "test": "widget-isolated-intermediate",
+      "commit": "b9cba590b57cd7b768c3f7345a0dd712133e6cac",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "node --test --test-reporter=tap docs/scripts/browser/widget_browser.test.mjs"
+      ],
+      "exit_code": 1,
+      "status": "FAIL",
+      "log": "d-widget-browser.txt",
+      "defects": [
+        "C",
+        "D"
+      ],
+      "fixes": [],
+      "log_sha256": "991cec7820dea6de73dc9171822e36fcfb570c3e0b01eb853e21ccf87f0a2e96"
+    },
+    {
+      "test": "widget-isolated-final",
+      "commit": "629befa2e7d89345a917108561a1a303cfaac1c1",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "node --test --test-reporter=tap docs/scripts/browser/widget_browser.test.mjs"
+      ],
+      "exit_code": 0,
+      "status": "PASS",
+      "log": "d-widget-browser-final.txt",
+      "defects": [
+        "C",
+        "D"
+      ],
+      "fixes": [
+        "629befa2e7d89345a917108561a1a303cfaac1c1"
+      ],
+      "log_sha256": "6a9bda93a0130faab86ac93f0074ea55c7adde3094a550511cff38150d581a9f"
+    },
+    {
+      "test": "backup-restore",
+      "commit": "629befa2e7d89345a917108561a1a303cfaac1c1",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "go test -count=1 -v -run TestBackup|TestRestore ./internal/store"
+      ],
+      "exit_code": 0,
+      "status": "PASS",
+      "log": "backup-restore.txt",
+      "defects": [],
+      "fixes": [],
+      "log_sha256": "8b3278cd0d59d4d4d83375507d9e6729f54f7bb74d6f81d7792ac20e50225290"
+    },
+    {
+      "test": "runtime-lock-processes",
+      "commit": "629befa2e7d89345a917108561a1a303cfaac1c1",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "go test -count=1 -v -run lock-and-real-process-matrix ./internal/store ./cmd/ops ./cmd/server"
+      ],
+      "exit_code": 0,
+      "status": "PASS",
+      "log": "runtime-lock-final.txt",
+      "defects": [],
+      "fixes": [],
+      "log_sha256": "a01470f9a0d8a4b803ab89cc7bfd3f834800ff24e0f74064278d4e0134356e8b"
+    },
+    {
+      "test": "deployment-preflight",
+      "commit": "629befa2e7d89345a917108561a1a303cfaac1c1",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "bash deploy/preflight.sh --strict --json --data-dir source --keys-dir no-keys --backup-dir evidence"
+      ],
+      "exit_code": 3,
+      "status": "BLOCKED",
+      "log": "preflight-strict.txt",
+      "defects": [
+        "D"
+      ],
+      "fixes": [],
+      "reason": "External or manual prerequisites remain; raw command and exit retained",
+      "log_sha256": "e17497cd1a2b67c018c3062045af9b029040fc5e1211cad9328d1b1c2cbc1b8b"
+    },
+    {
+      "test": "first-full-gate",
+      "commit": "b3a2599f8fcb8cff36ffba1f4aca0424f9e39442",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "node docs/scripts/release-check.mjs --profile full --out full-gate"
+      ],
+      "exit_code": 1,
+      "status": "FAIL",
+      "log": "full-gate.txt",
+      "defects": [],
+      "fixes": [],
+      "log_sha256": "616b6f4c589369c02810c96dc009e29ab0e60031bd1419541567ae876f25a8ec"
+    },
+    {
+      "test": "second-full-gate",
+      "commit": "629befa2e7d89345a917108561a1a303cfaac1c1",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "node docs/scripts/release-check.mjs --profile full --out full-gate-final"
+      ],
+      "exit_code": 1,
+      "status": "FAIL",
+      "log": "full-gate-final.txt",
+      "defects": [],
+      "fixes": [],
+      "log_sha256": "604b2bd638b67a06b8262e584410657c07e1b235280b8d0fbdcc494cde0ef67f"
+    },
+    {
+      "schema_version": 1,
+      "test": "fmt-final",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "dirty": false,
+      "environment": {
+        "os": "linux",
+        "arch": "x64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "node",
+        "docs/scripts/release-check.mjs",
+        "--fmt-check"
+      ],
+      "started_at_utc": "2026-11-19T04:11:14.219Z",
+      "finished_at_utc": "2026-11-19T04:11:15.138Z",
+      "exit_code": 0,
+      "status": "PASS",
+      "signal": null,
+      "log": "fmt-final.txt",
+      "log_sha256": "d44e2d2eb5cdb90a623a5bf8db0db34a4b301e2f0c5ebc9f2506703c95e27aec",
+      "defects": [],
+      "fixes": []
+    },
+    {
+      "schema_version": 1,
+      "test": "node-final",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "dirty": false,
+      "environment": {
+        "os": "linux",
+        "arch": "x64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "node",
+        "--test",
+        "--test-reporter=tap",
+        "docs/scripts/baseline-run.test.mjs",
+        "docs/scripts/admin-ui-ownership.test.mjs",
+        "docs/scripts/widget-isolation.test.mjs",
+        "docs/scripts/image-dimensions.test.mjs",
+        "docs/scripts/baseline-evidence.test.mjs"
+      ],
+      "started_at_utc": "2026-11-19T04:11:15.341Z",
+      "finished_at_utc": "2026-11-19T04:11:16.931Z",
+      "exit_code": 0,
+      "status": "PASS",
+      "signal": null,
+      "log": "node-final.txt",
+      "log_sha256": "85726f0770d1f2615f8b9a18fb9bcd81b03afdd41316559d38e033d4fa632fbe",
+      "defects": [],
+      "fixes": []
+    },
+    {
+      "schema_version": 1,
+      "test": "classifier-final",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "dirty": false,
+      "environment": {
+        "os": "linux",
+        "arch": "x64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "bash",
+        "docs/scripts/stage5b.sh",
+        "--selftest-classify"
+      ],
+      "started_at_utc": "2026-11-19T04:16:29.925Z",
+      "finished_at_utc": "2026-11-19T04:16:30.427Z",
+      "exit_code": 0,
+      "status": "PASS",
+      "signal": null,
+      "log": "classifier-final.txt",
+      "log_sha256": "97ce994651d9fcfbc7d2b57c77dfc90e0a4dd846ca842e5908082eae095460dc",
+      "defects": [],
+      "fixes": []
+    },
+    {
+      "schema_version": 1,
+      "test": "browser-manifest-final",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "dirty": false,
+      "environment": {
+        "os": "linux",
+        "arch": "x64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "node",
+        "docs/scripts/release-check.mjs",
+        "--check-browser-manifest",
+        "docs/scripts/browser/cases.mjs",
+        "docs/scripts/browser/widget_browser.test.mjs",
+        "/data/workspace/epocha-governance-20261119/evidence/d-widget-browser-final.log"
+      ],
+      "started_at_utc": "2026-11-19T04:16:30.732Z",
+      "finished_at_utc": "2026-11-19T04:16:31.720Z",
+      "exit_code": 0,
+      "status": "PASS",
+      "signal": null,
+      "log": "browser-manifest-final.txt",
+      "log_sha256": "215d929e29dbdf08cbd88b034560bf8d5768bdaf9962d9ea60497237c8863954",
+      "defects": [],
+      "fixes": []
+    },
+    {
+      "schema_version": 1,
+      "test": "full-publish-final",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "dirty": false,
+      "environment": {
+        "os": "linux",
+        "arch": "x64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "node",
+        "docs/scripts/release-check.mjs",
+        "--profile",
+        "full",
+        "--out",
+        "/data/workspace/epocha-governance-20261119/full-publish-final"
+      ],
+      "started_at_utc": "2026-11-19T04:11:17.142Z",
+      "finished_at_utc": "2026-11-19T04:20:52.216Z",
+      "exit_code": 3,
+      "status": "BLOCKED",
+      "reason": "command reports incomplete conditions; inspect raw log",
+      "signal": null,
+      "log": "full-publish-final.txt",
+      "log_sha256": "a8af0474efbefe19fa1ac8d3ee46c9c211efc1fbd1bd2292f28d7e9bca7c07fb",
+      "defects": [],
+      "fixes": []
+    },
+    {
+      "test": "native-linux-arm64-full",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "NOT_RUN"
+      ],
+      "exit_code": null,
+      "status": "BLOCKED",
+      "log": null,
+      "reason": "Provided Linux host is amd64; no native supported architecture available",
+      "defects": [],
+      "fixes": [],
+      "log_sha256": null
+    },
+    {
+      "test": "dedicated-docker-container-gates",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "NOT_RUN"
+      ],
+      "exit_code": null,
+      "status": "BLOCKED",
+      "log": null,
+      "reason": "Existing shared Docker daemon contains user assets; no cleanup or production changes authorized",
+      "defects": [],
+      "fixes": [],
+      "log_sha256": null
+    },
+    {
+      "test": "human-readability-and-accessibility",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "NOT_RUN"
+      ],
+      "exit_code": null,
+      "status": "BLOCKED",
+      "log": null,
+      "reason": "No real participant, assistive-technology or real-device evidence was supplied",
+      "defects": [],
+      "fixes": [],
+      "log_sha256": null
+    },
+    {
+      "test": "full.engineering-rules",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "/data/home/node24bin/node",
+        "--test",
+        "--test-reporter=tap",
+        "docs/scripts/release-check.test.mjs",
+        "docs/scripts/release_integration_regression.test.mjs"
+      ],
+      "exit_code": 0,
+      "status": "PASS",
+      "log": "final-engineering-rules.txt",
+      "defects": [],
+      "fixes": [],
+      "log_sha256": "ac2c30c403f143af1b48d8884da9d1298e73c26ccb1da3b9f60679e888183d7e"
+    },
+    {
+      "test": "full.widget-regressions",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "/data/home/node24bin/node",
+        "--test",
+        "--test-reporter=tap",
+        "docs/scripts/browser/pow_vectors.test.mjs",
+        "docs/scripts/browser/widget_lifecycle.test.mjs"
+      ],
+      "exit_code": 0,
+      "status": "PASS",
+      "log": "final-widget-regressions.txt",
+      "defects": [],
+      "fixes": [],
+      "log_sha256": "77caaf96893e170db51c228fed243ba4358538b386d27148f73ec6f408e8c2a9"
+    },
+    {
+      "test": "full.adminui-regressions",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "/data/home/node24bin/node",
+        "--test",
+        "--test-reporter=tap",
+        "docs/scripts/browser/adminui_lifecycle.test.mjs"
+      ],
+      "exit_code": 0,
+      "status": "PASS",
+      "log": "final-adminui-regressions.txt",
+      "defects": [],
+      "fixes": [],
+      "log_sha256": "d60d86640a7ac92acf971818fae73ea217b03f78b8c5b888c4a2d32da8a87859"
+    },
+    {
+      "test": "full.tooling-regressions",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "/data/home/node24bin/node",
+        "--test",
+        "--test-reporter=tap",
+        "docs/scripts/build-receipt.test.mjs",
+        "docs/scripts/soak-evidence.test.mjs",
+        "docs/scripts/preflight_regression.test.mjs",
+        "docs/scripts/manual-evidence.test.mjs",
+        "docs/scripts/stage5a_rules.test.mjs",
+        "docs/scripts/admin-ui-ownership.test.mjs",
+        "docs/scripts/image-dimensions.test.mjs",
+        "docs/scripts/widget-isolation.test.mjs",
+        "docs/scripts/baseline-evidence.test.mjs",
+        "docs/scripts/baseline-run.test.mjs"
+      ],
+      "exit_code": 0,
+      "status": "PASS",
+      "log": "final-tooling-regressions.txt",
+      "defects": [],
+      "fixes": [],
+      "log_sha256": "a2b7aedc8424b92cb6127bf66fc6747846813cff0a2f1c5b19cc65a8402c5b99"
+    },
+    {
+      "test": "full.key-permission-and-rerun",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "/data/home/node24bin/node",
+        "--test",
+        "--test-reporter=tap",
+        "docs/scripts/release-check.test.mjs"
+      ],
+      "exit_code": 0,
+      "status": "PASS",
+      "log": "final-key-permission-and-rerun.txt",
+      "defects": [],
+      "fixes": [],
+      "log_sha256": "63c70f6ee40647719cd5ff236604555f71ac4876168c8d144a2ec8b71c573709"
+    },
+    {
+      "test": "full.go-test",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "go",
+        "test",
+        "-json",
+        "-count=1",
+        "./..."
+      ],
+      "exit_code": 0,
+      "status": "PASS",
+      "log": "final-go-test.txt",
+      "reason": "registered future Go placeholders are recorded separately and do not count as PASS",
+      "defects": [],
+      "fixes": [],
+      "log_sha256": "cd96361d340ca15a529aa9010b349a1480a639071c97cf90eadbc53db8fa9403"
+    },
+    {
+      "test": "full.go-race",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "go",
+        "test",
+        "-race",
+        "-json",
+        "-count=1",
+        "./..."
+      ],
+      "exit_code": 0,
+      "status": "PASS",
+      "log": "final-go-race.txt",
+      "reason": "registered future Go placeholders are recorded separately and do not count as PASS",
+      "defects": [],
+      "fixes": [],
+      "log_sha256": "8ecbc69784546bd89bf66e734cff9576b24cef12f7088d4f805c38bb8251260d"
+    },
+    {
+      "test": "full.static-build",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "make",
+        "build",
+        "build-ops"
+      ],
+      "exit_code": 0,
+      "status": "PASS",
+      "log": "final-static-build.txt",
+      "defects": [],
+      "fixes": [],
+      "log_sha256": "e31d12e636b496fe7ccd27561d2734162b7648aa878a7ec9246ed85565298822"
+    },
+    {
+      "test": "full.secret-scan",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "make",
+        "secret-scan"
+      ],
+      "exit_code": 0,
+      "status": "PASS",
+      "log": "final-secret-scan.txt",
+      "defects": [],
+      "fixes": [],
+      "log_sha256": "4d2057bdeb57b1e5000d1d1deefb4506a85e7c4b032169db43c1ecb4a8f0bd4d"
+    },
+    {
+      "test": "full.manual-stage4a.human-readability",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "/data/home/node24bin/node",
+        "docs/scripts/manual-evidence.mjs",
+        "--check",
+        "stage4a.human-readability",
+        "--root",
+        "/data/workspace/epocha-governance-20261119/source/"
+      ],
+      "exit_code": 3,
+      "status": "NOT_RUN",
+      "log": "final-manual-stage4a.human-readability.txt",
+      "reason": "manual-evidence-not-provided",
+      "defects": [],
+      "fixes": [],
+      "log_sha256": "5240dffb1b9e0fd98e149d709304bdf706900e979b8e300bd484c7df36860342"
+    },
+    {
+      "test": "full.manual-stage4b.human-readability",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "/data/home/node24bin/node",
+        "docs/scripts/manual-evidence.mjs",
+        "--check",
+        "stage4b.human-readability",
+        "--root",
+        "/data/workspace/epocha-governance-20261119/source/"
+      ],
+      "exit_code": 3,
+      "status": "NOT_RUN",
+      "log": "final-manual-stage4b.human-readability.txt",
+      "reason": "manual-evidence-not-provided",
+      "defects": [],
+      "fixes": [],
+      "log_sha256": "e0d4cf21812df754e2109ca75b679cdb2d8e188a7bee7a724575082a8aa40ba2"
+    },
+    {
+      "test": "full.manual-adminui.http-errors",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "/data/home/node24bin/node",
+        "docs/scripts/manual-evidence.mjs",
+        "--check",
+        "adminui.http-errors",
+        "--root",
+        "/data/workspace/epocha-governance-20261119/source/"
+      ],
+      "exit_code": 3,
+      "status": "NOT_RUN",
+      "log": "final-manual-adminui.http-errors.txt",
+      "reason": "manual-evidence-not-provided",
+      "defects": [],
+      "fixes": [],
+      "log_sha256": "daf9df85c3925878ed968c54eba84e5a34324d1f36db7af0808a93e753dfb4be"
+    },
+    {
+      "test": "full.manual-adminui.clipboard-write",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "/data/home/node24bin/node",
+        "docs/scripts/manual-evidence.mjs",
+        "--check",
+        "adminui.clipboard-write",
+        "--root",
+        "/data/workspace/epocha-governance-20261119/source/"
+      ],
+      "exit_code": 3,
+      "status": "NOT_RUN",
+      "log": "final-manual-adminui.clipboard-write.txt",
+      "reason": "manual-evidence-not-provided",
+      "defects": [],
+      "fixes": [],
+      "log_sha256": "33d873a0f4aed37f7d53a32500fc2e9aa8ec9e31c79200fa43433f447b4892f4"
+    },
+    {
+      "test": "full.manual-adminui.real-mobile",
+      "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+      "environment": {
+        "os": "linux",
+        "arch": "amd64",
+        "go": "go1.27.3",
+        "node": "v24.22.3",
+        "firefox": "153.6.0esr",
+        "uid_gid": "1000:1000",
+        "formal_architecture": false
+      },
+      "command": [
+        "/data/home/node24bin/node",
+        "docs/scripts/manual-evidence.mjs",
+        "--check",
+        "adminui.real-mobile",
+        "--root",
+        "/data/workspace/epocha-governance-20261119/source/"
+      ],
+      "exit_code": 3,
+      "status": "NOT_RUN",
+      "log": "final-manual-adminui.real-mobile.txt",
+      "reason": "manual-evidence-not-provided",
+      "defects": [],
+      "fixes": [],
+      "log_sha256": "9f40adbaeed6232deeedcc3fe355bdedec441a3c3cbb7beb739188c5480eba73"
+    }
+  ],
+  "limitations": [
+    "SHA-256 is byte integrity, not a signature or provenance authentication.",
+    "Historical .receipt.txt files are retained exactly; command parameters must also be checked against raw logs and this task transcript.",
+    "Go race includes two named future-stage skips; they are not counted as executed passes.",
+    "Browser binary was built at e70a376; production source was unchanged by later browser-test fixes."
+  ]
+}

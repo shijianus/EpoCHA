@@ -1,0 +1,3 @@
+commit=629befa2e7d89345a917108561a1a303cfaac1c1
+command=go test -count=1 -v -run lock-and-real-process-matrix ./internal/store ./cmd/ops ./cmd/server
+exit_code=0

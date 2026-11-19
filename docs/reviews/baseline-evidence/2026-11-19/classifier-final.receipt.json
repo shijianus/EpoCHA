@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "test": "classifier-final",
+  "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+  "dirty": false,
+  "environment": {
+    "os": "linux",
+    "arch": "x64",
+    "node": "v24.22.3"
+  },
+  "command": [
+    "bash",
+    "docs/scripts/stage5b.sh",
+    "--selftest-classify"
+  ],
+  "started_at_utc": "2026-11-19T04:16:29.925Z",
+  "finished_at_utc": "2026-11-19T04:16:30.427Z",
+  "exit_code": 0,
+  "status": "PASS",
+  "signal": null,
+  "log": "classifier-final.log",
+  "log_sha256": "97ce994651d9fcfbc7d2b57c77dfc90e0a4dd846ca842e5908082eae095460dc"
+}

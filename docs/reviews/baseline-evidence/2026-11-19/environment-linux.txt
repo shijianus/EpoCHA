@@ -1,0 +1,71 @@
+command=date -u +%Y-%m-%dT%H:%M:%SZ; uname -a; id; GOTOOLCHAIN=local /data/home/go1.27.3/bin/go version; /data/home/node24bin/node --version; docker version; docker compose version; firefox --version; df -h /data /tmp /var/tmp /; df -hi /data /tmp /var/tmp; free -m; git -C /data/workspace/epocha-governance-20261119/source rev-parse HEAD; git -C /data/workspace/epocha-governance-20261119/source status --porcelain; docker ps -a --format '{{.Names}} {{.Status}}'; docker volume ls --format '{{.Name}}'
+exit_code=0
+2026-11-19T04:20:27Z
+Linux instabox-trustip 6.18.60-instabox-android #1 SMP PREEMPT_DYNAMIC 2026-10-30 00:00:00 UTC x86_64 GNU/Linux
+uid=1000(user) gid=1000(user) groups=1000(user),27(sudo),991(docker)
+go version go1.27.3 linux/amd64
+v24.22.3
+Client: Docker Engine - Community
+ Version:           29.8.2
+ API version:       1.56
+ Go version:        go1.26.8
+ Git commit:        7fc2dff
+ Built:             Wed Sep 30 19:33:33 2026
+ OS/Arch:           linux/amd64
+ Context:           default
+
+Server: Docker Engine - Community
+ Engine:
+  Version:          29.8.2
+  API version:      1.56 (minimum version 1.40)
+  Go version:       go1.26.8
+  Git commit:       8af9fe3
+  Built:            Wed Sep 30 19:33:33 2026
+  OS/Arch:          linux/amd64
+  Experimental:     false
+ containerd:
+  Version:          v2.3.6
+  GitCommit:        ee2735368117d2eb259779949d5e75cdafec9761
+ runc:
+  Version:          1.5.1
+  GitCommit:        v1.5.1-0-g8f2685a4
+ docker-init:
+  Version:          0.19.0
+  GitCommit:        de40ad0
+Docker Compose version v5.6.0
+Mozilla Firefox 153.6.0esr
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/vdb         20G   13G  6.9G  65% /data
+tmpfs           2.0G  197M  1.8G  10% /tmp
+/dev/root        24G   23G     0 100% /
+/dev/root        24G   23G     0 100% /
+Filesystem     Inodes IUsed IFree IUse% Mounted on
+/dev/vdb         1.3M  242K  1.1M   19% /data
+tmpfs            1.0M  7.4K 1017K    1% /tmp
+/dev/root        1.5M  680K  857K   45% /
+               total        used        free      shared  buff/cache   available
+Mem:            7964        2608         877         158        4932        5355
+Swap:           4095         431        3664
+3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c
+epocha-epocha-1 Restarting (1) 22 seconds ago
+trustip-delivery-audit Up 2 weeks (healthy)
+trustip-audit-app Up 2 weeks (healthy)
+trustip-instabox-verification-frontend-1 Up 2 weeks (healthy)
+trustip-instabox-verification-backend-1 Up 2 weeks (healthy)
+instabox-android Up 2 weeks
+instabox-android-data
+trustip-delivery-audit-20261103_trustip-as-org
+trustip-delivery-audit-20261103_trustip-as-rel
+trustip-delivery-audit-20261103_trustip-maxmind
+trustip-delivery-audit-20261103_trustip-oui
+trustip-delivery-audit-20261103_trustip-peeringdb
+trustip-independent-audit_trustip-as-org
+trustip-independent-audit_trustip-as-rel
+trustip-independent-audit_trustip-maxmind
+trustip-independent-audit_trustip-oui
+trustip-independent-audit_trustip-peeringdb
+trustip-instabox-verification_asorg
+trustip-instabox-verification_asrel
+trustip-instabox-verification_maxmind
+trustip-instabox-verification_oui
+trustip-instabox-verification_peeringdb

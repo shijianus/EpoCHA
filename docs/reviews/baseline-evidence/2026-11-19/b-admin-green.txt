@@ -1,0 +1,186 @@
+[adminui] 第 0 步：端口空闲检查（连到遗留进程会让整轮结论静默失真）
+[adminui] 第 1 步：构建
+[adminui] PASS 1: 服务二进制构建（13152519 字节，临时目录内）
+[adminui] 第 2 步：管理面与页面包的单元测试（-race，只跑本轮涉及的三个包）
+[adminui] PASS 2: go test -race ./web/adminui ./internal/admin ./cmd/server
+[adminui] 第 3 步：起一套隔离实例（空库、运行时随机凭据、两个 loopback 监听器）
+[adminui] 本轮服务已就绪（pid=4087566 readyz=200 admin=200）
+[adminui] 第 4 步：挂载边界（公共监听器上不得有管理页面与管理 API 的路由）
+[adminui]   公共端口 /admin → 404
+[adminui]   公共端口 /admin/ → 404
+[adminui]   公共端口 /admin/app.js → 404
+[adminui]   公共端口 /admin/app.css → 404
+[adminui]   公共端口 /api/admin/sites → 404
+[adminui]   公共端口 /api/admin/whoami → 404
+[adminui]   公共端口 /api/admin/audit → 404
+[adminui] PASS 3: 公共监听器不提供管理页面与管理 API
+[adminui] 第 5 步：管理监听器上的静态资源与安全响应头
+[adminui] PASS 4: 管理页面的 CSP/禁缓存/nosniff/DENY/无 CORS 全部就位
+[adminui] PASS 5: 页面 Content-Type=text/html;
+[adminui] PASS 6: 脚本 Content-Type=text/javascript;（配 nosniff 可执行）
+[adminui] 第 6 步：页面壳未登录可取，管理 API 仍逐个要凭据
+[adminui] PASS 7: 未鉴权可取页面壳（200，纯静态、不含数据）
+[adminui] PASS 8: 未鉴权 /api/admin/whoami = 401（挂页面没有变成鉴权旁路）
+[adminui] PASS 9: 错误凭据 /api/admin/sites = 401
+[adminui] PASS 10: 401 响应不回显凭据
+[adminui] 第 7 步：静态资源里不得有凭据形状（空输入不算通过：先确认取到了字节）
+[adminui] PASS 11: 三个静态资源的源代码里没有管理密钥/站点 secret 形状（且都非空）
+[adminui] 第 8 步：真实浏览器交互验收（Firefox BiDi + node --test，零第三方依赖）
+[adminui]   Firefox BiDi：WebDriver BiDi listening on ws://127.0.0.1:9344
+TAP version 13
+# Subtest: 错误 key 登录失败：显示凭据无效、留在登录面、输入框不留原文
+ok 1 - 错误 key 登录失败：显示凭据无效、留在登录面、输入框不留原文
+  ---
+  duration_ms: 12493.035795
+  type: 'test'
+  ...
+# Subtest: 正确 key 登录：显示非敏感 key_id，凭据不进任何浏览器存储
+ok 2 - 正确 key 登录：显示非敏感 key_id，凭据不进任何浏览器存储
+  ---
+  duration_ms: 1608.809181
+  type: 'test'
+  ...
+# Subtest: 创建站点：真实 201、一次性 secret 出现在结果面板、验证模式与题型按选择生效
+ok 3 - 创建站点：真实 201、一次性 secret 出现在结果面板、验证模式与题型按选择生效
+  ---
+  duration_ms: 1293.564985
+  type: 'test'
+  ...
+# Subtest: 进入详情不再取回 secret：页面与只读 API 两侧都扫过
+ok 4 - 进入详情不再取回 secret：页面与只读 API 两侧都扫过
+  ---
+  duration_ms: 295.423822
+  type: 'test'
+  ...
+# Subtest: 修改策略与 Origin：保存、重新读取一致，越界值被服务端拒
+ok 5 - 修改策略与 Origin：保存、重新读取一致，越界值被服务端拒
+  ---
+  duration_ms: 3716.667178
+  type: 'test'
+  ...
+# Subtest: 停用与启用：确认框展示名称与 site_key，状态与版本是服务端事实
+ok 6 - 停用与启用：确认框展示名称与 site_key，状态与版本是服务端事实
+  ---
+  duration_ms: 1087.641978
+  type: 'test'
+  ...
+# Subtest: 题型面板显示实验性与生产就绪的真实结论，页面不请求任何外部源
+ok 7 - 题型面板显示实验性与生产就绪的真实结论，页面不请求任何外部源
+  ---
+  duration_ms: 1205.853373
+  type: 'test'
+  ...
+# Subtest: 退出：页面回到登录面且无法再读管理数据（凭据是页面丢的，不是服务端失效）
+ok 8 - 退出：页面回到登录面且无法再读管理数据（凭据是页面丢的，不是服务端失效）
+  ---
+  duration_ms: 191.791077
+  type: 'test'
+  ...
+# Subtest: 375×667：视口真的设成 375，登录、创建与保存控件都能命中
+not ok 9 - 375×667：视口真的设成 375，登录、创建与保存控件都能命中
+  ---
+  duration_ms: 16595.10527
+  type: 'test'
+  location: '/data/workspace/epocha-governance-20261119/source/docs/scripts/browser/adminui_browser.test.mjs:568:1'
+  failureType: 'testCodeFailure'
+  error: '等待条件超时：窄屏创建结果'
+  code: 'ERR_TEST_FAILURE'
+  stack: |-
+    BiDi.waitUntil (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/bidi.mjs:108:46)
+    process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    async TestContext.<anonymous> (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/adminui_browser.test.mjs:606:3)
+    async Test.run (node:internal/test_runner/test:1409:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:974:7)
+  ...
+# Subtest: 连续错误 key 触发 429 时不说成密码错误；服务真不可达时说明是连接问题
+ok 10 - 连续错误 key 触发 429 时不说成密码错误；服务真不可达时说明是连接问题
+  ---
+  duration_ms: 6506.791194
+  type: 'test'
+  ...
+1..10
+# tests 10
+# suites 0
+# pass 9
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 65422.482303
+ok 4 - 进入详情不再取回 secret：页面与只读 API 两侧都扫过
+  ---
+  duration_ms: 295.423822
+  type: 'test'
+  ...
+# Subtest: 修改策略与 Origin：保存、重新读取一致，越界值被服务端拒
+ok 5 - 修改策略与 Origin：保存、重新读取一致，越界值被服务端拒
+  ---
+  duration_ms: 3716.667178
+  type: 'test'
+  ...
+# Subtest: 停用与启用：确认框展示名称与 site_key，状态与版本是服务端事实
+ok 6 - 停用与启用：确认框展示名称与 site_key，状态与版本是服务端事实
+  ---
+  duration_ms: 1087.641978
+  type: 'test'
+  ...
+# Subtest: 题型面板显示实验性与生产就绪的真实结论，页面不请求任何外部源
+ok 7 - 题型面板显示实验性与生产就绪的真实结论，页面不请求任何外部源
+  ---
+  duration_ms: 1205.853373
+  type: 'test'
+  ...
+# Subtest: 退出：页面回到登录面且无法再读管理数据（凭据是页面丢的，不是服务端失效）
+ok 8 - 退出：页面回到登录面且无法再读管理数据（凭据是页面丢的，不是服务端失效）
+  ---
+  duration_ms: 191.791077
+  type: 'test'
+  ...
+# Subtest: 375×667：视口真的设成 375，登录、创建与保存控件都能命中
+not ok 9 - 375×667：视口真的设成 375，登录、创建与保存控件都能命中
+  ---
+  duration_ms: 16595.10527
+  type: 'test'
+  location: '/data/workspace/epocha-governance-20261119/source/docs/scripts/browser/adminui_browser.test.mjs:568:1'
+  failureType: 'testCodeFailure'
+  error: '等待条件超时：窄屏创建结果'
+  code: 'ERR_TEST_FAILURE'
+  stack: |-
+    BiDi.waitUntil (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/bidi.mjs:108:46)
+    process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    async TestContext.<anonymous> (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/adminui_browser.test.mjs:606:3)
+    async Test.run (node:internal/test_runner/test:1409:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:974:7)
+  ...
+# Subtest: 连续错误 key 触发 429 时不说成密码错误；服务真不可达时说明是连接问题
+ok 10 - 连续错误 key 触发 429 时不说成密码错误；服务真不可达时说明是连接问题
+  ---
+  duration_ms: 6506.791194
+  type: 'test'
+  ...
+1..10
+# tests 10
+# suites 0
+# pass 9
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 65422.482303
+[adminui] FAIL 12: 浏览器交互验收未通过（node --test 退出码 1）
+[release-check] FAIL: TAP results contradict counts or contain failed cases
+[adminui] FAIL 13: 管理台浏览器 manifest 对账失败（退出码 1）
+[adminui] 第 9 步：真实写入一轮，确认只读接口不回显 secret
+[adminui] PASS 14: 六个只读接口都真实读到 200 且都不回显 secret（扫过 6 个）
+[adminui] PASS 15: 名称与策略改动落库并可从只读接口复读（复读是 200 的真实站点）
+[adminui] PASS 16: 名称与越界值由服务端拒绝（400），且被拒的写入没有落库
+[adminui] PASS 17: 停用/启用走真实端点且状态可见
+[adminui] 第 10 步：人工验收证据（缺失时如实登记 NOT_RUN）
+{"status":"NOT_RUN","exit_code":3,"check_id":"adminui.http-errors","reason":"manual-evidence-not-provided"}
+[adminui] NOT_RUN 18: 403 与 5xx 两支错误文案的人工交互检查（缺少本源码快照的人工证据：adminui.http-errors）
+{"status":"NOT_RUN","exit_code":3,"check_id":"adminui.clipboard-write","reason":"manual-evidence-not-provided"}
+[adminui] NOT_RUN 19: 剪贴板真实写入（回落选中不等于写入成功）（缺少本源码快照的人工证据：adminui.clipboard-write）
+{"status":"NOT_RUN","exit_code":3,"check_id":"adminui.real-mobile","reason":"manual-evidence-not-provided"}
+[adminui] NOT_RUN 20: 真机移动端（BiDi 窄视口不替代真实设备）（缺少本源码快照的人工证据：adminui.real-mobile）
+[adminui] 结论
+[adminui] RESULT=FAIL pass=15 fail=2 blocked=0 not_run=3

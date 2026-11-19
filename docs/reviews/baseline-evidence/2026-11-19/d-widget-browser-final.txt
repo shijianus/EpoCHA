@@ -1,0 +1,186 @@
+TAP version 13
+#   [实测] 浏览器 PoW（bits=12）：点击提交→verified 墙钟 = 2107 ms；进度上报 0 次（0 次属预期：求解快于 5 万次的进度节流阈值），解析出的耗时 = null ms
+# Subtest: 闭环：显示图片 → 输入 → 浏览器内 PoW → redeem → 业务表单 → 服务端写入
+ok 1 - 闭环：显示图片 → 输入 → 浏览器内 PoW → redeem → 业务表单 → 服务端写入
+  ---
+  duration_ms: 18492.832557
+  type: 'test'
+  ...
+# Subtest: 答错即终结：同一题不能重试；换题拿到的是另一道题
+ok 2 - 答错即终结：同一题不能重试；换题拿到的是另一道题
+  ---
+  duration_ms: 6101.230184
+  type: 'test'
+  ...
+# Subtest: 一次性：同一个 token 重复提交必然被服务端拒绝
+ok 3 - 一次性：同一个 token 重复提交必然被服务端拒绝
+  ---
+  duration_ms: 4693.733208
+  type: 'test'
+  ...
+# Subtest: 多实例隔离 + 隐藏字段：各自领题、各自写字段、销毁不串台
+ok 4 - 多实例隔离 + 隐藏字段：各自领题、各自写字段、销毁不串台
+  ---
+  duration_ms: 5107.119523
+  type: 'test'
+  ...
+# Subtest: 晚到的旧响应不能覆盖新题（刷新换代）
+ok 5 - 晚到的旧响应不能覆盖新题（刷新换代）
+  ---
+  duration_ms: 7792.590883
+  type: 'test'
+  ...
+# Subtest: reset 与 destroy：清空 token/输入、移除 DOM 与隐藏字段、注销注册表
+ok 6 - reset 与 destroy：清空 token/输入、移除 DOM 与隐藏字段、注销注册表
+  ---
+  duration_ms: 6003.108843
+  type: 'test'
+  ...
+# Subtest: 在途 reset：/api/challenge 晚到的真实响应不恢复题目/token/成功通知
+ok 7 - 在途 reset：/api/challenge 晚到的真实响应不恢复题目/token/成功通知
+  ---
+  duration_ms: 6508.798996
+  type: 'test'
+  ...
+# Subtest: 在途 reset：/api/redeem 晚到的真实响应不恢复题目/token/成功通知
+ok 8 - 在途 reset：/api/redeem 晚到的真实响应不恢复题目/token/成功通知
+  ---
+  duration_ms: 9203.899673
+  type: 'test'
+  ...
+# Subtest: 兑换 HTTP 挂起：超时可换题，迟到的真实成功不能复活 token，也不自动重兑
+ok 9 - 兑换 HTTP 挂起：超时可换题，迟到的真实成功不能复活 token，也不自动重兑
+  ---
+  duration_ms: 12380.927466
+  type: 'test'
+  ...
+# Subtest: 计算超时是真实约束：预算到点即明确失败，不去兑换
+ok 10 - 计算超时是真实约束：预算到点即明确失败，不去兑换
+  ---
+  duration_ms: 7916.668832
+  type: 'test'
+  ...
+#   [实测] bits=20 浏览器侧 PoW + redeem 墙钟 = 3997 ms（同一台机器 bits=12 的对照见闭环用例）
+# Subtest: 高难度站点：取消正在进行的计算不会晚到生效
+ok 11 - 高难度站点：取消正在进行的计算不会晚到生效
+  ---
+  duration_ms: 15095.875888
+  type: 'test'
+  ...
+# Subtest: CSP 禁止 Worker：明确失败，绝不假装通过
+ok 12 - CSP 禁止 Worker：明确失败，绝不假装通过
+  ---
+  duration_ms: 4391.000651
+  type: 'test'
+  ...
+# Subtest: 键盘可完成：Tab 到达输入框与按钮，Enter 提交
+ok 13 - 键盘可完成：Tab 到达输入框与按钮，Enter 提交
+  ---
+  duration_ms: 4109.088699
+  type: 'test'
+  ...
+# Subtest: 窄屏 375×667：视口真的设成 375，布局不溢出、图片比例正确、控件全部可命中
+ok 14 - 窄屏 375×667：视口真的设成 375，布局不溢出、图片比例正确、控件全部可命中
+  ---
+  duration_ms: 3687.130317
+  type: 'test'
+  ...
+# Subtest: 窄屏 375：真实鼠标点击 + 键盘输入走完验证与业务提交
+ok 15 - 窄屏 375：真实鼠标点击 + 键盘输入走完验证与业务提交
+  ---
+  duration_ms: 5015.202367
+  type: 'test'
+  ...
+# Subtest: 窄屏 375：错误文案不撑破布局（CSP 禁 Worker 的档位）
+ok 16 - 窄屏 375：错误文案不撑破布局（CSP 禁 Worker 的档位）
+  ---
+  duration_ms: 4296.520903
+  type: 'test'
+  ...
+# Subtest: 窄屏 414×896（较宽手机档）回归：无横向溢出、控件可命中、容器不吃满超宽
+ok 17 - 窄屏 414×896（较宽手机档）回归：无横向溢出、控件可命中、容器不吃满超宽
+  ---
+  duration_ms: 3900.011969
+  type: 'test'
+  ...
+# Subtest: 文档最小示例 fixture：deferred 脚本顺序确定，init 里 EpoCHA 已定义，字段属于目标 form
+ok 18 - 文档最小示例 fixture：deferred 脚本顺序确定，init 里 EpoCHA 已定义，字段属于目标 form
+  ---
+  duration_ms: 3008.125612
+  type: 'test'
+  ...
+# Subtest: 文档最小示例 fixture：FormData 带上 token，原生 form POST 真写入；没验证时同一按钮被服务端拒
+ok 19 - 文档最小示例 fixture：FormData 带上 token，原生 form POST 真写入；没验证时同一按钮被服务端拒
+  ---
+  duration_ms: 7983.6663
+  type: 'test'
+  ...
+# Subtest: 隐藏字段的三种归属：form 外无关联即抛错且不留孤儿字段、显式 form 关联可用、fieldName:'' 不建字段
+ok 20 - 隐藏字段的三种归属：form 外无关联即抛错且不留孤儿字段、显式 form 关联可用、fieldName:'' 不建字段
+  ---
+  duration_ms: 4092.983248
+  type: 'test'
+  ...
+# Subtest: fixture：reset 从 FormData 里拿掉 token，destroy 移除字段本身
+ok 21 - fixture：reset 从 FormData 里拿掉 token，destroy 移除字段本身
+  ---
+  duration_ms: 6117.455895
+  type: 'test'
+  ...
+# Subtest: 方案 B：同源 worker 文件路径可用（该页 CSP 禁 blob:，能过就说明确实走的是文件）
+ok 22 - 方案 B：同源 worker 文件路径可用（该页 CSP 禁 blob:，能过就说明确实走的是文件）
+  ---
+  duration_ms: 8289.918619
+  type: 'test'
+  ...
+# Subtest: 页面与组件的请求面：只打 /api/challenge 与 /api/redeem，不带凭据
+ok 23 - 页面与组件的请求面：只打 /api/challenge 与 /api/redeem，不带凭据
+  ---
+  duration_ms: 7500.380705
+  type: 'test'
+  ...
+# Subtest: 短 TTL 延迟（真实浏览器）：客户端保守扣除兑换耗时，迟到成功不发放过期 token
+ok 24 - 短 TTL 延迟（真实浏览器）：客户端保守扣除兑换耗时，迟到成功不发放过期 token
+  ---
+  duration_ms: 13411.344362
+  type: 'test'
+  ...
+# Subtest: 图片解码失败（真实浏览器）：进入 error、清理旧题且零兑换请求
+ok 25 - 图片解码失败（真实浏览器）：进入 error、清理旧题且零兑换请求
+  ---
+  duration_ms: 8291.899461
+  type: 'test'
+  ...
+# Subtest: 答案框 label 绑定（真实浏览器）：点击标签聚焦输入框且可访问名称正确
+ok 26 - 答案框 label 绑定（真实浏览器）：点击标签聚焦输入框且可访问名称正确
+  ---
+  duration_ms: 5898.90997
+  type: 'test'
+  ...
+# Subtest: reset 清旧图并禁用提交（真实浏览器）：只有刷新才能恢复作答
+ok 27 - reset 清旧图并禁用提交（真实浏览器）：只有刷新才能恢复作答
+  ---
+  duration_ms: 7008.749103
+  type: 'test'
+  ...
+# Subtest: maxAutoRetry=0（真实浏览器）：challenge-unavailable 不自动重试
+ok 28 - maxAutoRetry=0（真实浏览器）：challenge-unavailable 不自动重试
+  ---
+  duration_ms: 7696.848045
+  type: 'test'
+  ...
+# Subtest: 过期时清空 token 与隐藏字段（客户端倒计时跟着服务端的 response_ttl）
+ok 29 - 过期时清空 token 与隐藏字段（客户端倒计时跟着服务端的 response_ttl）
+  ---
+  duration_ms: 8806.345249
+  type: 'test'
+  ...
+1..29
+# tests 29
+# suites 0
+# pass 29
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 233406.563995

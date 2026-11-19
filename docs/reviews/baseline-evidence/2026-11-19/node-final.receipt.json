@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "test": "node-final",
+  "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+  "dirty": false,
+  "environment": {
+    "os": "linux",
+    "arch": "x64",
+    "node": "v24.22.3"
+  },
+  "command": [
+    "node",
+    "--test",
+    "--test-reporter=tap",
+    "docs/scripts/baseline-run.test.mjs",
+    "docs/scripts/admin-ui-ownership.test.mjs",
+    "docs/scripts/widget-isolation.test.mjs",
+    "docs/scripts/image-dimensions.test.mjs",
+    "docs/scripts/baseline-evidence.test.mjs"
+  ],
+  "started_at_utc": "2026-11-19T04:11:15.341Z",
+  "finished_at_utc": "2026-11-19T04:11:16.931Z",
+  "exit_code": 0,
+  "status": "PASS",
+  "signal": null,
+  "log": "node-final.log",
+  "log_sha256": "85726f0770d1f2615f8b9a18fb9bcd81b03afdd41316559d38e033d4fa632fbe"
+}

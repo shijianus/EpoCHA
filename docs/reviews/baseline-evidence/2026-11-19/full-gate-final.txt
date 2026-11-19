@@ -1,0 +1,46 @@
+[release-check] PASS source-identity
+[release-check] PASS node24
+[release-check] PASS linux-host
+[release-check] PASS go-toolchain
+[release-check] PASS go-package-inventory
+[release-check] PASS gnu-make
+[release-check] PASS bash
+[release-check] PASS race-compiler
+[release-check] PASS engineering-rules
+[release-check] PASS widget-regressions
+[release-check] PASS adminui-regressions
+[release-check] PASS tooling-regressions
+[release-check] PASS key-permission-and-rerun
+[release-check] PASS javascript-syntax
+[release-check] PASS widget-size
+[release-check] PASS shell-syntax
+[release-check] FAIL fmt-check: unformatted Go files:
+internal/api/widget_routes_regression_test.go
+internal/m4baseline/evidence.go
+[release-check] PASS diff-check
+[release-check] PASS go-vet
+[release-check] PASS go-test: registered future Go placeholders are recorded separately and do not count as PASS
+[release-check] PASS go-race: registered future Go placeholders are recorded separately and do not count as PASS
+[release-check] PASS static-build
+[release-check] PASS binary-size
+[release-check] PASS secret-scan
+[release-check] BLOCKED release-platform: formal scope remains B / linux/arm64 / UID:GID 1000:1000; other hosts are test-only
+[release-check] PASS candidate-clean
+[release-check] BLOCKED gate-tools: full Linux/arm64 toolchain, UID and gate tools unavailable
+[release-check] BLOCKED dedicated-docker: dedicated Docker inventory cannot be checked before platform prerequisites
+[release-check] BLOCKED ocr-container: isolated Docker prerequisites unavailable
+[release-check] BLOCKED stage4b: required Linux/arm64 or isolated Docker prerequisites unavailable
+[release-check] BLOCKED stage5a: required Linux/arm64 or isolated Docker prerequisites unavailable
+[release-check] BLOCKED stage5b: required Linux/arm64 or isolated Docker prerequisites unavailable
+[release-check] BLOCKED admin-ui: required Linux/arm64 or isolated Docker prerequisites unavailable
+[release-check] NOT_RUN manual-stage4a.human-readability: manual-evidence-not-provided
+[release-check] NOT_RUN manual-stage4b.human-readability: manual-evidence-not-provided
+[release-check] NOT_RUN manual-adminui.http-errors: manual-evidence-not-provided
+[release-check] NOT_RUN manual-adminui.clipboard-write: manual-evidence-not-provided
+[release-check] NOT_RUN manual-adminui.real-mobile: manual-evidence-not-provided
+[release-check] NOT_RUN assistive-technology-and-real-mobile: real devices and assistive technology not exercised by this command
+[release-check] NOT_RUN public-deployment: no authorization to push, tag, publish ports, change DNS or issue public certificates
+[release-check] NOT_RUN captcha-production-readiness: engineering evidence does not change experimental:true / production_ready:false
+[release-check] PASS source-stability
+[release-check] RESULT=FAIL SCRIPT_RC=1 PROFILE=full
+[release-check] summary=/data/workspace/epocha-governance-20261119/full-gate-final/summary.json

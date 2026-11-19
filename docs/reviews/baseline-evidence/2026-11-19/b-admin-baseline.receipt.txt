@@ -1,0 +1,3 @@
+command=timeout 300s bash docs/scripts/admin-ui-check.sh
+commit=adcbe0b42328231ec801098f390ba817fe8e057a
+exit_code=1

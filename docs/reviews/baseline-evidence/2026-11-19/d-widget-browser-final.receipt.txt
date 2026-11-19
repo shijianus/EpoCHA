@@ -1,0 +1,3 @@
+commit=629befa2e7d89345a917108561a1a303cfaac1c1
+command=node --test --test-reporter=tap docs/scripts/browser/widget_browser.test.mjs
+exit_code=0

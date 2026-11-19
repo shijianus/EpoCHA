@@ -1,0 +1,478 @@
+TAP version 13
+# Subtest: browser network failure never signals the shared gate-owned server
+ok 1 - browser network failure never signals the shared gate-owned server
+  ---
+  duration_ms: 1.365421
+  type: 'test'
+  ...
+# Subtest: real network-failure case uses an independently owned HTTP proxy fixture
+ok 2 - real network-failure case uses an independently owned HTTP proxy fixture
+  ---
+  duration_ms: 0.333071
+  type: 'test'
+  ...
+# Subtest: proxy failure is a real browser-visible connection refusal while upstream and normal forwarding remain live
+ok 3 - proxy failure is a real browser-visible connection refusal while upstream and normal forwarding remain live
+  ---
+  duration_ms: 119.227275
+  type: 'test'
+  ...
+# Subtest: shared-service recovery reuses this run's DB and keys without replaying admin writes
+ok 4 - shared-service recovery reuses this run's DB and keys without replaying admin writes
+  ---
+  duration_ms: 0.4132
+  type: 'test'
+  ...
+# Subtest: all admin gate HTTP helpers use bounded connection and total timeouts without duplicate 000
+ok 5 - all admin gate HTTP helpers use bounded connection and total timeouts without duplicate 000
+  ---
+  duration_ms: 0.23688
+  type: 'test'
+  ...
+# Subtest: the parent shell verifies its shared service before and after browser work
+ok 6 - the parent shell verifies its shared service before and after browser work
+  ---
+  duration_ms: 0.1934
+  type: 'test'
+  ...
+# Subtest: gate cleanup reaps owned children and removes each tmpfs path separately
+ok 7 - gate cleanup reaps owned children and removes each tmpfs path separately
+  ---
+  duration_ms: 0.43983
+  type: 'test'
+  ...
+# Subtest: browser after hook closes owned browser resources even when tab/session cleanup fails
+ok 8 - browser after hook closes owned browser resources even when tab/session cleanup fails
+  ---
+  duration_ms: 0.187841
+  type: 'test'
+  ...
+# Subtest: baseline evidence binds commands and raw logs to exact candidate and environment
+ok 9 - baseline evidence binds commands and raw logs to exact candidate and environment
+  ---
+  duration_ms: 3.615763
+  type: 'test'
+  ...
+# Subtest: baseline evidence fails closed on empty, missing or contradictory evidence
+ok 10 - baseline evidence fails closed on empty, missing or contradictory evidence
+  ---
+  duration_ms: 4.435723
+  type: 'test'
+  ...
+# Subtest: BLOCKED and NOT_RUN preserve absent execution instead of manufacturing an exit code
+ok 11 - BLOCKED and NOT_RUN preserve absent execution instead of manufacturing an exit code
+  ---
+  duration_ms: 0.687371
+  type: 'test'
+  ...
+# Subtest: baseline command runner records actual exit codes and preserves every run
+ok 12 - baseline command runner records actual exit codes and preserves every run
+  ---
+  duration_ms: 1088.818539
+  type: 'test'
+  ...
+# Subtest: build inputs require a full commit and fixed safe version/date/target before compilation
+ok 13 - build inputs require a full commit and fixed safe version/date/target before compilation
+  ---
+  duration_ms: 8.262176
+  type: 'test'
+  ...
+# Subtest: version checks require the actual exact tuple, not a matching prefix or mutable tag
+ok 14 - version checks require the actual exact tuple, not a matching prefix or mutable tag
+  ---
+  duration_ms: 0.31823
+  type: 'test'
+  ...
+# Subtest: stage5b captures parameters before the build and never reconstructs a later dry run
+ok 15 - stage5b captures parameters before the build and never reconstructs a later dry run
+  ---
+  duration_ms: 0.5457
+  type: 'test'
+  ...
+# Subtest: Makefile builds and packages one recorded prebuilt directory rather than rebuilding on verification
+ok 16 - Makefile builds and packages one recorded prebuilt directory rather than rebuilding on verification
+  ---
+  duration_ms: 0.204871
+  type: 'test'
+  ...
+# Subtest: CI archives original prebuilt bytes and receipts, including the hidden directory
+ok 17 - CI archives original prebuilt bytes and receipts, including the hidden directory
+  ---
+  duration_ms: 0.18318
+  type: 'test'
+  ...
+# Subtest: image contract accepts proportional CSS scaling while checking intrinsic and declared dimensions
+ok 18 - image contract accepts proportional CSS scaling while checking intrinsic and declared dimensions
+  ---
+  duration_ms: 1.356041
+  type: 'test'
+  ...
+# Subtest: image contract rejects mismatched declared dimensions and stretched rendering
+ok 19 - image contract rejects mismatched declared dimensions and stretched rendering
+  ---
+  duration_ms: 4.218223
+  type: 'test'
+  ...
+# Subtest: real browser suite reads HTML attributes rather than CSS-dependent img.width getters
+ok 20 - real browser suite reads HTML attributes rather than CSS-dependent img.width getters
+  ---
+  duration_ms: 0.78951
+  type: 'test'
+  ...
+# Subtest: missing explicit evidence file and missing check are NOT_RUN with real exit 3
+ok 21 - missing explicit evidence file and missing check are NOT_RUN with real exit 3
+  ---
+  duration_ms: 188.345565
+  type: 'test'
+  ...
+# Subtest: complete source fingerprint matches current raw bytes including untracked and deleted files
+ok 22 - complete source fingerprint matches current raw bytes including untracked and deleted files
+  ---
+  duration_ms: 289.836958
+  type: 'test'
+  ...
+# Subtest: valid attestation and nonempty hashed raw evidence can be accepted only for its exact check
+ok 23 - valid attestation and nonempty hashed raw evidence can be accepted only for its exact check
+  ---
+  duration_ms: 108.897337
+  type: 'test'
+  ...
+# Subtest: declared FAIL remains failure even with valid evidence
+ok 24 - declared FAIL remains failure even with valid evidence
+  ---
+  duration_ms: 293.88485
+  type: 'test'
+  ...
+# Subtest: rejects executor absent
+ok 25 - rejects executor absent
+  ---
+  duration_ms: 105.945516
+  type: 'test'
+  ...
+# Subtest: rejects executor empty
+ok 26 - rejects executor empty
+  ---
+  duration_ms: 105.222625
+  type: 'test'
+  ...
+# Subtest: rejects placeholder executor
+ok 27 - rejects placeholder executor
+  ---
+  duration_ms: 186.239633
+  type: 'test'
+  ...
+# Subtest: rejects date absent
+ok 28 - rejects date absent
+  ---
+  duration_ms: 99.385281
+  type: 'test'
+  ...
+# Subtest: rejects date without timezone
+ok 29 - rejects date without timezone
+  ---
+  duration_ms: 116.061713
+  type: 'test'
+  ...
+# Subtest: rejects invalid calendar date
+ok 30 - rejects invalid calendar date
+  ---
+  duration_ms: 95.210328
+  type: 'test'
+  ...
+# Subtest: rejects future execution
+ok 31 - rejects future execution
+  ---
+  duration_ms: 102.253453
+  type: 'test'
+  ...
+# Subtest: rejects summary absent
+ok 32 - rejects summary absent
+  ---
+  duration_ms: 100.320522
+  type: 'test'
+  ...
+# Subtest: rejects check id absent
+ok 33 - rejects check id absent
+  ---
+  duration_ms: 91.444605
+  type: 'test'
+  ...
+# Subtest: rejects duplicate check
+ok 34 - rejects duplicate check
+  ---
+  duration_ms: 96.62652
+  type: 'test'
+  ...
+# Subtest: rejects unsupported result
+ok 35 - rejects unsupported result
+  ---
+  duration_ms: 100.722342
+  type: 'test'
+  ...
+# Subtest: rejects missing artifacts
+ok 36 - rejects missing artifacts
+  ---
+  duration_ms: 102.004633
+  type: 'test'
+  ...
+# Subtest: rejects missing raw hash
+ok 37 - rejects missing raw hash
+  ---
+  duration_ms: 109.763678
+  type: 'test'
+  ...
+# Subtest: rejects wrong raw hash
+ok 38 - rejects wrong raw hash
+  ---
+  duration_ms: 185.836263
+  type: 'test'
+  ...
+# Subtest: rejects absolute evidence path
+ok 39 - rejects absolute evidence path
+  ---
+  duration_ms: 96.710429
+  type: 'test'
+  ...
+# Subtest: rejects Windows absolute evidence path
+ok 40 - rejects Windows absolute evidence path
+  ---
+  duration_ms: 21.985005
+  type: 'test'
+  ...
+# Subtest: rejects relative path traversal
+ok 41 - rejects relative path traversal
+  ---
+  duration_ms: 92.413896
+  type: 'test'
+  ...
+# Subtest: rejects ambiguous path separators
+ok 42 - rejects ambiguous path separators
+  ---
+  duration_ms: 99.643662
+  type: 'test'
+  ...
+# Subtest: rejects fingerprint absent
+ok 43 - rejects fingerprint absent
+  ---
+  duration_ms: 99.687241
+  type: 'test'
+  ...
+# Subtest: rejects fingerprint wrong
+ok 44 - rejects fingerprint wrong
+  ---
+  duration_ms: 105.511386
+  type: 'test'
+  ...
+# Subtest: rejects abbreviated commit
+ok 45 - rejects abbreviated commit
+  ---
+  duration_ms: 96.872299
+  type: 'test'
+  ...
+# Subtest: rejects file count wrong
+ok 46 - rejects file count wrong
+  ---
+  duration_ms: 93.289907
+  type: 'test'
+  ...
+# Subtest: rejects unknown schema
+ok 47 - rejects unknown schema
+  ---
+  duration_ms: 94.948008
+  type: 'test'
+  ...
+# Subtest: missing raw evidence is NOT_RUN, empty or changed raw evidence never passes
+ok 48 - missing raw evidence is NOT_RUN, empty or changed raw evidence never passes
+  ---
+  duration_ms: 197.244621
+  type: 'test'
+  ...
+# Subtest: malformed JSON is failure and no file contents appear in diagnostic output
+ok 49 - malformed JSON is failure and no file contents appear in diagnostic output
+  ---
+  duration_ms: 101.804363
+  type: 'test'
+  ...
+# Subtest: CLI uses only explicit EPOCHA_MANUAL_EVIDENCE and preserves 0,1,3
+ok 50 - CLI uses only explicit EPOCHA_MANUAL_EVIDENCE and preserves 0,1,3
+  ---
+  duration_ms: 1192.608233
+  type: 'test'
+  ...
+# Subtest: stage4a.sh manual_result executes helper and preserves accepted, missing and invalid outcomes
+ok 51 - stage4a.sh manual_result executes helper and preserves accepted, missing and invalid outcomes
+  ---
+  duration_ms: 707.188036
+  type: 'test'
+  ...
+# Subtest: stage4b.sh manual_result executes helper and preserves accepted, missing and invalid outcomes
+ok 52 - stage4b.sh manual_result executes helper and preserves accepted, missing and invalid outcomes
+  ---
+  duration_ms: 793.806067
+  type: 'test'
+  ...
+# Subtest: admin-ui-check.sh manual_result executes helper and preserves accepted, missing and invalid outcomes
+ok 53 - admin-ui-check.sh manual_result executes helper and preserves accepted, missing and invalid outcomes
+  ---
+  duration_ms: 698.6059
+  type: 'test'
+  ...
+# Subtest: ss failure stays unknown and warns instead of reporting free
+ok 54 - ss failure stays unknown and warns instead of reporting free
+  ---
+  duration_ms: 709.653537
+  type: 'test'
+  ...
+# Subtest: ss successful free probe preserves the observed state
+ok 55 - ss successful free probe preserves the observed state
+  ---
+  duration_ms: 888.639555
+  type: 'test'
+  ...
+# Subtest: ss successful occupied probe preserves the observed state
+ok 56 - ss successful occupied probe preserves the observed state
+  ---
+  duration_ms: 722.989377
+  type: 'test'
+  ...
+# Subtest: netstat failure stays unknown and warns instead of reporting free
+ok 57 - netstat failure stays unknown and warns instead of reporting free
+  ---
+  duration_ms: 595.081436
+  type: 'test'
+  ...
+# Subtest: netstat successful free probe preserves the observed state
+ok 58 - netstat successful free probe preserves the observed state
+  ---
+  duration_ms: 694.925877
+  type: 'test'
+  ...
+# Subtest: netstat successful occupied probe preserves the observed state
+ok 59 - netstat successful occupied probe preserves the observed state
+  ---
+  duration_ms: 702.841303
+  type: 'test'
+  ...
+# Subtest: directory warnings survive into JSON and the final warning count
+ok 60 - directory warnings survive into JSON and the final warning count
+  ---
+  duration_ms: 693.050175
+  type: 'test'
+  ...
+# Subtest: directory warnings are also retained in the human-readable report
+ok 61 - directory warnings are also retained in the human-readable report
+  ---
+  duration_ms: 703.536104
+  type: 'test'
+  ...
+# Subtest: SQLite temporary storage is reported independently of the database filesystem
+ok 62 - SQLite temporary storage is reported independently of the database filesystem
+  ---
+  duration_ms: 603.666372
+  type: 'test'
+  ...
+# Subtest: strict mode returns exit 3 outside formal support
+ok 63 - strict mode returns exit 3 outside formal support
+  ---
+  duration_ms: 797.67682
+  type: 'test'
+  ...
+# Subtest: strict mode rejects key symlinks and reports the required key names
+ok 64 - strict mode rejects key symlinks and reports the required key names
+  ---
+  duration_ms: 589.408232
+  type: 'test'
+  ...
+# Subtest: HTTP and HTTPS explicitly select query-free access logs and discard unsafe error logs
+ok 65 - HTTP and HTTPS explicitly select query-free access logs and discard unsafe error logs
+  ---
+  duration_ms: 1.033181
+  type: 'test'
+  ...
+# Subtest: restore runbook switches complete directories instead of copying into an old WAL directory
+ok 66 - restore runbook switches complete directories instead of copying into an old WAL directory
+  ---
+  duration_ms: 0.34854
+  type: 'test'
+  ...
+# Subtest: deployment indexes keep Cloudflare and fallback unimplemented without a false SQLite claim
+ok 67 - deployment indexes keep Cloudflare and fallback unimplemented without a false SQLite claim
+  ---
+  duration_ms: 0.21948
+  type: 'test'
+  ...
+# Subtest: 450/450 requires exact counts, all stage samples and actual zero exit inside the watchdog
+ok 68 - 450/450 requires exact counts, all stage samples and actual zero exit inside the watchdog
+  ---
+  duration_ms: 11.111808
+  type: 'test'
+  ...
+# Subtest: image creation and pool evidence cannot be empty, inferred from other buckets or numeric strings
+ok 69 - image creation and pool evidence cannot be empty, inferred from other buckets or numeric strings
+  ---
+  duration_ms: 0.537631
+  type: 'test'
+  ...
+# Subtest: resource sampling rejects unknowns, gaps, bad readyz, malformed values and no samples
+ok 70 - resource sampling rejects unknowns, gaps, bad readyz, malformed values and no samples
+  ---
+  duration_ms: 0.71667
+  type: 'test'
+  ...
+# Subtest: deadline stops a real hung subprocess instead of relying on request count
+ok 71 - deadline stops a real hung subprocess instead of relying on request count
+  ---
+  duration_ms: 400.089476
+  type: 'test'
+  ...
+# Subtest: stage5b requires site, load, pool and sample evidence and uses an independent hard watchdog
+ok 72 - stage5b requires site, load, pool and sample evidence and uses an independent hard watchdog
+  ---
+  duration_ms: 0.92323
+  type: 'test'
+  ...
+# Subtest: stage5a selftest exercises exact F08/F13 evidence rules with bash fixtures
+ok 73 - stage5a selftest exercises exact F08/F13 evidence rules with bash fixtures
+  ---
+  duration_ms: 301.004235
+  type: 'test'
+  ...
+# Subtest: F08 source contract binds dedicated pre-backup key proof and exact restore statuses
+ok 74 - F08 source contract binds dedicated pre-backup key proof and exact restore statuses
+  ---
+  duration_ms: 3.948253
+  type: 'test'
+  ...
+# Subtest: F13 source contract requires exact 150-flow plan, wall summary and four 150-sample stages without err field
+ok 75 - F13 source contract requires exact 150-flow plan, wall summary and four 150-sample stages without err field
+  ---
+  duration_ms: 0.50241
+  type: 'test'
+  ...
+# Subtest: each widget case owns a distinct workspace and closes only its own processes
+ok 76 - each widget case owns a distinct workspace and closes only its own processes
+  ---
+  duration_ms: 91.932026
+  type: 'test'
+  ...
+# Subtest: startup readiness wait is cancelled promptly
+ok 77 - startup readiness wait is cancelled promptly
+  ---
+  duration_ms: 93.335037
+  type: 'test'
+  ...
+# Subtest: process cleanup has a bounded TERM-to-KILL escalation
+ok 78 - process cleanup has a bounded TERM-to-KILL escalation
+  ---
+  duration_ms: 101.653393
+  type: 'test'
+  ...
+1..78
+# tests 78
+# suites 0
+# pass 78
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 8989.15515

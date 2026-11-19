@@ -1,0 +1,142 @@
+TAP version 13
+# Subtest: deployment recipes never overwrite keys or return to the obsolete stage-5b candidate
+ok 1 - deployment recipes never overwrite keys or return to the obsolete stage-5b candidate
+  ---
+  duration_ms: 1.212081
+  type: 'test'
+  ...
+# Subtest: README separates historical OCR measurements from runtime assets
+ok 2 - README separates historical OCR measurements from runtime assets
+  ---
+  duration_ms: 0.26283
+  type: 'test'
+  ...
+# Subtest: Docker context excludes development archives, workloads and release output
+ok 3 - Docker context excludes development archives, workloads and release output
+  ---
+  duration_ms: 0.44269
+  type: 'test'
+  ...
+# Subtest: Makefile uses fail-closed formatting, byte-exact size and lifecycle regressions
+ok 4 - Makefile uses fail-closed formatting, byte-exact size and lifecycle regressions
+  ---
+  duration_ms: 0.25115
+  type: 'test'
+  ...
+# Subtest: CI pins the authorized Go release, Node 24 and does not swallow incomplete gates
+ok 5 - CI pins the authorized Go release, Node 24 and does not swallow incomplete gates
+  ---
+  duration_ms: 0.20128
+  type: 'test'
+  ...
+# Subtest: admin enable acceptance uses POST rather than a GET-only helper
+ok 6 - admin enable acceptance uses POST rather than a GET-only helper
+  ---
+  duration_ms: 0.25452
+  type: 'test'
+  ...
+# Subtest: Go skip classification keeps named future placeholders separately recorded while unknown skips fail
+ok 7 - Go skip classification keeps named future placeholders separately recorded while unknown skips fail
+  ---
+  duration_ms: 7.204465
+  type: 'test'
+  ...
+# Subtest: stage5a gates restore authentication, strict load counts, image bytes, exact image files and 413
+ok 8 - stage5a gates restore authentication, strict load counts, image bytes, exact image files and 413
+  ---
+  duration_ms: 1.197341
+  type: 'test'
+  ...
+# Subtest: browser manifest helper imports the repository manifest and rejects missing/unknown cases
+ok 9 - browser manifest helper imports the repository manifest and rejects missing/unknown cases
+  ---
+  duration_ms: 403.681149
+  type: 'test'
+  ...
+# Subtest: repository attributes force LF even under core.autocrlf=true and preserve binary bytes
+ok 10 - repository attributes force LF even under core.autocrlf=true and preserve binary bytes
+  ---
+  duration_ms: 93.385167
+  type: 'test'
+  ...
+# Subtest: binary budget compares bytes, including the first byte above 35 MiB
+ok 11 - binary budget compares bytes, including the first byte above 35 MiB
+  ---
+  duration_ms: 0.895771
+  type: 'test'
+  ...
+# Subtest: formatter cannot pass on empty input, execution failure or syntax-error empty stdout
+ok 12 - formatter cannot pass on empty input, execution failure or syntax-error empty stdout
+  ---
+  duration_ms: 0.30328
+  type: 'test'
+  ...
+# Subtest: a zero-exit stage4b with missing OCR is INCOMPLETE rather than PASS
+ok 13 - a zero-exit stage4b with missing OCR is INCOMPLETE rather than PASS
+  ---
+  duration_ms: 0.6717
+  type: 'test'
+  ...
+# Subtest: admin-ui exit 3 for manual gaps stays incomplete even with all engineering tests passing
+ok 14 - admin-ui exit 3 for manual gaps stays incomplete even with all engineering tests passing
+  ---
+  duration_ms: 0.654431
+  type: 'test'
+  ...
+# Subtest: stage5b optional/out-of-scope results never change required counts
+ok 15 - stage5b optional/out-of-scope results never change required counts
+  ---
+  duration_ms: 0.438
+  type: 'test'
+  ...
+# Subtest: legacy parser rejects missing/empty summaries, contradictory exit codes and hidden failures
+ok 16 - legacy parser rejects missing/empty summaries, contradictory exit codes and hidden failures
+  ---
+  duration_ms: 0.713641
+  type: 'test'
+  ...
+# Subtest: required missing checks yield exit 3, failures dominate, and no evidence can never yield PASS
+ok 17 - required missing checks yield exit 3, failures dominate, and no evidence can never yield PASS
+  ---
+  duration_ms: 0.42588
+  type: 'test'
+  ...
+# Subtest: required check manifest rejects a single PASS or missing IDs
+ok 18 - required check manifest rejects a single PASS or missing IDs
+  ---
+  duration_ms: 1.023521
+  type: 'test'
+  ...
+# Subtest: Node TAP verification rejects empty output, zero tests and skipped tests
+ok 19 - Node TAP verification rejects empty output, zero tests and skipped tests
+  ---
+  duration_ms: 0.6444
+  type: 'test'
+  ...
+# Subtest: full plan retains all four strongest existing gates, without a force-pass switch
+ok 20 - full plan retains all four strongest existing gates, without a force-pass switch
+  ---
+  duration_ms: 0.780771
+  type: 'test'
+  ...
+# Subtest: Docker acceptance refuses an unmeasured or nonempty daemon instead of deleting existing assets
+ok 21 - Docker acceptance refuses an unmeasured or nonempty daemon instead of deleting existing assets
+  ---
+  duration_ms: 0.43633
+  type: 'test'
+  ...
+# Subtest: Linux key provisioning creates private same-UID files and preserves bytes on rerun
+ok 22 - Linux key provisioning creates private same-UID files and preserves bytes on rerun
+  ---
+  duration_ms: 603.024861
+  type: 'test'
+  ...
+1..22
+# tests 22
+# suites 0
+# pass 22
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1508.696199

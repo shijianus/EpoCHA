@@ -1,0 +1,3 @@
+commit=9fada47b63f873c1bc72f0b2b75dc2ffd729f00f
+command=go test -json -count=1 ./internal/api ./internal/generator ./internal/store ./cmd/server
+exit_code=0

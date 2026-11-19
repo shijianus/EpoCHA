@@ -1,0 +1,3 @@
+commit=90b8b8a7a1c8480f2ed0f83e4c45ef4b0a192ff9
+command=SQLITE_TMPDIR=isolated-data-dir go test -count=1 -run purge-regressions -v ./internal/store
+exit_code=0

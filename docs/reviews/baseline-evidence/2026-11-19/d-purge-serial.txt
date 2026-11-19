@@ -1,0 +1,21 @@
+=== RUN   TestLedgerPurgeKeepsPerTransactionBatch500
+    ledger_regression_test.go:289: batch=0 counts={Responses:500 Pool:500 Challenges:0} err=store: 清理 challenges: database or disk is full (13), want 500 per table
+--- FAIL: TestLedgerPurgeKeepsPerTransactionBatch500 (0.02s)
+=== RUN   TestPurgeAssignedBatchBudgetSurvivesReopen
+    pool_asset_test.go:351: batch 0: counts={Responses:0 Pool:500 Challenges:0} want=500 err=store: 清理 challenges: database or disk is full (13)
+--- FAIL: TestPurgeAssignedBatchBudgetSurvivesReopen (0.11s)
+=== RUN   TestLedgerPurgeKeepsPerTransactionBatch500
+    ledger_regression_test.go:289: batch=0 counts={Responses:500 Pool:500 Challenges:0} err=store: 清理 challenges: database or disk is full (13), want 500 per table
+--- FAIL: TestLedgerPurgeKeepsPerTransactionBatch500 (0.09s)
+=== RUN   TestPurgeAssignedBatchBudgetSurvivesReopen
+    pool_asset_test.go:351: batch 0: counts={Responses:0 Pool:500 Challenges:0} want=500 err=store: 清理 challenges: database or disk is full (13)
+--- FAIL: TestPurgeAssignedBatchBudgetSurvivesReopen (0.10s)
+=== RUN   TestLedgerPurgeKeepsPerTransactionBatch500
+    ledger_regression_test.go:289: batch=0 counts={Responses:500 Pool:500 Challenges:0} err=store: 清理 challenges: database or disk is full (13), want 500 per table
+--- FAIL: TestLedgerPurgeKeepsPerTransactionBatch500 (0.09s)
+=== RUN   TestPurgeAssignedBatchBudgetSurvivesReopen
+    pool_asset_test.go:351: batch 0: counts={Responses:0 Pool:500 Challenges:0} want=500 err=store: 清理 challenges: database or disk is full (13)
+--- FAIL: TestPurgeAssignedBatchBudgetSurvivesReopen (0.11s)
+FAIL
+FAIL	github.com/shijianus/EpoCHA/internal/store	0.680s
+FAIL

@@ -1,0 +1,135 @@
+{
+  "baseline-diff.json": {
+    "captured_at": "2026-11-19T02:26:47.419Z",
+    "command": [
+      "git",
+      "diff",
+      "--stat",
+      "adcbe0b42328231ec801098f390ba817fe8e057a",
+      "HEAD"
+    ],
+    "exit_code": 0,
+    "stdout": " README.md                                       |  1 -\n deploy/preflight.sh                             | 80 ++-----------------------\n docs/DEPLOYMENT.md                              | 10 ++--\n docs/TRIAL-DEPLOYMENT.md                        |  6 --\n docs/reviews/PRODUCTION-READINESS-2026-11-16.md | 65 --------------------\n docs/reviews/VISUAL-CRITIQUE-2026-11-15.md      | 17 ++----\n docs/scripts/browser/widget_lifecycle.test.mjs  | 55 +----------------\n docs/scripts/preflight_regression.test.mjs      | 37 ++----------\n docs/scripts/release-check.mjs                  | 18 +-----\n docs/scripts/release-check.test.mjs             |  3 +-\n docs/visual-gallery/index.html                  | 19 +++---\n web/widget/v1.interactive.js                    | 57 +-----------------\n web/widget/v1.js                                | 37 ++++--------\n 13 files changed, 51 insertions(+), 354 deletions(-)\n",
+    "stderr": ""
+  },
+  "branches.json": {
+    "captured_at": "2026-11-19T02:26:47.246Z",
+    "command": [
+      "git",
+      "branch",
+      "-a",
+      "-vv"
+    ],
+    "exit_code": 0,
+    "stdout": "  fix/release-preparation-2026-11-02                b550698 [origin/fix/release-preparation-2026-11-02] docs(audit): correct generator count to 19 and Wave attribution\n  main                                              de65ec7 [origin/main] Docs: README 补部署段，指向 DEPLOYMENT §11 的可执行配方\n  p0-p1-hardening-20261116                          adcbe0b fix(widget,preflight): sync p0/p1 hardening from sandbox tip 6335b22\n+ production-hardening-20261116                     a3e73ff (D:/Users/Smart Kevin/OneDrive/Desktop/epocha-production-hardening) [origin/sync/visual-bank-20261116: ahead 1] fix(widget): fail closed symbol-path on dense coarse-pointer layouts\n* sync/visual-bank-20261116                         6fc8c65 [origin/sync/visual-bank-20261116] docs(visual): add visual critique report, acceptance gallery, and design candidates\n  remotes/origin/HEAD                               -> origin/main\n  remotes/origin/backup/vps-replica-20261023        91cf222 Chore(backup): 存入删库时点的 git 状态快照（本地 config/reflog/refs/聚合哈希）\n  remotes/origin/dev-emergency-backup               f1cf3fb wip: emergency save before machine shutdown\n  remotes/origin/fix/release-preparation-2026-11-02 b550698 docs(audit): correct generator count to 19 and Wave attribution\n  remotes/origin/main                               de65ec7 Docs: README 补部署段，指向 DEPLOYMENT §11 的可执行配方\n  remotes/origin/p0-p1-hardening-20261116           adcbe0b fix(widget,preflight): sync p0/p1 hardening from sandbox tip 6335b22\n  remotes/origin/production-hardening-20261116      a3e73ff fix(widget): fail closed symbol-path on dense coarse-pointer layouts\n  remotes/origin/sync/visual-bank-20261116          6fc8c65 docs(visual): add visual critique report, acceptance gallery, and design candidates\n",
+    "stderr": ""
+  },
+  "candidate-object.json": {
+    "captured_at": "2026-11-19T02:26:47.318Z",
+    "command": [
+      "git",
+      "cat-file",
+      "-t",
+      "164bb6327b85fe1642bbb8bd95611186211c5625"
+    ],
+    "exit_code": 128,
+    "stdout": "",
+    "stderr": "fatal: git cat-file: could not get object info\n"
+  },
+  "disk.json": {
+    "captured_at": "2026-11-19T02:26:48.772Z",
+    "command": [
+      "df",
+      "-h",
+      "."
+    ],
+    "exit_code": 0,
+    "stdout": "Filesystem      Size  Used Avail Use% Mounted on\nD:              954G  932G   22G  98% /d\n",
+    "stderr": ""
+  },
+  "docker.json": {
+    "captured_at": "2026-11-19T02:26:48.683Z",
+    "command": [
+      "docker",
+      "version"
+    ],
+    "exit_code": 1,
+    "stdout": "Client:\n Version:           29.1.2\n API version:       1.52\n Go version:        go1.25.5\n Git commit:        890dcca\n Built:             Tue Dec  2 21:57:33 2025\n OS/Arch:           windows/amd64\n Context:           desktop-linux\n",
+    "stderr": "failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine; check if the path is correct and if the daemon is running: open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.\n"
+  },
+  "head.json": {
+    "captured_at": "2026-11-19T02:26:47.060Z",
+    "command": [
+      "git",
+      "rev-parse",
+      "HEAD"
+    ],
+    "exit_code": 0,
+    "stdout": "6fc8c657fbd5f553a44216dc786a2a01285fee36\n",
+    "stderr": ""
+  },
+  "local-go.json": {
+    "captured_at": "2026-11-19T02:26:48.096Z",
+    "command": [
+      "go",
+      "version"
+    ],
+    "exit_code": 0,
+    "stdout": "go version go1.24.2 windows/amd64\n",
+    "stderr": ""
+  },
+  "node.json": {
+    "captured_at": "2026-11-19T02:26:48.447Z",
+    "command": [
+      "C:\\Program Files\\nodejs\\node.exe",
+      "--version"
+    ],
+    "exit_code": 0,
+    "stdout": "v24.14.0\r\n",
+    "stderr": ""
+  },
+  "pinned-go.json": {
+    "captured_at": "2026-11-19T02:26:48.365Z",
+    "command": [
+      "C:/Users/Smart Kevin/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.windows-amd64/bin/go.exe",
+      "version"
+    ],
+    "exit_code": 0,
+    "stdout": "go version go1.27.3 windows/amd64\n",
+    "stderr": ""
+  },
+  "remotes.json": {
+    "captured_at": "2026-11-19T02:26:47.127Z",
+    "command": [
+      "git",
+      "remote",
+      "-v"
+    ],
+    "exit_code": 0,
+    "stdout": "origin\tgit@github.com:shijianus/epocha.git (fetch)\norigin\tgit@github.com:shijianus/epocha.git (push)\n",
+    "stderr": ""
+  },
+  "status.json": {
+    "captured_at": "2026-11-19T02:26:46.995Z",
+    "command": [
+      "git",
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all"
+    ],
+    "exit_code": 0,
+    "stdout": " M Makefile\n M docs/DECISIONS.md\n M docs/DESIGN.md\n M internal/api/api.go\n M internal/api/api_test.go\n M internal/api/handlers.go\n M internal/api/stage5a_test.go\n M internal/generator/symbolpath.go\n M internal/risk/phase3.go\n M internal/risk/phase3_test.go\n M internal/store/deploy.go\n M internal/store/pool.go\n M internal/store/store.go\n?? cmd/m4baseline/main.go\n?? cmd/m4baseline/main_test.go\n?? docs/reviews/CAPTCHA-M4-BASELINE-2026-11-12.md\n?? docs/reviews/PROJECT-STATUS-AUDIT-2026-11-14.md\n?? docs/reviews/audit-evidence/2026-11-14/README.md\n?? docs/reviews/audit-evidence/2026-11-14/RESULTS-final.json\n?? docs/reviews/audit-evidence/2026-11-14/RESULTS.json\n?? docs/reviews/audit-evidence/2026-11-14/SHA256SUMS.json\n?? docs/reviews/audit-evidence/2026-11-14/__pycache__/audit_runner.cpython-314.pyc\n?? docs/reviews/audit-evidence/2026-11-14/audit_runner.py\n?? docs/reviews/audit-evidence/2026-11-14/binary-ops-metadata.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/binary-server-metadata.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/build-linux-ops.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/build-linux-server.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/build-m4-baseline.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/build-receipt-integration.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/compile_packages.py\n?? docs/reviews/audit-evidence/2026-11-14/cross-build-manifest.json\n?? docs/reviews/audit-evidence/2026-11-14/cross_checks.py\n?? docs/reviews/audit-evidence/2026-11-14/docker-capability.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/fuzz-FuzzCrowdFindNormalize.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/fuzz-FuzzNormalizeNewEncodings.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/fuzz-FuzzProgressiveTargetNormalize.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/fuzz-FuzzShellTrackNormalize.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/fuzz-FuzzSilhouetteNormalize.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/fuzz-FuzzSymbolPathNormalize.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/fuzz-FuzzTileRotationNormalize.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/fuzz-FuzzVisualRankNormalize.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/go-cpu-metric-definition.txt\n?? docs/reviews/audit-evidence/2026-11-14/go-env.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/go-list-linux-project.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/go-module-verify.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/go-native-coverage.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/go-race-cgo-explicit.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/go-race-full.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/go-race-with-cgo.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/go-test-compile-linux-project.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/go-test-full.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/go-vet-full.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/go-vet-linux-project.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/isolate_snapshot.py\n?? docs/reviews/audit-evidence/2026-11-14/isolated-build-receipt-integration.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/isolated-go-full.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/isolated-go-vet-linux-full.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/isolated-release-full.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/isolated-release-gate/summary.json\n?? docs/reviews/audit-evidence/2026-11-14/isolated-source-manifest.json\n?? docs/reviews/audit-evidence/2026-11-14/isolated_checks.py\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compilation-summary.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-00.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-01.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-02.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-04.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-05.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-06.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-08.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-09.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-10.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-11.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-12.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-13.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-14.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-15.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-16.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-17.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-18.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-19.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-20.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-21.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-22.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-23.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-24.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-25.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/linux-test-compile-27.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/m4-measurement-binary.json\n?? docs/reviews/audit-evidence/2026-11-14/m4-replication.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/m4-replication/m4-results.csv\n?? docs/reviews/audit-evidence/2026-11-14/m4-replication/m4-summary.json\n?? docs/reviews/audit-evidence/2026-11-14/make-capability.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/native-coverage.out\n?? docs/reviews/audit-evidence/2026-11-14/native-vet.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/production-dependency-check.json\n?? docs/reviews/audit-evidence/2026-11-14/release-full.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/risk-cooldown-reproduction.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/risk_cooldown_reproduction.go.txt\n?? docs/reviews/audit-evidence/2026-11-14/server-dependencies.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/source-final.json\n?? docs/reviews/audit-evidence/2026-11-14/source-final.status.txt\n?? docs/reviews/audit-evidence/2026-11-14/source-initial.json\n?? docs/reviews/audit-evidence/2026-11-14/source-initial.status.txt\n?? docs/reviews/audit-evidence/2026-11-14/stage5b-classifier-gitbash.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/stage5b-classifier.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/static-findings-evidence.json\n?? docs/reviews/audit-evidence/2026-11-14/summarize_evidence.py\n?? docs/reviews/audit-evidence/2026-11-14/toolchain.receipt.json\n?? docs/reviews/audit-evidence/2026-11-14/verify_evidence.py\n?? docs/reviews/audit-evidence/2026-11-14/wsl-capability.receipt.json\n?? docs/reviews/evidence/m4-results.csv\n?? docs/reviews/evidence/m4-summary.json\n?? internal/api/accessibility_quota_regression_test.go\n?? internal/api/cooldown_regression_test.go\n?? internal/api/widget_routes_regression_test.go\n?? internal/generator/symbolpath_geometry_test.go\n?? internal/m4baseline/cpu_linux.go\n?? internal/m4baseline/cpu_other.go\n?? internal/m4baseline/cpu_windows.go\n?? internal/m4baseline/cpu_windows_test.go\n?? internal/m4baseline/evidence.go\n?? internal/m4baseline/host.go\n?? internal/m4baseline/host_linux.go\n?? internal/m4baseline/host_other.go\n?? internal/m4baseline/host_windows.go\n?? internal/m4baseline/measurement_regression_test.go\n?? internal/m4baseline/rss_linux.go\n?? internal/m4baseline/rss_windows.go\n?? internal/m4baseline/run.go\n?? internal/m4baseline/run_test.go\n?? internal/m4baseline/solver/crowdfind.go\n?? internal/m4baseline/solver/glyph.go\n?? internal/m4baseline/solver/imageutil.go\n?? internal/m4baseline/solver/payload.go\n?? internal/m4baseline/solver/progressivetarget.go\n?? internal/m4baseline/solver/shelltrack.go\n?? internal/m4baseline/solver/silhouette.go\n?? internal/m4baseline/solver/solver.go\n?? internal/m4baseline/solver/solver_test.go\n?? internal/m4baseline/solver/symbolpath.go\n?? internal/m4baseline/solver/tilerotation.go\n?? internal/m4baseline/solver/visualrank.go\n?? internal/m4baseline/stats.go\n?? internal/risk/cooldown_regression_test.go\n?? internal/store/accessibility.go\n?? internal/store/accessibility_test.go\n?? internal/store/migrations/0007_accessibility_quotas.sql\n",
+    "stderr": ""
+  },
+  "utc.json": {
+    "captured_at": "2026-11-19T02:26:46.884Z",
+    "command": [
+      "date",
+      "-u",
+      "+%Y-%m-%dT%H:%M:%SZ"
+    ],
+    "exit_code": 0,
+    "stdout": "2026-11-19T02:26:46Z\n",
+    "stderr": ""
+  }
+}

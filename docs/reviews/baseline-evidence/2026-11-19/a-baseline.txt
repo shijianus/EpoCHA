@@ -1,0 +1,53 @@
+=== RUN   TestWave1GeneratorsChallengeAndRedeem
+=== RUN   TestWave1GeneratorsChallengeAndRedeem/tile-rotation-v1
+    new_generators_test.go:144: 夹具题型未登记 tile-rotation-v1: generator: 未注册的题型
+=== RUN   TestWave1GeneratorsChallengeAndRedeem/symbol-path-v1
+    new_generators_test.go:144: 夹具题型未登记 symbol-path-v1: generator: 未注册的题型
+=== RUN   TestWave1GeneratorsChallengeAndRedeem/crowd-find-v1
+    new_generators_test.go:144: 夹具题型未登记 crowd-find-v1: generator: 未注册的题型
+=== RUN   TestWave1GeneratorsChallengeAndRedeem/visual-rank-v1
+    new_generators_test.go:144: 夹具题型未登记 visual-rank-v1: generator: 未注册的题型
+--- FAIL: TestWave1GeneratorsChallengeAndRedeem (0.19s)
+    --- FAIL: TestWave1GeneratorsChallengeAndRedeem/tile-rotation-v1 (0.01s)
+    --- FAIL: TestWave1GeneratorsChallengeAndRedeem/symbol-path-v1 (0.08s)
+    --- FAIL: TestWave1GeneratorsChallengeAndRedeem/crowd-find-v1 (0.01s)
+    --- FAIL: TestWave1GeneratorsChallengeAndRedeem/visual-rank-v1 (0.09s)
+=== RUN   TestWave1GeneratorsWrongAnswerTerminates
+=== RUN   TestWave1GeneratorsWrongAnswerTerminates/tile-rotation-v1
+    new_generators_test.go:188: 夹具题型未登记 tile-rotation-v1: generator: 未注册的题型
+=== RUN   TestWave1GeneratorsWrongAnswerTerminates/symbol-path-v1
+    new_generators_test.go:188: 夹具题型未登记 symbol-path-v1: generator: 未注册的题型
+=== RUN   TestWave1GeneratorsWrongAnswerTerminates/crowd-find-v1
+    new_generators_test.go:188: 夹具题型未登记 crowd-find-v1: generator: 未注册的题型
+=== RUN   TestWave1GeneratorsWrongAnswerTerminates/visual-rank-v1
+    new_generators_test.go:188: 夹具题型未登记 visual-rank-v1: generator: 未注册的题型
+--- FAIL: TestWave1GeneratorsWrongAnswerTerminates (0.20s)
+    --- FAIL: TestWave1GeneratorsWrongAnswerTerminates/tile-rotation-v1 (0.01s)
+    --- FAIL: TestWave1GeneratorsWrongAnswerTerminates/symbol-path-v1 (0.08s)
+    --- FAIL: TestWave1GeneratorsWrongAnswerTerminates/crowd-find-v1 (0.02s)
+    --- FAIL: TestWave1GeneratorsWrongAnswerTerminates/visual-rank-v1 (0.09s)
+=== RUN   TestWave2GeneratorsChallengeAndRedeem
+=== RUN   TestWave2GeneratorsChallengeAndRedeem/progressive-target-v1
+    new_generators_test.go:222: 夹具题型未登记 progressive-target-v1: generator: 未注册的题型
+=== RUN   TestWave2GeneratorsChallengeAndRedeem/shell-track-v1
+    new_generators_test.go:222: 夹具题型未登记 shell-track-v1: generator: 未注册的题型
+=== RUN   TestWave2GeneratorsChallengeAndRedeem/silhouette-assembly-v1
+    new_generators_test.go:222: 夹具题型未登记 silhouette-assembly-v1: generator: 未注册的题型
+--- FAIL: TestWave2GeneratorsChallengeAndRedeem (0.21s)
+    --- FAIL: TestWave2GeneratorsChallengeAndRedeem/progressive-target-v1 (0.01s)
+    --- FAIL: TestWave2GeneratorsChallengeAndRedeem/shell-track-v1 (0.19s)
+    --- FAIL: TestWave2GeneratorsChallengeAndRedeem/silhouette-assembly-v1 (0.01s)
+=== RUN   TestWave2GeneratorsWrongAnswerTerminates
+=== RUN   TestWave2GeneratorsWrongAnswerTerminates/progressive-target-v1
+    new_generators_test.go:262: 夹具题型未登记 progressive-target-v1: generator: 未注册的题型
+=== RUN   TestWave2GeneratorsWrongAnswerTerminates/shell-track-v1
+    new_generators_test.go:262: 夹具题型未登记 shell-track-v1: generator: 未注册的题型
+=== RUN   TestWave2GeneratorsWrongAnswerTerminates/silhouette-assembly-v1
+    new_generators_test.go:262: 夹具题型未登记 silhouette-assembly-v1: generator: 未注册的题型
+--- FAIL: TestWave2GeneratorsWrongAnswerTerminates (0.30s)
+    --- FAIL: TestWave2GeneratorsWrongAnswerTerminates/progressive-target-v1 (0.09s)
+    --- FAIL: TestWave2GeneratorsWrongAnswerTerminates/shell-track-v1 (0.20s)
+    --- FAIL: TestWave2GeneratorsWrongAnswerTerminates/silhouette-assembly-v1 (0.02s)
+FAIL
+FAIL	github.com/shijianus/EpoCHA/internal/api	0.911s
+FAIL

@@ -1,0 +1,1 @@
+[selftest] RESULT=selftest-pass（9 条场景断言成立：必需 FAIL/BLOCKED/NOT_RUN 都非 0，可选项不改判也不得 PASS，超范围项不出 PASS）

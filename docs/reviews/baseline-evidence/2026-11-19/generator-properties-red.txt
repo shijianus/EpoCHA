@@ -1,0 +1,4 @@
+=== RUN   TestTextImagePayloadDimensionsMatchPNG
+--- PASS: TestTextImagePayloadDimensionsMatchPNG (0.62s)
+PASS
+ok  	github.com/shijianus/EpoCHA/internal/generator	0.704s

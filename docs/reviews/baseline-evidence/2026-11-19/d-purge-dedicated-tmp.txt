@@ -1,0 +1,67 @@
+=== RUN   TestLedgerPurgeKeepsPerTransactionBatch500
+--- PASS: TestLedgerPurgeKeepsPerTransactionBatch500 (0.10s)
+=== RUN   TestPurgeAssignedBatchBudgetSurvivesReopen
+--- PASS: TestPurgeAssignedBatchBudgetSurvivesReopen (0.11s)
+=== RUN   TestPurgeSQLiteDeleteQueryForms
+=== RUN   TestPurgeSQLiteDeleteQueryForms/text-id-in
+=== RUN   TestPurgeSQLiteDeleteQueryForms/text-id-in/none
+=== RUN   TestPurgeSQLiteDeleteQueryForms/text-id-in/response
+=== RUN   TestPurgeSQLiteDeleteQueryForms/text-id-in/pool
+=== RUN   TestPurgeSQLiteDeleteQueryForms/rowid-in
+=== RUN   TestPurgeSQLiteDeleteQueryForms/rowid-in/none
+=== RUN   TestPurgeSQLiteDeleteQueryForms/rowid-in/response
+=== RUN   TestPurgeSQLiteDeleteQueryForms/rowid-in/pool
+=== RUN   TestPurgeSQLiteDeleteQueryForms/materialized-text-id
+=== RUN   TestPurgeSQLiteDeleteQueryForms/materialized-text-id/none
+=== RUN   TestPurgeSQLiteDeleteQueryForms/materialized-text-id/response
+=== RUN   TestPurgeSQLiteDeleteQueryForms/materialized-text-id/pool
+--- PASS: TestPurgeSQLiteDeleteQueryForms (0.20s)
+    --- PASS: TestPurgeSQLiteDeleteQueryForms/text-id-in (0.09s)
+        --- PASS: TestPurgeSQLiteDeleteQueryForms/text-id-in/none (0.08s)
+        --- PASS: TestPurgeSQLiteDeleteQueryForms/text-id-in/response (0.00s)
+        --- PASS: TestPurgeSQLiteDeleteQueryForms/text-id-in/pool (0.00s)
+    --- PASS: TestPurgeSQLiteDeleteQueryForms/rowid-in (0.09s)
+        --- PASS: TestPurgeSQLiteDeleteQueryForms/rowid-in/none (0.00s)
+        --- PASS: TestPurgeSQLiteDeleteQueryForms/rowid-in/response (0.08s)
+        --- PASS: TestPurgeSQLiteDeleteQueryForms/rowid-in/pool (0.00s)
+    --- PASS: TestPurgeSQLiteDeleteQueryForms/materialized-text-id (0.01s)
+        --- PASS: TestPurgeSQLiteDeleteQueryForms/materialized-text-id/none (0.00s)
+        --- PASS: TestPurgeSQLiteDeleteQueryForms/materialized-text-id/response (0.00s)
+        --- PASS: TestPurgeSQLiteDeleteQueryForms/materialized-text-id/pool (0.00s)
+=== RUN   TestPurgeSQLiteFullIndependentOfDiskAndPool
+=== RUN   TestPurgeSQLiteFullIndependentOfDiskAndPool/1
+    purge_sqlite_regression_test.go:21: page_count=36
+    purge_sqlite_regression_test.go:21: max_page_count=4294967294
+    purge_sqlite_regression_test.go:21: freelist_count=0
+    purge_sqlite_regression_test.go:21: temp_store=0
+=== RUN   TestPurgeSQLiteFullIndependentOfDiskAndPool/499
+    purge_sqlite_regression_test.go:21: page_count=60
+    purge_sqlite_regression_test.go:21: max_page_count=4294967294
+    purge_sqlite_regression_test.go:21: freelist_count=0
+    purge_sqlite_regression_test.go:21: temp_store=0
+=== RUN   TestPurgeSQLiteFullIndependentOfDiskAndPool/500
+    purge_sqlite_regression_test.go:21: page_count=60
+    purge_sqlite_regression_test.go:21: max_page_count=4294967294
+    purge_sqlite_regression_test.go:21: freelist_count=0
+    purge_sqlite_regression_test.go:21: temp_store=0
+=== RUN   TestPurgeSQLiteFullIndependentOfDiskAndPool/501
+    purge_sqlite_regression_test.go:21: page_count=60
+    purge_sqlite_regression_test.go:21: max_page_count=4294967294
+    purge_sqlite_regression_test.go:21: freelist_count=0
+    purge_sqlite_regression_test.go:21: temp_store=0
+=== RUN   TestPurgeSQLiteFullIndependentOfDiskAndPool/601
+    purge_sqlite_regression_test.go:21: page_count=66
+    purge_sqlite_regression_test.go:21: max_page_count=4294967294
+    purge_sqlite_regression_test.go:21: freelist_count=0
+    purge_sqlite_regression_test.go:21: temp_store=0
+--- PASS: TestPurgeSQLiteFullIndependentOfDiskAndPool (0.20s)
+    --- PASS: TestPurgeSQLiteFullIndependentOfDiskAndPool/1 (0.01s)
+    --- PASS: TestPurgeSQLiteFullIndependentOfDiskAndPool/499 (0.08s)
+    --- PASS: TestPurgeSQLiteFullIndependentOfDiskAndPool/500 (0.01s)
+    --- PASS: TestPurgeSQLiteFullIndependentOfDiskAndPool/501 (0.09s)
+    --- PASS: TestPurgeSQLiteFullIndependentOfDiskAndPool/601 (0.01s)
+=== RUN   TestPurgeFreesPagesNotFileShrink
+    store_test.go:879: 行已删空：文件 245760 字节，空库 147456 字节——差异是待复用的空闲页
+--- PASS: TestPurgeFreesPagesNotFileShrink (0.30s)
+PASS
+ok  	github.com/shijianus/EpoCHA/internal/store	0.987s

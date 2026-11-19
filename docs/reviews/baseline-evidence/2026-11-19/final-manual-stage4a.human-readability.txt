@@ -1,0 +1,1 @@
+{"status":"NOT_RUN","exit_code":3,"check_id":"stage4a.human-readability","reason":"manual-evidence-not-provided"}

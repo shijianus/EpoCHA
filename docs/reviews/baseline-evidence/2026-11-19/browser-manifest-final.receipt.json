@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "test": "browser-manifest-final",
+  "commit": "3ed3a156f48f02dafa51a7f7b392e6d3b4d8753c",
+  "dirty": false,
+  "environment": {
+    "os": "linux",
+    "arch": "x64",
+    "node": "v24.22.3"
+  },
+  "command": [
+    "node",
+    "docs/scripts/release-check.mjs",
+    "--check-browser-manifest",
+    "docs/scripts/browser/cases.mjs",
+    "docs/scripts/browser/widget_browser.test.mjs",
+    "/data/workspace/epocha-governance-20261119/evidence/d-widget-browser-final.log"
+  ],
+  "started_at_utc": "2026-11-19T04:16:30.732Z",
+  "finished_at_utc": "2026-11-19T04:16:31.720Z",
+  "exit_code": 0,
+  "status": "PASS",
+  "signal": null,
+  "log": "browser-manifest-final.log",
+  "log_sha256": "215d929e29dbdf08cbd88b034560bf8d5768bdaf9962d9ea60497237c8863954"
+}

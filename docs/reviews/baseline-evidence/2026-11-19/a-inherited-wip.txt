@@ -1,0 +1,38 @@
+=== RUN   TestWave1GeneratorsChallengeAndRedeem
+=== RUN   TestWave1GeneratorsChallengeAndRedeem/tile-rotation-v1
+=== RUN   TestWave1GeneratorsChallengeAndRedeem/symbol-path-v1
+=== RUN   TestWave1GeneratorsChallengeAndRedeem/crowd-find-v1
+=== RUN   TestWave1GeneratorsChallengeAndRedeem/visual-rank-v1
+--- PASS: TestWave1GeneratorsChallengeAndRedeem (0.30s)
+    --- PASS: TestWave1GeneratorsChallengeAndRedeem/tile-rotation-v1 (0.10s)
+    --- PASS: TestWave1GeneratorsChallengeAndRedeem/symbol-path-v1 (0.02s)
+    --- PASS: TestWave1GeneratorsChallengeAndRedeem/crowd-find-v1 (0.09s)
+    --- PASS: TestWave1GeneratorsChallengeAndRedeem/visual-rank-v1 (0.09s)
+=== RUN   TestWave1GeneratorsWrongAnswerTerminates
+=== RUN   TestWave1GeneratorsWrongAnswerTerminates/tile-rotation-v1
+=== RUN   TestWave1GeneratorsWrongAnswerTerminates/symbol-path-v1
+=== RUN   TestWave1GeneratorsWrongAnswerTerminates/crowd-find-v1
+=== RUN   TestWave1GeneratorsWrongAnswerTerminates/visual-rank-v1
+--- PASS: TestWave1GeneratorsWrongAnswerTerminates (0.20s)
+    --- PASS: TestWave1GeneratorsWrongAnswerTerminates/tile-rotation-v1 (0.01s)
+    --- PASS: TestWave1GeneratorsWrongAnswerTerminates/symbol-path-v1 (0.09s)
+    --- PASS: TestWave1GeneratorsWrongAnswerTerminates/crowd-find-v1 (0.01s)
+    --- PASS: TestWave1GeneratorsWrongAnswerTerminates/visual-rank-v1 (0.09s)
+=== RUN   TestWave2GeneratorsChallengeAndRedeem
+=== RUN   TestWave2GeneratorsChallengeAndRedeem/progressive-target-v1
+=== RUN   TestWave2GeneratorsChallengeAndRedeem/shell-track-v1
+=== RUN   TestWave2GeneratorsChallengeAndRedeem/silhouette-assembly-v1
+--- PASS: TestWave2GeneratorsChallengeAndRedeem (0.31s)
+    --- PASS: TestWave2GeneratorsChallengeAndRedeem/progressive-target-v1 (0.10s)
+    --- PASS: TestWave2GeneratorsChallengeAndRedeem/shell-track-v1 (0.20s)
+    --- PASS: TestWave2GeneratorsChallengeAndRedeem/silhouette-assembly-v1 (0.01s)
+=== RUN   TestWave2GeneratorsWrongAnswerTerminates
+=== RUN   TestWave2GeneratorsWrongAnswerTerminates/progressive-target-v1
+=== RUN   TestWave2GeneratorsWrongAnswerTerminates/shell-track-v1
+=== RUN   TestWave2GeneratorsWrongAnswerTerminates/silhouette-assembly-v1
+--- PASS: TestWave2GeneratorsWrongAnswerTerminates (0.38s)
+    --- PASS: TestWave2GeneratorsWrongAnswerTerminates/progressive-target-v1 (0.10s)
+    --- PASS: TestWave2GeneratorsWrongAnswerTerminates/shell-track-v1 (0.19s)
+    --- PASS: TestWave2GeneratorsWrongAnswerTerminates/silhouette-assembly-v1 (0.09s)
+PASS
+ok  	github.com/shijianus/EpoCHA/internal/api	1.202s

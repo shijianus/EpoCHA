@@ -1,0 +1,350 @@
+TAP version 13
+#   [实测] 浏览器 PoW（bits=12）：点击提交→verified 墙钟 = 392 ms；进度上报 0 次（0 次属预期：求解快于 5 万次的进度节流阈值），解析出的耗时 = null ms
+# Subtest: 闭环：显示图片 → 输入 → 浏览器内 PoW → redeem → 业务表单 → 服务端写入
+ok 1 - 闭环：显示图片 → 输入 → 浏览器内 PoW → redeem → 业务表单 → 服务端写入
+  ---
+  duration_ms: 10915.372787
+  type: 'test'
+  ...
+# Subtest: 答错即终结：同一题不能重试；换题拿到的是另一道题
+ok 2 - 答错即终结：同一题不能重试；换题拿到的是另一道题
+  ---
+  duration_ms: 4294.823662
+  type: 'test'
+  ...
+# Subtest: 一次性：同一个 token 重复提交必然被服务端拒绝
+ok 3 - 一次性：同一个 token 重复提交必然被服务端拒绝
+  ---
+  duration_ms: 3890.041113
+  type: 'test'
+  ...
+# Subtest: 多实例隔离 + 隐藏字段：各自领题、各自写字段、销毁不串台
+ok 4 - 多实例隔离 + 隐藏字段：各自领题、各自写字段、销毁不串台
+  ---
+  duration_ms: 2019.563754
+  type: 'test'
+  ...
+# Subtest: 晚到的旧响应不能覆盖新题（刷新换代）
+not ok 5 - 晚到的旧响应不能覆盖新题（刷新换代）
+  ---
+  duration_ms: 32576.340141
+  type: 'test'
+  location: '/data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:443:1'
+  failureType: 'testCodeFailure'
+  error: '等待条件超时：#widget 实例进入 ready（现场：{"status":"验证服务暂时给不出题目，请稍后换一张重试。","ids":["epocha-1"],"states":["error"],"hosts":1,"url":"http://127.0.0.1:39409/"}）'
+  code: 'ERR_TEST_FAILURE'
+  stack: |-
+    waitFirstState (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:171:11)
+    process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    async TestContext.<anonymous> (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:467:3)
+    async Test.run (node:internal/test_runner/test:1409:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:974:7)
+  ...
+# Subtest: reset 与 destroy：清空 token/输入、移除 DOM 与隐藏字段、注销注册表
+ok 6 - reset 与 destroy：清空 token/输入、移除 DOM 与隐藏字段、注销注册表
+  ---
+  duration_ms: 2197.294502
+  type: 'test'
+  ...
+# Subtest: 在途 reset：/api/challenge 晚到的真实响应不恢复题目/token/成功通知
+ok 7 - 在途 reset：/api/challenge 晚到的真实响应不恢复题目/token/成功通知
+  ---
+  duration_ms: 2099.324041
+  type: 'test'
+  ...
+# Subtest: 在途 reset：/api/redeem 晚到的真实响应不恢复题目/token/成功通知
+not ok 8 - 在途 reset：/api/redeem 晚到的真实响应不恢复题目/token/成功通知
+  ---
+  duration_ms: 2308.847882
+  type: 'test'
+  location: '/data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:572:3'
+  failureType: 'testCodeFailure'
+  error: 'shadow DOM 里找不到按钮：提交答案'
+  code: 'ERR_TEST_FAILURE'
+  stack: |-
+    widgetButtonCenter (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:224:19)
+    process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    async clickWidgetButton (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:230:15)
+    async TestContext.<anonymous> (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:580:7)
+    async Test.run (node:internal/test_runner/test:1409:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:974:7)
+  ...
+# Subtest: 兑换 HTTP 挂起：超时可换题，迟到的真实成功不能复活 token，也不自动重兑
+not ok 9 - 兑换 HTTP 挂起：超时可换题，迟到的真实成功不能复活 token，也不自动重兑
+  ---
+  duration_ms: 2496.924116
+  type: 'test'
+  location: '/data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:598:1'
+  failureType: 'testCodeFailure'
+  error: 'shadow DOM 里找不到按钮：提交答案'
+  code: 'ERR_TEST_FAILURE'
+  stack: |-
+    widgetButtonCenter (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:224:19)
+    process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    async clickWidgetButton (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:230:15)
+    async TestContext.<anonymous> (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:605:3)
+    async Test.run (node:internal/test_runner/test:1409:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:974:7)
+  ...
+# Subtest: 计算超时是真实约束：预算到点即明确失败，不去兑换
+ok 10 - 计算超时是真实约束：预算到点即明确失败，不去兑换
+  ---
+  duration_ms: 3408.790768
+  type: 'test'
+  ...
+#   [实测] bits=20 浏览器侧 PoW + redeem 墙钟 = 8102 ms（同一台机器 bits=12 的对照见闭环用例）
+# Subtest: 高难度站点：取消正在进行的计算不会晚到生效
+ok 11 - 高难度站点：取消正在进行的计算不会晚到生效
+  ---
+  duration_ms: 14501.996893
+  type: 'test'
+  ...
+# Subtest: CSP 禁止 Worker：明确失败，绝不假装通过
+ok 12 - CSP 禁止 Worker：明确失败，绝不假装通过
+  ---
+  duration_ms: 2704.018984
+  type: 'test'
+  ...
+# Subtest: 键盘可完成：Tab 到达输入框与按钮，Enter 提交
+ok 13 - 键盘可完成：Tab 到达输入框与按钮，Enter 提交
+  ---
+  duration_ms: 2702.633893
+  type: 'test'
+  ...
+# Subtest: 窄屏 375×667：视口真的设成 375，布局不溢出、图片比例正确、控件全部可命中
+not ok 14 - 窄屏 375×667：视口真的设成 375，布局不溢出、图片比例正确、控件全部可命中
+  ---
+  duration_ms: 2289.310328
+  type: 'test'
+  location: '/data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:758:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    窄屏下按钮数量不对：[{"x":0,"y":0,"w":0,"h":0,"right":0,"bottom":0,"hit":false},{"x":0,"y":0,"w":0,"h":0,"right":0,"bottom":0,"hit":false},{"x":0,"y":0,"w":0,"h":0,"right":0,"bottom":0,"hit":false},{"x":0,"y":0,"w":0,"h":0,"right":0,"bottom":0,"hit":false},{"x":0,"y":0,"w":0,"h":0,"right":0,"bottom":0,"hit":false},{"x":0,"y":0,"w":0,"h":0,"right":0,"bottom":0,"hit":false},{"x":48,"y":449,"w":82,"h":44,"right":130,"bottom":493,"hit":true},{"x":136,"y":449,"w":68,"h":44,"right":204,"bottom":493,"hit":true}]
+    
+    8 !== 2
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 2
+  actual: 8
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:783:10)
+    process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    async Test.run (node:internal/test_runner/test:1409:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:974:7)
+  ...
+# Subtest: 窄屏 375：真实鼠标点击 + 键盘输入走完验证与业务提交
+ok 15 - 窄屏 375：真实鼠标点击 + 键盘输入走完验证与业务提交
+  ---
+  duration_ms: 2913.616104
+  type: 'test'
+  ...
+# Subtest: 窄屏 375：错误文案不撑破布局（CSP 禁 Worker 的档位）
+ok 16 - 窄屏 375：错误文案不撑破布局（CSP 禁 Worker 的档位）
+  ---
+  duration_ms: 2687.367152
+  type: 'test'
+  ...
+# Subtest: 窄屏 414×896（较宽手机档）回归：无横向溢出、控件可命中、容器不吃满超宽
+not ok 17 - 窄屏 414×896（较宽手机档）回归：无横向溢出、控件可命中、容器不吃满超宽
+  ---
+  duration_ms: 1886.85368
+  type: 'test'
+  location: '/data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:825:1'
+  failureType: 'testCodeFailure'
+  error: '414 档按钮不可命中：{"x":0,"y":0,"w":0,"h":0,"right":0,"bottom":0,"hit":false}'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    TestContext.<anonymous> (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:833:37)
+    process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    async Test.run (node:internal/test_runner/test:1409:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:974:7)
+  ...
+# Subtest: 文档最小示例 fixture：deferred 脚本顺序确定，init 里 EpoCHA 已定义，字段属于目标 form
+not ok 18 - 文档最小示例 fixture：deferred 脚本顺序确定，init 里 EpoCHA 已定义，字段属于目标 form
+  ---
+  duration_ms: 2111.15853
+  type: 'test'
+  location: '/data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:847:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    fixture 上的实例没进入 ready（实得 loading）
+    
+    'loading' !== 'ready'
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 'ready'
+  actual: 'loading'
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:861:10)
+    process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    async Test.run (node:internal/test_runner/test:1409:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:974:7)
+  ...
+# Subtest: 文档最小示例 fixture：FormData 带上 token，原生 form POST 真写入；没验证时同一按钮被服务端拒
+ok 19 - 文档最小示例 fixture：FormData 带上 token，原生 form POST 真写入；没验证时同一按钮被服务端拒
+  ---
+  duration_ms: 4395.610064
+  type: 'test'
+  ...
+# Subtest: 隐藏字段的三种归属：form 外无关联即抛错且不留孤儿字段、显式 form 关联可用、fieldName:'' 不建字段
+ok 20 - 隐藏字段的三种归属：form 外无关联即抛错且不留孤儿字段、显式 form 关联可用、fieldName:'' 不建字段
+  ---
+  duration_ms: 1911.286967
+  type: 'test'
+  ...
+# Subtest: fixture：reset 从 FormData 里拿掉 token，destroy 移除字段本身
+ok 21 - fixture：reset 从 FormData 里拿掉 token，destroy 移除字段本身
+  ---
+  duration_ms: 3097.291416
+  type: 'test'
+  ...
+# Subtest: 方案 B：同源 worker 文件路径可用（该页 CSP 禁 blob:，能过就说明确实走的是文件）
+ok 22 - 方案 B：同源 worker 文件路径可用（该页 CSP 禁 blob:，能过就说明确实走的是文件）
+  ---
+  duration_ms: 2703.654654
+  type: 'test'
+  ...
+# Subtest: 页面与组件的请求面：只打 /api/challenge 与 /api/redeem，不带凭据
+ok 23 - 页面与组件的请求面：只打 /api/challenge 与 /api/redeem，不带凭据
+  ---
+  duration_ms: 2892.822339
+  type: 'test'
+  ...
+# Subtest: 短 TTL 延迟（真实浏览器）：客户端保守扣除兑换耗时，迟到成功不发放过期 token
+not ok 24 - 短 TTL 延迟（真实浏览器）：客户端保守扣除兑换耗时，迟到成功不发放过期 token
+  ---
+  duration_ms: 3606.56422
+  type: 'test'
+  location: '/data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:1025:1'
+  failureType: 'testCodeFailure'
+  error: 'shadow DOM 里找不到按钮：提交答案'
+  code: 'ERR_TEST_FAILURE'
+  stack: |-
+    widgetButtonCenter (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:224:19)
+    process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    async clickWidgetButton (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:230:15)
+    async TestContext.<anonymous> (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:1032:3)
+    async Test.run (node:internal/test_runner/test:1409:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:974:7)
+  ...
+# Subtest: 图片解码失败（真实浏览器）：进入 error、清理旧题且零兑换请求
+not ok 25 - 图片解码失败（真实浏览器）：进入 error、清理旧题且零兑换请求
+  ---
+  duration_ms: 2000.913681
+  type: 'test'
+  location: '/data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:1057:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+    
+      {
+        image: false,
+    +   refresh: true,
+    -   refresh: false,
+        submit: true
+      }
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    image: false
+    submit: true
+    refresh: false
+  actual:
+    image: false
+    submit: true
+    refresh: true
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:1081:10)
+    process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    async Test.run (node:internal/test_runner/test:1409:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:974:7)
+  ...
+# Subtest: 答案框 label 绑定（真实浏览器）：点击标签聚焦输入框且可访问名称正确
+ok 26 - 答案框 label 绑定（真实浏览器）：点击标签聚焦输入框且可访问名称正确
+  ---
+  duration_ms: 2977.061429
+  type: 'test'
+  ...
+# Subtest: reset 清旧图并禁用提交（真实浏览器）：只有刷新才能恢复作答
+not ok 27 - reset 清旧图并禁用提交（真实浏览器）：只有刷新才能恢复作答
+  ---
+  duration_ms: 2818.057766
+  type: 'test'
+  location: '/data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:1112:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+    
+      {
+        image: false,
+    +   refresh: true,
+    -   refresh: false,
+        state: 'idle',
+        submit: true,
+        token: ''
+      }
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    state: 'idle'
+    image: false
+    submit: true
+    refresh: false
+    token: ''
+  actual:
+    state: 'idle'
+    image: false
+    submit: true
+    refresh: true
+    token: ''
+  operator: 'deepStrictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:1119:10)
+    process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    async Test.run (node:internal/test_runner/test:1409:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:974:7)
+  ...
+# Subtest: maxAutoRetry=0（真实浏览器）：challenge-unavailable 不自动重试
+ok 28 - maxAutoRetry=0（真实浏览器）：challenge-unavailable 不自动重试
+  ---
+  duration_ms: 4081.53463
+  type: 'test'
+  ...
+# Subtest: 过期时清空 token 与隐藏字段（客户端倒计时跟着服务端的 response_ttl）
+not ok 29 - 过期时清空 token 与隐藏字段（客户端倒计时跟着服务端的 response_ttl）
+  ---
+  duration_ms: 32713.377368
+  type: 'test'
+  location: '/data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:1166:1'
+  failureType: 'testCodeFailure'
+  error: '等待条件超时：短 TTL 实例验证通过'
+  code: 'ERR_TEST_FAILURE'
+  stack: |-
+    BiDi.waitUntil (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/bidi.mjs:108:46)
+    process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    async TestContext.<anonymous> (file:///data/workspace/epocha-governance-20261119/source/docs/scripts/browser/widget_browser.test.mjs:1195:3)
+    async Test.run (node:internal/test_runner/test:1409:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:974:7)
+  ...
+1..29
+# tests 29
+# suites 0
+# pass 19
+# fail 10
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 181702.564094

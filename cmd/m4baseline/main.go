@@ -12,16 +12,16 @@ package main
 
 import (
 	"context"
-	"flag"
-	"fmt"
-	"os"
 	"crypto/sha256"
 	"encoding/hex"
-	"runtime/debug"
+	"flag"
+	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 
 	"github.com/shijianus/EpoCHA/internal/m4baseline"
@@ -53,40 +53,57 @@ func run(args []string) int {
 		return 1
 	}
 	gensProvided := false
-	fs.Visit(func(f *flag.Flag) { if f.Name == "generators" { gensProvided = true } })
-	if fs.NArg()!=0 || *difficulty<1 || *difficulty>5 || (*lang!="zh-CN" && *lang!="en") || *csvPath!="" || *jsonPath!="" {
-		fmt.Fprintln(os.Stderr,"m4baseline: invalid parameters; use one new --out-dir for the complete bundle")
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "generators" {
+			gensProvided = true
+		}
+	})
+	if fs.NArg() != 0 || *difficulty < 1 || *difficulty > 5 || (*lang != "zh-CN" && *lang != "en") || *csvPath != "" || *jsonPath != "" {
+		fmt.Fprintln(os.Stderr, "m4baseline: invalid parameters; use one new --out-dir for the complete bundle")
 		return 1
 	}
 	gens := append([]string(nil), m4baseline.DefaultGenerators...)
 	if gensProvided {
 		gens = nil
-		seen:=map[string]bool{}
+		seen := map[string]bool{}
 		for _, g := range strings.Split(*gensFlag, ",") {
 			g = strings.TrimSpace(g)
-			if g=="" || !knownGenerator(g) || seen[g] {
-				fmt.Fprintln(os.Stderr,"m4baseline: empty, duplicate or unknown generator")
+			if g == "" || !knownGenerator(g) || seen[g] {
+				fmt.Fprintln(os.Stderr, "m4baseline: empty, duplicate or unknown generator")
 				return 1
 			}
-			seen[g]=true
+			seen[g] = true
 			gens = append(gens, g)
 		}
 	}
-	rootBytes,err:=exec.Command("git","rev-parse","--show-toplevel").Output()
-	if err!=nil {fmt.Fprintln(os.Stderr,"m4baseline: source identity unavailable");return 1}
-	root:=strings.TrimSpace(string(rootBytes))
-	identity,err:=m4baseline.CaptureSource(root)
-	if err!=nil {fmt.Fprintln(os.Stderr,"m4baseline: source identity unavailable");return 1}
-	var target string
-	if *outDir=="" {
-		target,err=os.MkdirTemp("","epocha-m4-")
-	} else {
-		target,err=filepath.Abs(*outDir)
-		if err==nil {err=os.Mkdir(target,0700)}
+	rootBytes, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "m4baseline: source identity unavailable")
+		return 1
 	}
-	if err!=nil {fmt.Fprintln(os.Stderr,"m4baseline: output must be a new directory");return 1}
-	base := m4baseline.BaselineInfo{OID:identity.Commit,Branch:identity.Branch,Status:"clean"}
-	if identity.Dirty {base.Status="dirty"}
+	root := strings.TrimSpace(string(rootBytes))
+	identity, err := m4baseline.CaptureSource(root)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "m4baseline: source identity unavailable")
+		return 1
+	}
+	var target string
+	if *outDir == "" {
+		target, err = os.MkdirTemp("", "epocha-m4-")
+	} else {
+		target, err = filepath.Abs(*outDir)
+		if err == nil {
+			err = os.Mkdir(target, 0700)
+		}
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "m4baseline: output must be a new directory")
+		return 1
+	}
+	base := m4baseline.BaselineInfo{OID: identity.Commit, Branch: identity.Branch, Status: "clean"}
+	if identity.Dirty {
+		base.Status = "dirty"
+	}
 	cfg := m4baseline.Config{
 		Challenges: *challenges,
 		Difficulty: *difficulty,
@@ -101,20 +118,45 @@ func run(args []string) int {
 	sum, records, err := m4baseline.Run(ctx, cfg, func(format string, args ...any) {
 		fmt.Fprintf(os.Stderr, format+"\n", args...)
 	})
-	code:=0
-	if err!=nil {code=1}
-	for _,result:=range sum.Results {if result.Verdict=="BLOCKED"||result.Verdict=="NOT_RUN" {if code==0 {code=3}}}
-	endIdentity,sourceErr:=m4baseline.CaptureSource(root)
-	if sourceErr!=nil||endIdentity.SHA256!=identity.SHA256 {fmt.Fprintln(os.Stderr,"m4baseline: source changed during measurement; no complete evidence");return 1}
-	executable,hashErr:=os.Executable();if hashErr!=nil{return 1}
-	binary,hashErr:=os.Open(executable);if hashErr!=nil{return 1}
-	hash:=sha256.New();_,hashErr=io.Copy(hash,binary);closeErr:=binary.Close();if hashErr!=nil||closeErr!=nil{return 1}
-	buildInfo,_:=debug.ReadBuildInfo()
-	metadata:=map[string]any{"source":identity,"source_stable":true,"binary_sha256":hex.EncodeToString(hash.Sum(nil)),"build_info":buildInfo,
-		"argv":args,"baseline_label":map[string]string{"oid":*oidFlag,"branch":*branchFlag},"source_binary_binding":"UNVERIFIED: requires independently captured build receipt",
-		"raw_exit_code":code,"measurement_error":err!=nil}
-	if publishErr:=m4baseline.PublishEvidence(target,sum,records,metadata,code);publishErr!=nil {fmt.Fprintf(os.Stderr,"m4baseline: evidence not complete: %v\n",publishErr);return 1}
-	fmt.Fprintf(os.Stderr,"m4baseline: complete bundle %s; raw_exit_code=%d\n",target,code)
+	code := 0
+	if err != nil {
+		code = 1
+	}
+	for _, result := range sum.Results {
+		if result.Verdict == "BLOCKED" || result.Verdict == "NOT_RUN" {
+			if code == 0 {
+				code = 3
+			}
+		}
+	}
+	endIdentity, sourceErr := m4baseline.CaptureSource(root)
+	if sourceErr != nil || endIdentity.SHA256 != identity.SHA256 {
+		fmt.Fprintln(os.Stderr, "m4baseline: source changed during measurement; no complete evidence")
+		return 1
+	}
+	executable, hashErr := os.Executable()
+	if hashErr != nil {
+		return 1
+	}
+	binary, hashErr := os.Open(executable)
+	if hashErr != nil {
+		return 1
+	}
+	hash := sha256.New()
+	_, hashErr = io.Copy(hash, binary)
+	closeErr := binary.Close()
+	if hashErr != nil || closeErr != nil {
+		return 1
+	}
+	buildInfo, _ := debug.ReadBuildInfo()
+	metadata := map[string]any{"source": identity, "source_stable": true, "binary_sha256": hex.EncodeToString(hash.Sum(nil)), "build_info": buildInfo,
+		"argv": args, "baseline_label": map[string]string{"oid": *oidFlag, "branch": *branchFlag}, "source_binary_binding": "UNVERIFIED: requires independently captured build receipt",
+		"raw_exit_code": code, "measurement_error": err != nil}
+	if publishErr := m4baseline.PublishEvidence(target, sum, records, metadata, code); publishErr != nil {
+		fmt.Fprintf(os.Stderr, "m4baseline: evidence not complete: %v\n", publishErr)
+		return 1
+	}
+	fmt.Fprintf(os.Stderr, "m4baseline: complete bundle %s; raw_exit_code=%d\n", target, code)
 	printSummary(sum)
 	return code
 }

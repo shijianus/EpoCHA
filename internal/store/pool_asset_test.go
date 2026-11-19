@@ -530,8 +530,8 @@ VALUES('legacy-1','arithmetic-baseline-v1','v1',3,'ready','{"task":"1 + 1","answ
 		t.Fatalf("打开阶段 3A 的库失败: %v", err)
 	}
 	t.Cleanup(func() { _ = d.Close() })
-	if v, _ := d.SchemaVersion(ctx); v != 6 {
-		t.Fatalf("升级后版本 = %d，期望 6", v)
+	if v, err := d.SchemaVersion(ctx); err != nil || v != schemaVersion {
+		t.Fatalf("升级后版本 = %d，期望 %d；err=%v", v, schemaVersion, err)
 	}
 	// 旧行完整保留，且新列是 NULL/''（不静默改变既有行的语义）
 	var (

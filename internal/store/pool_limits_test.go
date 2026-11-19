@@ -105,8 +105,8 @@ VALUES('legacy-asset','text-image-v1','v1',3,'ready','{"length":6,"charset":"AB"
 		t.Fatalf("打开 3B 库失败: %v", err)
 	}
 	t.Cleanup(func() { _ = d.Close() })
-	if v, _ := d.SchemaVersion(ctx); v != 6 {
-		t.Fatalf("升级后版本 = %d，期望 6", v)
+	if v, err := d.SchemaVersion(ctx); err != nil || v != schemaVersion {
+		t.Fatalf("升级后版本 = %d，期望 %d；err=%v", v, schemaVersion, err)
 	}
 	var got []byte
 	var mime string

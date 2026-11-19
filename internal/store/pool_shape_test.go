@@ -59,9 +59,9 @@ func TestPoolLifecycleQueryPlans(t *testing.T) {
 func TestMigration0003Shape(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "epocha.db")
 	d, _ := newDBAt(t, path)
-	// 0004（图片资产列）与 0005（payload 8KB 重建）之后最新版本是 5；本用例测的仍是 0003 的约束形状。
-	if v, _ := d.SchemaVersion(t.Context()); v != 6 {
-		t.Fatalf("schema version = %d，期望 6", v)
+	// Open 会执行全部增量迁移；本用例仍核对 0003 的约束在升级后保持。
+	if v, err := d.SchemaVersion(t.Context()); err != nil || v != schemaVersion {
+		t.Fatalf("schema version = %d，期望 %d；err=%v", v, schemaVersion, err)
 	}
 	var n int
 	if err := d.h.QueryRowContext(t.Context(), `SELECT count(*) FROM sqlite_master WHERE type='index'

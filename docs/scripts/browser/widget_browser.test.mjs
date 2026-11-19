@@ -30,12 +30,14 @@
 // 所以窄屏那几条是**执行**的用例，不是待办。若将来再出现真正的外部条件不足，必须用 t.skip
 // 表达并由 stage4b.sh 换算成 BLOCKED，不许用"直接 return"冒充通过。
 
-import test, { before, after } from "node:test";
+import test, { before, beforeEach, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { BiDi } from "./bidi.mjs";
 import { BROWSER_CASE_TITLES } from "./cases.mjs";
+import { createWidgetCaseFixture } from "./widget_fixture.mjs";
+import { assertImageDimensions } from "./image-dimensions.mjs";
 
 const caseTitle = (id) => {
   const title = BROWSER_CASE_TITLES[id];
@@ -49,27 +51,48 @@ const need = (name) => {
   return v;
 };
 const BIDI_WS = need("BIDI_WS");
-const EPOCHA_API = need("EPOCHA_API").replace(/\/+$/, "");
-const EXAMPLE_URL = need("EXAMPLE_URL");
-const NOWORKER_URL = need("EXAMPLE_NOWORKER_URL");
-const SEED_JSON = need("SEED_JSON");
-const SEED_DIR = need("SEED_DIR");
-const SITE_KEY = need("SITE_KEY");
-const HARD_URL = need("EXAMPLE_HARD_URL");
-const HARD_SITE_KEY = need("HARD_SITE_KEY");
-const SLOW_SITE_KEY = need("SLOW_SITE_KEY");
-const WORKERFILE_URL = need("EXAMPLE_WORKERFILE_URL");
-const TTL_URL = need("EXAMPLE_TTL_URL");
-const TTL_SITE_KEY = need("TTL_SITE_KEY");
+const SERVER_BIN = need("WIDGET_SERVER_BIN");
+const DEVSEED_BIN = need("WIDGET_DEVSEED_BIN");
+const EXAMPLEAPP_BIN = need("WIDGET_EXAMPLEAPP_BIN");
+const CASE_PARENT = need("WIDGET_CASE_PARENT");
 
-if (!existsSync(SEED_JSON)) throw new Error(`答案表不存在：${SEED_JSON}`);
-const seeds = JSON.parse(readFileSync(SEED_JSON, "utf8"));
-if (!Array.isArray(seeds) || seeds.length === 0) throw new Error("答案表为空");
+let EPOCHA_API;
+let EXAMPLE_URL;
+let NOWORKER_URL;
+let SEED_JSON;
+let SEED_DIR;
+let SITE_KEY;
+let HARD_URL;
+let HARD_SITE_KEY;
+let SLOW_SITE_KEY;
+let WORKERFILE_URL;
+let TTL_URL;
+let TTL_SITE_KEY;
 
-const answerByImageB64 = new Map();
-for (const s of seeds) {
-  if (!s.png || !s.answer) continue;
-  answerByImageB64.set(readFileSync(path.join(SEED_DIR, s.png)).toString("base64"), s.answer);
+let seeds;
+let answerByImageB64;
+let FIXTURE_URL;
+function applyFixture(fixture) {
+  EPOCHA_API = fixture.EPOCHA_API;
+  EXAMPLE_URL = fixture.EXAMPLE_URL;
+  NOWORKER_URL = fixture.EXAMPLE_NOWORKER_URL;
+  SEED_JSON = fixture.SEED_JSON;
+  SEED_DIR = fixture.SEED_DIR;
+  SITE_KEY = fixture.SITE_KEY;
+  HARD_URL = fixture.EXAMPLE_HARD_URL;
+  HARD_SITE_KEY = fixture.HARD_SITE_KEY;
+  SLOW_SITE_KEY = fixture.SLOW_SITE_KEY;
+  WORKERFILE_URL = fixture.EXAMPLE_WORKERFILE_URL;
+  TTL_URL = fixture.EXAMPLE_TTL_URL;
+  TTL_SITE_KEY = fixture.TTL_SITE_KEY;
+  seeds = JSON.parse(readFileSync(SEED_JSON, "utf8"));
+  if (!Array.isArray(seeds) || seeds.length === 0) throw new Error("答案表为空");
+  answerByImageB64 = new Map();
+  for (const s of seeds) {
+    if (!s.png || !s.answer) continue;
+    answerByImageB64.set(readFileSync(path.join(SEED_DIR, s.png)).toString("base64"), s.answer);
+  }
+  FIXTURE_URL = EXAMPLE_URL.replace(/\/+$/, "") + "/fixture";
 }
 
 const WIDGET_HOST = "#widget [data-epocha-widget]";
@@ -258,10 +281,28 @@ before(async () => {
   await bidi.startSession();
 });
 
+let caseFixture;
+beforeEach(async (t) => {
+  caseFixture = await createWidgetCaseFixture({
+    testName: t.name, parentDir: CASE_PARENT, serverBin: SERVER_BIN,
+    devseedBin: DEVSEED_BIN, exampleappBin: EXAMPLEAPP_BIN, signal: t.signal,
+  });
+  applyFixture(caseFixture);
+});
+
+afterEach(async () => {
+  try {
+    for (const c of openTabs.splice(0)) await bidi.closeTab(c);
+  } finally {
+    await caseFixture?.close();
+    caseFixture = null;
+  }
+});
+
 after(async () => {
-  for (const c of openTabs) await bidi.closeTab(c);
-  await bidi.send("session.end", {}).catch(() => {});
-  bidi.close();
+  if (!bidi) return;
+  try { await bidi.send("session.end", {}).catch(() => {}); }
+  finally { bidi.close(); }
 });
 
 test("闭环：显示图片 → 输入 → 浏览器内 PoW → redeem → 业务表单 → 服务端写入", async () => {
@@ -272,9 +313,11 @@ test("闭环：显示图片 → 输入 → 浏览器内 PoW → redeem → 业�
 
   const dims = await bidi.evaluateJSON(c, `(()=>{const h=document.querySelector(${JSON.stringify(WIDGET_HOST)});
     const img=h.shadowRoot.querySelector('img');
-    return {natural:[img.naturalWidth,img.naturalHeight], attr:[img.width,img.height], alt:img.alt};})()`);
-  assert.ok(dims.natural[0] > 0 && dims.natural[1] > 0, "浏览器没有解码出图片");
-  assert.deepEqual(dims.natural, dims.attr, `解码尺寸 ${dims.natural} 与声明 ${dims.attr} 不一致`);
+    const r=img.getBoundingClientRect();
+    return {natural:[img.naturalWidth,img.naturalHeight],
+      attributes:[Number(img.getAttribute('width')),Number(img.getAttribute('height'))],
+      rendered:[r.width,r.height], alt:img.alt};})()`);
+  assertImageDimensions(dims);
   assert.ok(!dims.alt.includes(answer), `alt 里出现了答案：${dims.alt}`);
 
   // 未验证就提交：业务后端拒绝，且不写入 —— 这就是"前端 onSuccess 不是授权"的浏览器侧证据。
@@ -799,7 +842,6 @@ test("窄屏 414×896（较宽手机档）回归：无横向溢出、控件可�
 // 这一组用例的存在理由：文档示例的两类错误（脚本顺序竞争、容器在 form 外）
 // 都只在"真加载 + 真提交"时现形，grep 文档字符串永远测不到。
 // fixture 与首页共用同一个 exampleapp 进程与同一份 CSP，所以"示例页能跑"不能替它作证。
-const FIXTURE_URL = EXAMPLE_URL.replace(/\/+$/, "") + "/fixture";
 const FIXTURE_CONTAINER = "#captcha";
 
 test("文档最小示例 fixture：deferred 脚本顺序确定，init 里 EpoCHA 已定义，字段属于目标 form", async () => {

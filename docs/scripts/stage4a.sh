@@ -69,19 +69,22 @@ manual_result() {
 cleanup() {
   local rc=$?
   set +e
-  for pid in "$SERVER_PID" "$APP1_PID" "$APP2_PID" "$APP3_PID" "$APP4_PID" "$APP6_PID" "$FF_PID"; do
+  for pid in "$SERVER_PID" "$APP1_PID" "$APP2_PID" "$APP3_PID" "$APP4_PID" "$APP5_PID" "$APP6_PID" "${DOWN_PID:-}" "$FF_PID"; do
     [[ -n "$pid" ]] && kill -TERM "$pid" 2>/dev/null || true
   done
   for _ in 1 2 3 4 5 6 7 8; do
     any=0
-    for pid in "$SERVER_PID" "$APP1_PID" "$APP2_PID" "$APP3_PID" "$APP4_PID" "$APP6_PID" "$FF_PID"; do
+    for pid in "$SERVER_PID" "$APP1_PID" "$APP2_PID" "$APP3_PID" "$APP4_PID" "$APP5_PID" "$APP6_PID" "${DOWN_PID:-}" "$FF_PID"; do
       [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && any=1
     done
     [[ $any -eq 0 ]] && break
     sleep 0.2
   done
-  for pid in "$SERVER_PID" "$APP1_PID" "$APP2_PID" "$APP3_PID" "$APP4_PID" "$APP6_PID" "$FF_PID"; do
+  for pid in "$SERVER_PID" "$APP1_PID" "$APP2_PID" "$APP3_PID" "$APP4_PID" "$APP5_PID" "$APP6_PID" "${DOWN_PID:-}" "$FF_PID"; do
     [[ -n "$pid" ]] && kill -KILL "$pid" 2>/dev/null || true
+  done
+  for pid in "$SERVER_PID" "$APP1_PID" "$APP2_PID" "$APP3_PID" "$APP4_PID" "$APP5_PID" "$APP6_PID" "${DOWN_PID:-}" "$FF_PID"; do
+    [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true
   done
   rm -rf "$WORK"
   exit $rc
@@ -340,6 +343,8 @@ else
     log "  Firefox BiDi：$(grep -o 'WebDriver BiDi listening.*' "$WORK/firefox.log" | head -n1)"
     set +e
     BIDI_WS="ws://127.0.0.1:$BIDI_PORT/session" \
+    WIDGET_SERVER_BIN="$ROOT/bin/epocha" WIDGET_DEVSEED_BIN="$WORK/devseed" \
+    WIDGET_EXAMPLEAPP_BIN="$WORK/exampleapp" WIDGET_CASE_PARENT="$WORK/browser-cases" \
     EPOCHA_API="$BASE" EXAMPLE_URL="http://127.0.0.1:8391/" EXAMPLE_NOWORKER_URL="http://127.0.0.1:8392/" \
     SEED_JSON="$SEED_JSON" SEED_DIR="$WORK/seed" SITE_KEY="$SITE_KEY" \
     HARD_SITE_KEY="$HARD_KEY" SLOW_SITE_KEY="$SLOW_KEY" \

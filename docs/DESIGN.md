@@ -1525,6 +1525,8 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
 
 ## 19. 变更日志
 
+- 2026-11-19 **基线恢复与候选治理（ADR-033）**：先保存既有 WIP、合入 `adcbe0b4`；Windows 修改→GitHub OID 核对→Linux 拉取。新增 Wave 夹具集合、PNG 与单帧雪碧图契约、CSS 显示尺寸与声明分离、浏览器资源所有权回归；SQLite 临时目录容量独立检查。Linux amd64 的补充测试不替代正式 arm64 / 专用 Docker 与人工验收；不改变题型安全等级。原始命令、状态与阻断见 `docs/reviews/BASELINE-RECOVERY-2026-11-19.md`。
+
 - 2026-11-12 **M4 Gate B（Qualification Gate B，review）**：新增 dev-only `cmd/m4baseline/` +
   `internal/m4baseline/`（7 个 Wave 1/2 题型的确定性攻击基线；solver 只吃公开 `/api/challenge`
   DTO，不读 verifier/DB/生成器私有 seed/管理面；`cmd/server` 依赖图不含它，`GOOS=linux

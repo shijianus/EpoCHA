@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/shijianus/EpoCHA/internal/eval"
@@ -146,6 +148,50 @@ func TestQuestionDTOImageDimensionsMatchPNG(t *testing.T) {
 				t.Fatalf("尺寸不一致的图片资产不得出网；DTO=%v", dto)
 			}
 		})
+	}
+}
+
+func TestQuestionDTOBadPNGMetadataFailsClosed(t *testing.T) {
+	h := newHarness(t, nil)
+	site, _ := h.imageSiteWithSecret(t, "bad-image-contract", "sk-bad-image-contract", 1)
+	fixture := imageFixture(t, 1, "bad-image-contract")
+	ids := h.seedQuestions(t, site.Policy.Difficulty, fixture)
+	if len(ids) != 1 {
+		t.Fatalf("seedQuestions returned %d ids, want 1", len(ids))
+	}
+
+	const verifierSentinel = "BAD-PNG-VERIFIER-SENTINEL-54f0a8d9"
+	maintenance := rawSQLite(t, h.dbPath)
+	if _, err := maintenance.ExecContext(context.Background(),
+		`UPDATE pool SET asset_blob=?, verifier_blob=? WHERE id=?`,
+		[]byte("not a PNG"), []byte(verifierSentinel), ids[0]); err != nil {
+		t.Fatal(err)
+	}
+
+	r := h.challengeReply("sk-bad-image-contract")
+	if r.status != http.StatusServiceUnavailable || !r.hasCode(CodeChallengeUnavailable) {
+		t.Fatalf("坏 PNG 应返回 challenge-unavailable 503：%d %s", r.status, r.body)
+	}
+	if _, ok := r.got["token"]; ok {
+		t.Fatalf("坏 PNG 题不应签发 token：%s", r.body)
+	}
+	if _, ok := r.got["pow"]; ok {
+		t.Fatalf("坏 PNG 题不应返回 PoW：%s", r.body)
+	}
+	if strings.Contains(r.body, verifierSentinel) || strings.Contains(h.logs.String(), verifierSentinel) {
+		t.Fatal("坏 PNG 路径泄露了题目 verifier")
+	}
+	if n := h.activeChallenges(t); n != 0 {
+		t.Fatalf("坏 PNG 不应留下 challenge，issued=%d", n)
+	}
+	buckets, err := h.db.PoolStats(context.Background(), h.clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range buckets {
+		if b.GeneratorID == generator.TextImageID && (b.Ready != 0 || b.Terminal != 1) {
+			t.Fatalf("坏 PNG 应隔离为唯一 terminal 题：ready=%d terminal=%d", b.Ready, b.Terminal)
+		}
 	}
 }
 

@@ -1534,3 +1534,21 @@ verifier 与历史结果；`shape-grid-v1` 的旧池行（无 polarity 字段）
 不改变 token、题目答案、secret 校验或 `/siteverify` 协议；冷却中的重试与容量耗尽方向更严格。
 逐项回归、精确命令与尚未执行的目标机验收见本次交付目录；未取得真实证据前不登记阶段完成。
 
+## ADR-033 2026-11-19：工程基线恢复、测试资源所有权与候选证据
+
+### 背景与授权
+
+用户要求所有代码在 Windows 修改，先同步 GitHub，再由 Linux 拉取运行；恢复可复现基线，不改变题型安全等级，不直接发布生产。初始 HEAD 为 `6fc8c657fbd5f553a44216dc786a2a01285fee36`，工作树含既有审计与 M4 修改。请求中的 `164bb6327b85fe1642bbb8bd95611186211c5625` 在已检查对象库中不存在，GitHub 未列出预期分支；不得把别的提交冒充该候选。
+
+### 决策
+
+1. 既有工作先备份到明确的 WIP 分支，再合入基线 `adcbe0b42328231ec801098f390ba817fe8e057a`，后续修复在独立工作分支推进。每次 Windows 提交、GitHub 远端 OID 回读、Linux 拉取后的 OID 分别记录；不在 Linux 修改源码，不 force push，不修改 main、既有阶段标签或生产实例。
+2. Wave 注册问题按夹具与生产分别验证。生产 `knownGenerators` 已有七型；旧 API `testRegistry` 漏注册。保留既有注册补丁，增加集合回归，不改变生产启用策略。
+3. 浏览器负向测试只能停止自己创建的资源。服务不可达负测保留，不能终止共享正向服务；父编排在阶段转换检查服务存活，恢复仅启动原配置与原数据库，不重放非幂等管理写入。widget 用例独占服务、数据与题池，关闭用例页面后回收自己创建的进程。
+4. 静态 PNG 固有尺寸必须等于 DTO 声明；sprite sheet 的 DTO 宽高仍指单帧，整图必须等于单帧乘网格（ADR-025）。DTO 出网前用有界 `png.DecodeConfig` 核验，不分配完整像素、不修改判分路径。浏览器读取 `getAttribute('width'/'height')` 核验声明，另外检查显示比例；`img.width/height` 受 CSS 缩放影响，不能当声明尺寸。
+5. SQLite 临时文件系统独立预检。2026-11-19 Linux amd64 对照中 `/data`、`/tmp` 有余量而 `/var/tmp` 所在根分区已满；相同代码的批量清理在指定独占 `SQLITE_TMPDIR` 后通过。这是环境差异，不是放宽删除约束的理由。验收使用有容量预算的独占临时目录；资源不足记 BLOCKED，不清理未知文件或 Docker 资源，不改 SQLite 耐久性或生产 SQL 语义。
+6. 统一收据必须绑定完整提交、源码状态、环境/架构、命令、原始退出码、状态、日志与 SHA-256。Linux amd64 只提供补充诊断，正式 B / linux/arm64 / UID:GID 1000:1000、专用 Docker、人工/辅助技术等门槛不变。工程子集通过不推出发布通过；`experimental`、`production_ready`、`release_ready` 不提供覆盖开关。
+
+### 验收边界
+
+报告见 `docs/reviews/BASELINE-RECOVERY-2026-11-19.md`。日志、红绿对照与资源不足的未执行项分别登记。完整必要证据不足时结论必须不可发布，不输出 `RELEASE_APPROVED=true`。

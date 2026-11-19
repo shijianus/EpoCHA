@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"image/png"
 	"io"
 	"net/http"
 	"net/url"
@@ -490,6 +492,50 @@ func (s *Server) questionDTO(q *store.PoolQuestion) (map[string]any, error) {
 			return nil, errAssetInconsistent
 		}
 		if len(q.Asset) > store.MaxAssetBytes {
+			return nil, errAssetInconsistent
+		}
+		cfg, err := png.DecodeConfig(bytes.NewReader(q.Asset))
+		if err != nil {
+			return nil, errAssetInconsistent
+		}
+		imageWidth, widthOK := fields["image_width"].(int)
+		imageHeight, heightOK := fields["image_height"].(int)
+		if !widthOK || !heightOK || imageWidth < 1 || imageHeight < 1 {
+			return nil, errAssetInconsistent
+		}
+		wantWidth, wantHeight := imageWidth, imageHeight
+		if mode, ok := fields["render_mode"]; ok {
+			renderMode, ok := mode.(string)
+			if !ok {
+				return nil, errAssetInconsistent
+			}
+			switch renderMode {
+			case generator.RenderModeStatic:
+			case generator.RenderModeSpriteSheet:
+				cols, colsOK := fields["frame_cols"].(int)
+				rows, rowsOK := fields["frame_rows"].(int)
+				frameCount, countOK := fields["frame_count"].(int)
+				frameMS, frameMSOK := fields["frame_ms"].(int)
+				frameLoop, loopOK := fields["frame_loop"].(bool)
+				if !colsOK || !rowsOK || !countOK || !frameMSOK || !loopOK {
+					return nil, errAssetInconsistent
+				}
+				frames := generator.FrameSpec{
+					Mode: renderMode, Count: frameCount, Cols: cols, Rows: rows,
+					FrameMS: frameMS, Loop: frameLoop,
+				}
+				if frames.Validate() != nil {
+					return nil, errAssetInconsistent
+				}
+				wantWidth, wantHeight, err = frames.SheetSize(imageWidth, imageHeight)
+				if err != nil {
+					return nil, errAssetInconsistent
+				}
+			default:
+				return nil, errAssetInconsistent
+			}
+		}
+		if cfg.Width != wantWidth || cfg.Height != wantHeight {
 			return nil, errAssetInconsistent
 		}
 		fields["media"] = generator.MediaImage

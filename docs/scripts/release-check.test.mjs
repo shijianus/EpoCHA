@@ -246,7 +246,7 @@ test('Node TAP verification rejects empty output, zero tests and skipped tests',
 });
 
 test('full plan retains all four strongest existing gates, without a force-pass switch', async () => {
-  const { LEGACY_GATES, cleanEnvironment } = await rules();
+  const { LEGACY_GATES, cleanEnvironment, LINUX_CROSS_VET_ENV } = await rules();
   assert.deepEqual(LEGACY_GATES.map((gate) => gate.id), ['stage4b', 'stage5a', 'stage5b', 'admin-ui']);
   assert.deepEqual(LEGACY_GATES.map((gate) => gate.script), [
     'docs/scripts/stage4b.sh', 'docs/scripts/stage5a.sh', 'docs/scripts/stage5b.sh', 'docs/scripts/admin-ui-check.sh',
@@ -258,6 +258,7 @@ test('full plan retains all four strongest existing gates, without a force-pass 
   assert.equal(env.PATH, '/tools');
   assert.equal(env.NODE_OPTIONS, undefined);
   assert.equal(Object.keys(env).some((key) => key.startsWith('EPOCHA_')), false);
+  assert.deepEqual(LINUX_CROSS_VET_ENV, { GOOS: 'linux', GOARCH: 'amd64', CGO_ENABLED: '0' });
 });
 
 test('Docker acceptance refuses an unmeasured or nonempty daemon instead of deleting existing assets', async () => {

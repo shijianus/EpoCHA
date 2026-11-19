@@ -34,6 +34,15 @@ const FUTURE_GO_BY_KEY = new Map(FUTURE_GO_PLACEHOLDERS.map((item) => [`${item.p
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const fail = (reason) => ({ status: 'FAIL', reason });
 
+// Windows hosts cannot execute Linux-only packages such as internal/store/lock.go,
+// but they can still compile-check the formal Linux target. Keep this environment
+// explicit so a cross-vet result is never confused with a native Linux test run.
+export const LINUX_CROSS_VET_ENV = Object.freeze({
+  GOOS: 'linux',
+  GOARCH: 'amd64',
+  CGO_ENABLED: '0',
+});
+
 export function checkBinaryBytes(size) {
   if (!Number.isSafeInteger(size) || size <= 0 || size > MAX_BINARY_BYTES) {
     throw new Error(`binary size ${size} B is outside 1..${MAX_BINARY_BYTES} B (35 MiB)`);
@@ -456,7 +465,14 @@ function runProfile(profile, output) {
         else missing('binary-size', 'static build did not complete');
         run('secret-scan', 'make', ['secret-scan']);
       } else for (const id of ['static-build', 'binary-size', 'secret-scan']) missing(id, 'GNU Make unavailable');
-    } else for (const id of ['go-vet', 'go-test', 'go-race', 'static-build', 'binary-size', 'secret-scan']) missing(id, `legitimate Linux + ${GO_VERSION} required; not attempted on native Windows`);
+    } else if (goOK) {
+      // A Windows host can still verify the Linux target's package graph. Runtime
+      // tests, race, static builds and release artifacts remain Linux-only gates.
+      run('go-vet', 'go', ['vet', './...'], undefined, true, LINUX_CROSS_VET_ENV);
+      for (const id of ['go-test', 'go-race', 'static-build', 'binary-size', 'secret-scan']) {
+        missing(id, `Linux runtime required; cross-vet was executed for linux/${LINUX_CROSS_VET_ENV.GOARCH}`);
+      }
+    } else for (const id of ['go-vet', 'go-test', 'go-race', 'static-build', 'binary-size', 'secret-scan']) missing(id, `${GO_VERSION} unavailable; Linux target checks not attempted`);
 
     let fullPlatform = false;
     if (full) fullPlatform = local('release-platform', () => {

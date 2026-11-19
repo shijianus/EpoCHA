@@ -306,6 +306,7 @@ if (typeof self !== "undefined") {
       btnUndo: "撤销",
       btnRotate: "旋转",
       errInteractiveUnavailable: "交互题型模块加载失败（CSP 或网络）。请换一题。",
+      errTouchLayout: "此题在当前触屏尺寸下不适合操作，请换一题。",
       errIncompleteOption: "请选择一个选项。",
       cellLabel: "第 {n} 格",
       selectedCount: "已选 {n} 格",
@@ -375,6 +376,7 @@ if (typeof self !== "undefined") {
       btnUndo: "Undo",
       btnRotate: "Rotate",
       errInteractiveUnavailable: "The interactive question module could not be loaded (CSP or network). Get another question.",
+      errTouchLayout: "This question is too dense for the current touch layout. Get another question.",
       errIncompleteOption: "Choose one option.",
       cellLabel: "Cell {n}",
       selectedCount: "{n} selected",
@@ -559,10 +561,11 @@ if (typeof self !== "undefined") {
   }
 
   var STYLE_RULES = [
-    ":host{all:unset;display:block;width:100%;max-width:480px;font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;color:#182534}",
-    ".box{border:1px solid #cbd5e1;border-radius:14px;padding:14px;background:linear-gradient(180deg,#fff 0%,#f8fbff 100%);box-shadow:0 8px 24px rgba(26,55,88,.10)}",
+    ":host{all:unset;display:block;box-sizing:border-box;width:100%;max-width:480px;font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;color:#182534}",
+    ".box{box-sizing:border-box;width:100%;border:1px solid #cbd5e1;border-radius:14px;padding:14px;background:linear-gradient(180deg,#fff 0%,#f8fbff 100%);box-shadow:0 8px 24px rgba(26,55,88,.10)}",
     ".img{display:flex;justify-content:center;align-items:center;min-height:112px;padding:8px;box-sizing:border-box;background:#f7fafc;border:1px solid #cbd5e1;border-radius:12px;overflow:hidden}",
     ".img img{display:block;max-width:100%;height:auto;border-radius:8px}",
+    ".imgmsg{margin:8px 0;color:#5b6b7d;text-align:center}",
     ".lbl{display:block;font-weight:650;margin:12px 0 6px;color:#22364d}",
     "input.ans{width:100%;min-height:44px;box-sizing:border-box;font:inherit;letter-spacing:.3em;text-transform:uppercase;padding:8px 10px;border:1px solid #9fb0c3;border-radius:8px;background:#fff}",
     "input.ans[aria-invalid=true]{border-color:#a31414;border-width:2px}",
@@ -582,10 +585,10 @@ if (typeof self !== "undefined") {
     ".qimg img{display:block;width:100%;max-width:100%;height:auto;border-radius:10px}",
     ".cells{position:absolute;inset:0;z-index:2}",
     ".cell{position:absolute;box-sizing:border-box;margin:0;padding:0;min-width:0;border:2px solid transparent;background:transparent;border-radius:8px;cursor:pointer;touch-action:manipulation}",
-    ".cells[data-hit-mode=grid] .cell,.cells[data-hit-mode=rotate] .cell,.cells[data-hit-mode=placements] .cell{min-width:44px;min-height:44px}",
+    ".cells[data-hit-mode=grid] .cell,.cells[data-hit-mode=rotate] .cell,.cells[data-hit-mode=placements] .cell,.cells[data-hit-mode=select] .cell,.cells[data-hit-mode=progressive] .cell,.cells[data-hit-mode=shell] .cell{min-width:44px;min-height:44px}",
     ".cell:hover:not([disabled]){background:rgba(33,104,180,.12);border-color:rgba(33,104,180,.55)}",
     ".cell[aria-pressed=true]{background:rgba(33,104,180,.26);border-color:#2168b4;box-shadow:inset 0 0 0 2px rgba(255,255,255,.8)}",
-    ".cell:focus-visible{outline:2px solid #1a5fb4;outline-offset:0}",
+    ".cell:focus-visible{outline:3px solid #2168b4;outline-offset:-3px}",
     ".cellsum{margin:6px 0 0;font-size:12px;color:#555}",
     ".ordersum{margin:6px 0 0;font-size:12px;color:#555}",
     ".tileimg{position:absolute;inset:0;background-repeat:no-repeat;pointer-events:none;transition:transform 140ms ease;transform-origin:50% 50%}",
@@ -595,7 +598,7 @@ if (typeof self !== "undefined") {
     ".pathnum{position:absolute;right:2px;bottom:1px;font-size:11px;font-weight:700;color:#123f78;background:#fff;border:1px solid #1a5fb4;border-radius:8px;min-width:14px;height:14px;line-height:14px;text-align:center;pointer-events:none}",
     ".rankno{position:absolute;left:2px;top:2px;font-size:12px;font-weight:700;color:#fff;background:#1a5fb4;border-radius:9px;min-width:18px;height:18px;line-height:18px;text-align:center;pointer-events:none}",
     ".roundcover{position:absolute;left:0;width:100%;z-index:1;background:#e9e9e9;border-top:1px solid #bbb;border-bottom:1px solid #bbb;pointer-events:none}",
-    ".frameview{position:relative;background-repeat:no-repeat;max-width:100%;line-height:0}",
+    ".frameview{position:relative;display:block;max-width:100%;background-repeat:no-repeat;line-height:0;border-radius:10px;overflow:hidden}",
     ".cell[data-sel=true]{border-color:#1a5fb4;background:rgba(26,95,180,.22);box-shadow:inset 0 0 0 2px #1a5fb4}",
     ".cell[data-path=true]{border-color:#1a5fb4;background:rgba(26,95,180,.14)}",
     ".cell[data-used=true]{opacity:.45}",
@@ -603,14 +606,14 @@ if (typeof self !== "undefined") {
     ".aux{margin:6px 0 0}",
     ".aux button{margin:0 6px 0 0;padding:3px 8px}",
     ".pairs{margin:8px 0 0}",
-    ".pairrow{display:flex;gap:8px;align-items:center;margin:4px 0}",
-    ".pairrow label{flex:0 0 auto;max-width:55%;font-size:13px}",
-    ".pairrow input{width:90px;min-height:44px;box-sizing:border-box;font:inherit;padding:8px;border:1px solid #9fb0c3;border-radius:8px}",
+    ".pairrow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:4px 0}",
+    ".pairrow label{flex:1 1 11rem;min-width:0;max-width:none;font-size:13px}",
+    ".pairrow input{flex:0 1 90px;width:90px;min-width:5.5rem;min-height:44px;box-sizing:border-box;font:inherit;padding:8px;border:1px solid #9fb0c3;border-radius:8px}",
     ".angle{margin:8px 0 0}",
-    ".angle input{width:100%;box-sizing:border-box}",
+    ".angle input{width:100%;min-height:44px;box-sizing:border-box;accent-color:#2168b4}",
     ".angleout{display:inline-block;margin-left:8px;font-variant-numeric:tabular-nums}",
     ".pointlayer{position:absolute;inset:0;z-index:2;cursor:crosshair;outline:none}",
-    ".pointlayer:focus-visible{outline:2px solid #1a5fb4;outline-offset:0}",
+    ".pointlayer:focus-visible{outline:3px solid #2168b4;outline-offset:-3px}",
     ".pointmark{position:absolute;width:14px;height:14px;margin:-7px 0 0 -7px;border:2px solid #1a5fb4;border-radius:50%;background:rgba(26,95,180,.20);pointer-events:none}",
     ".aimlayer{position:absolute;inset:0;z-index:1;pointer-events:none}",
     ".aimline{stroke:#f2c94c;stroke-width:3;stroke-dasharray:8 6}",
@@ -622,7 +625,7 @@ if (typeof self !== "undefined") {
     ".opt[aria-pressed=true]{border-color:#2168b4;background:rgba(33,104,180,.14);box-shadow:inset 0 0 0 1px #2168b4}",
     ".frameplay{margin:6px 0 0;font-size:12px}",
     ".frameplay button{margin:0 6px 0 0;padding:3px 8px}",
-    ".frameview{display:block;max-width:100%;background-repeat:no-repeat;border-radius:10px;overflow:hidden}"
+    "@media (prefers-reduced-motion:reduce){button,.tileimg,.pieceimg{transition:none!important}button:active:not([disabled]){transform:none!important}}"
   ];
   var STYLE = STYLE_RULES.join("");
 
@@ -1048,12 +1051,20 @@ if (typeof self !== "undefined") {
   };
 
   Widget.prototype._clearCells = function () {
+    if (this.pathDragSurface && this.pathDragRelease) {
+      this._off(this.pathDragSurface, "pointerup", this.pathDragRelease);
+      this._off(this.pathDragSurface, "pointercancel", this.pathDragRelease);
+      this.pathDragSurface = null;
+      this.pathDragRelease = null;
+    }
     for (var i = 0; i < this.cellButtons.length; i++) {
       var b = this.cellButtons[i];
       if (b._epochaClick) this._off(b, "click", b._epochaClick);
       if (b._epochaKey) this._off(b, "keydown", b._epochaKey);
       if (b._epochaDown) this._off(b, "pointerdown", b._epochaDown);
       if (b._epochaEnter) this._off(b, "pointerenter", b._epochaEnter);
+      if (b._epochaUp) this._off(b, "pointerup", b._epochaUp);
+      if (b._epochaCancel) this._off(b, "pointercancel", b._epochaCancel);
     }
     this.cellButtons = [];
     this.selection = {};
@@ -1279,7 +1290,7 @@ if (typeof self !== "undefined") {
       this.cellStatus.textContent = tr(this.o.lang, "localReset");
     } else if (this.answerMode === "shell") {
       this.answer.value = "";
-      this._renderShell(this.shellChallenge, this.shellIW, this.shellIH);
+      if (!this._renderShell(this.shellChallenge, this.shellIW, this.shellIH)) return;
       this._setInputsEnabled(true);
       this._updateSubmit();
       return;
@@ -1991,7 +2002,7 @@ if (typeof self !== "undefined") {
           self.note.textContent = tr(o.lang, "noteRotate");
         } else if (at === "path") {
           if (!self._renderQuestionMedia(q, iw, ih, tr(o.lang, "imageAltPath"))) return;
-          self._renderPath(q, iw, ih);
+          if (!self._renderPath(q, iw, ih)) return;
           self.heading.textContent = promptText(q, o.lang);
           self.heading.removeAttribute("for");
           self.note.textContent = tr(o.lang, "notePath");

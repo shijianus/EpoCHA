@@ -142,6 +142,77 @@ export const REQUIRED_CHECK_IDS = Object.freeze([
   'manual-stage4a.human-readability', 'manual-stage4b.human-readability',
   'manual-adminui.http-errors', 'manual-adminui.clipboard-write', 'manual-adminui.real-mobile',
 ]);
+export const productionAdmissionRequirements = Object.freeze([
+  'captcha-effectiveness', 'human-readability', 'assistive-technology', 'real-device',
+  'persistence-policy', 'durability-faults', 'platform-validation', 'artifact-smoke', 'release-authority',
+]);
+const SUPPORTED_SCOPE = 'B / linux/arm64 / UID:GID 1000:1000';
+const HEX_40 = /^[a-f0-9]{40}$/;
+const HEX_64 = /^[a-f0-9]{64}$/;
+
+function canonicalJSON(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJSON).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJSON(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function validateProductionCandidate(candidate) {
+  if (!candidate || candidate.supported_scope !== SUPPORTED_SCOPE ||
+      !HEX_40.test(candidate.source_oid || '') || !HEX_64.test(candidate.source_manifest_sha256 || '') ||
+      !candidate.build || candidate.build.go_version !== GO_VERSION || candidate.build.goos !== 'linux' ||
+      candidate.build.goarch !== 'arm64' || candidate.build.cgo_enabled !== '0' ||
+      !Array.isArray(candidate.build.flags) || candidate.build.flags.length === 0 ||
+      !candidate.artifacts || !HEX_64.test(candidate.artifacts.binary_sha256 || '')) return false;
+  const image = candidate.artifacts.image_digest || candidate.artifacts.image_id;
+  return typeof image === 'string' && /^(?:sha256:)?[a-f0-9]{64}$/.test(image);
+}
+
+export function evaluateIsolationEvidence(evidence) {
+  if (!evidence || evidence.run_exit_code !== 0 || evidence.checkpoint !== 'ISOLATION_CHECKPOINT=mounts-verified' ||
+      evidence.image_present !== true || evidence.groundtruth_unreadable !== true || evidence.answer_unreadable !== true) {
+    return fail('isolation container did not complete the mounted-sample and hidden-answer checkpoint');
+  }
+  if (evidence.dns_attempted !== true || !Number.isInteger(evidence.dns_exit_code) || evidence.dns_exit_code === 0) {
+    return fail('network isolation probe was not executed successfully as a negative reachability test');
+  }
+  return { status: 'PASS', checkpoint: evidence.checkpoint, dns_exit_code: evidence.dns_exit_code };
+}
+
+export function evaluateProductionApproval(candidate, admissions) {
+  const candidateValid = validateProductionCandidate(candidate);
+  const fingerprint = hash(canonicalJSON(candidate ?? null));
+  const seen = new Set();
+  const byID = new Map();
+  for (const item of Array.isArray(admissions) ? admissions : []) {
+    if (!item || !productionAdmissionRequirements.includes(item.id) || seen.has(item.id) ||
+        !['PASS', 'FAIL', 'BLOCKED', 'NOT_RUN'].includes(item.status)) continue;
+    seen.add(item.id);
+    byID.set(item.id, item);
+  }
+  const checked = productionAdmissionRequirements.map((id) => {
+    const item = byID.get(id);
+    if (!item) return { id, status: 'NOT_RUN', reason: 'candidate-bound evidence is absent' };
+    if (item.status !== 'PASS') return { id, status: item.status, reason: item.reason || 'admission is not PASS' };
+    if (!candidateValid || item.source_oid !== candidate.source_oid || item.candidate_fingerprint_sha256 !== fingerprint || !HEX_64.test(item.evidence_sha256 || '')) {
+      return { id, status: 'FAIL', reason: 'evidence is not bound to this complete source and artifact candidate' };
+    }
+    return { id, status: 'PASS', evidence_sha256: item.evidence_sha256 };
+  });
+  const status = !candidateValid || checked.some((item) => item.status === 'FAIL') ? 'FAIL' :
+    (checked.every((item) => item.status === 'PASS') ? 'BLOCKED' : 'INCOMPLETE');
+  return {
+    status,
+    approved: false,
+    supported_scope: candidate?.supported_scope ?? null,
+    source_oid: candidate?.source_oid ?? null,
+    candidate_fingerprint_sha256: fingerprint,
+    admissions: checked,
+    authorization: { status: 'NOT_RUN', reason: 'no authenticated production approver trust anchor is configured' },
+    note: 'Candidate-bound checksums provide byte traceability, not signature or source authentication; engineering PASS is not production approval.',
+  };
+}
 export function requiredCheckIDs(profile) {
   if (profile === 'engineering') return ENGINEERING_CHECK_IDS;
   if (profile === 'full') return REQUIRED_CHECK_IDS;
@@ -434,10 +505,10 @@ function runProfile(profile, output) {
     const compilerOK = linuxOK && goOK ? local('race-compiler', () => must('gcc', ['--version']).split('\n')[0], true, true) : missing('race-compiler', 'Linux and the pinned Go toolchain required');
 
     if (nodeOK) {
-      run('engineering-rules', process.execPath, ['--test', '--test-reporter=tap', 'docs/scripts/release-check.test.mjs', 'docs/scripts/release_integration_regression.test.mjs'], classifyTAP);
+      run('engineering-rules', process.execPath, ['--test', '--test-reporter=tap', 'docs/scripts/release-check.test.mjs', 'docs/scripts/release_integration_regression.test.mjs', 'docs/scripts/stage4b-isolation.test.mjs'], classifyTAP);
       run('widget-regressions', process.execPath, ['--test', '--test-reporter=tap', 'docs/scripts/browser/pow_vectors.test.mjs', 'docs/scripts/browser/widget_lifecycle.test.mjs'], classifyTAP);
       run('adminui-regressions', process.execPath, ['--test', '--test-reporter=tap', 'docs/scripts/browser/adminui_lifecycle.test.mjs'], classifyTAP);
-      run('tooling-regressions', process.execPath, ['--test', '--test-reporter=tap', 'docs/scripts/build-receipt.test.mjs', 'docs/scripts/soak-evidence.test.mjs', 'docs/scripts/preflight_regression.test.mjs', 'docs/scripts/manual-evidence.test.mjs', 'docs/scripts/stage5a_rules.test.mjs', 'docs/scripts/admin-ui-ownership.test.mjs', 'docs/scripts/image-dimensions.test.mjs', 'docs/scripts/widget-isolation.test.mjs', 'docs/scripts/baseline-evidence.test.mjs', 'docs/scripts/baseline-run.test.mjs'], classifyTAP);
+      run('tooling-regressions', process.execPath, ['--test', '--test-reporter=tap', 'docs/scripts/build-receipt.test.mjs', 'docs/scripts/soak-evidence.test.mjs', 'docs/scripts/preflight_regression.test.mjs', 'docs/scripts/manual-evidence.test.mjs', 'docs/scripts/stage5a_rules.test.mjs', 'docs/scripts/stage4b-isolation.test.mjs', 'docs/scripts/admin-ui-ownership.test.mjs', 'docs/scripts/image-dimensions.test.mjs', 'docs/scripts/widget-isolation.test.mjs', 'docs/scripts/baseline-evidence.test.mjs', 'docs/scripts/baseline-run.test.mjs'], classifyTAP);
       if (keyIdentityOK) run('key-permission-and-rerun', process.execPath, ['--test', '--test-reporter=tap', 'docs/scripts/release-check.test.mjs'], classifyTAP);
       local('javascript-syntax', () => {
         const files = ['web', 'docs/scripts'].flatMap(filesBelow).filter((name) => /\.(mjs|js)$/.test(name));
@@ -535,13 +606,24 @@ function runProfile(profile, output) {
     record({ id: 'runner-error', required: true, status: 'FAIL', executed: true, raw_exit_code: null, reason: error.message });
   }
   const verdict = summarizeChecks(checks, requiredCheckIDs(profile));
+  const engineeringVerdict = {
+    status: verdict.result,
+    exit_code: verdict.exit_code,
+    reason: verdict.reason,
+    note: 'This verdict covers engineering and required release-evidence checks only; it is not a product production approval.',
+  };
+  const productionApproval = evaluateProductionApproval(null, []);
   const summary = {
-    schema_version: 1, profile, started_at: started, finished_at: new Date().toISOString(),
-    ...verdict, release_ready: full && verdict.exit_code === 0, deployed: false,
-    supported_scope: 'B / linux/arm64 / UID:GID 1000:1000',
+    schema_version: 2, profile, started_at: started, finished_at: new Date().toISOString(),
+    ...verdict,
+    engineering: engineeringVerdict,
+    production_approval: productionApproval,
+    release_ready: false,
+    deployed: false,
+    supported_scope: SUPPORTED_SCOPE,
     host: { platform: process.platform, arch: process.arch, node: process.version },
     source, checks,
-    limitations: ['Checksums are traceability, not signatures or provenance authentication.', 'Engineering profile PASS is not full release acceptance.', 'Configuration written locally does not mean remote CI has run.'],
+    limitations: ['Checksums are traceability, not signatures or provenance authentication.', 'Engineering profile PASS is not full release acceptance.', 'Configuration written locally does not mean remote CI has run.', 'Production approval defaults to false until candidate-bound product evidence and an explicit authority decision are implemented and reviewed.'],
   };
   writeFileSync(join(out, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
   console.log(`[release-check] RESULT=${verdict.result} SCRIPT_RC=${verdict.exit_code} PROFILE=${profile}`);

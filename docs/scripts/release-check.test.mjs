@@ -237,6 +237,61 @@ test('required check manifest rejects a single PASS or missing IDs', async () =>
   assert.equal(missing.exit_code, 1);
   assert.match(missing.reason, /manifest mismatch/);
 });
+
+test('production approval is independent from green engineering evidence and binds candidate evidence', async () => {
+  const { summarizeChecks, evaluateProductionApproval, productionAdmissionRequirements } = await rules();
+  const required = ['engineering-a', 'engineering-b'];
+  const checks = required.map((id) => ({ id, required: true, status: 'PASS', executed: true, raw_exit_code: 0 }));
+  const engineering = summarizeChecks(checks, required);
+  assert.equal(engineering.result, 'PASS');
+  assert.equal(engineering.exit_code, 0);
+
+  const candidate = {
+    supported_scope: 'B / linux/arm64 / UID:GID 1000:1000',
+    source_oid: 'a'.repeat(40),
+    source_manifest_sha256: 'b'.repeat(64),
+    artifacts: { binary_sha256: 'c'.repeat(64), image_digest: `sha256:${'d'.repeat(64)}` },
+  };
+  const binding = evaluateProductionApproval(candidate, []).candidate_fingerprint_sha256;
+  const admissions = productionAdmissionRequirements.map((id) => ({
+    id,
+    status: 'PASS',
+    source_oid: candidate.source_oid,
+    candidate_fingerprint_sha256: binding,
+    evidence_sha256: 'e'.repeat(64),
+  }));
+  admissions.find((item) => item.id === 'captcha-effectiveness').status = 'FAIL';
+  admissions.find((item) => item.id === 'assistive-technology').status = 'NOT_RUN';
+  admissions.find((item) => item.id === 'persistence-policy').status = 'BLOCKED';
+
+  const approval = evaluateProductionApproval(candidate, admissions);
+  assert.equal(approval.approved, false);
+  assert.notEqual(approval.status, 'PASS');
+  assert.equal(approval.admissions.find((item) => item.id === 'captcha-effectiveness').status, 'FAIL');
+  assert.equal(approval.admissions.find((item) => item.id === 'assistive-technology').status, 'NOT_RUN');
+  assert.equal(approval.admissions.find((item) => item.id === 'persistence-policy').status, 'BLOCKED');
+  assert.equal(evaluateProductionApproval({ ...candidate, artifacts: {} }, admissions).approved, false);
+  assert.equal(evaluateProductionApproval(candidate, admissions.map((item) => ({ ...item, source_oid: 'f'.repeat(40) })).filter((item) => item.id !== 'real-device')).approved, false);
+});
+
+test('stage4b isolation verdict rejects nonzero execution, missing checkpoint and incomplete mount assertions', async () => {
+  const { classifyIsolationRun } = await import('./stage4b-isolation.mjs');
+  const complete = {
+    status: 0,
+    stdout: 'ISOLATION_CHECKPOINT=mounts-verified\nNETWORK_CHECKPOINT=dns-blocked\n',
+    stderr: '',
+  };
+  assert.equal(classifyIsolationRun(complete).status, 'PASS');
+  for (const evidence of [
+    { ...complete, status: 125 },
+    { ...complete, stdout: '' },
+    { ...complete, stdout: 'ISOLATION_CHECKPOINT=mounts-verified\n' },
+    { ...complete, stdout: complete.stdout + 'GROUNDTRUTH_VISIBLE=1\n' },
+    { ...complete, stdout: complete.stdout + 'ANSWER_VISIBLE=1\n' },
+    { ...complete, stdout: complete.stdout + 'DNS_REACHABLE\n' },
+  ]) assert.equal(classifyIsolationRun(evidence).status, 'FAIL');
+});
+
 test('Node TAP verification rejects empty output, zero tests and skipped tests', async () => {
   const { classifyTAP } = await rules();
   assert.equal(classifyTAP(0, '').status, 'FAIL');

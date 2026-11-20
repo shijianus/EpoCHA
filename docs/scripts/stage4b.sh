@@ -135,20 +135,15 @@ else
   onef="$(find "$WORK/gen" -name 'sample-*.png' | head -n1)"
   [[ -f "$onef" ]] || abort "造不出测试图片（find 结果为空）"
   cp "$onef" "$STAGE/one.png"
-  # 1) 容器里 /in 只允许看到图片：答案文件在上一级目录，不该可达
-  out="$(docker run --rm --network none --read-only --cap-drop ALL \
-    -v "$STAGE:/in:ro" --entrypoint sh "$OCR_IMAGE" \
-    -c 'ls /in; test -e /in/ground-truth.jsonl && echo LEAK; test -e /answer.txt && echo LEAK2' 2>&1 || true)"
-  if printf '%s' "$out" | grep -q "LEAK"; then
-    fail "容器里看到了答案文件：$out"
+  # 1) 镜像里必须成功到达断言检查点；工具/容器未启动不能由“没看到泄漏字符串”算通过。
+  rc=0
+  node docs/scripts/stage4b-isolation.mjs "$OCR_IMAGE" "$STAGE" >"$WORK/isolation/result.log" 2>&1 || rc=$?
+  if [[ $rc -eq 0 ]] && grep -qF 'ISOLATION_CHECKPOINT=mounts-verified' "$WORK/isolation/result.log" && \
+      grep -qF 'NETWORK_CHECKPOINT=dns-blocked' "$WORK/isolation/result.log"; then
+    pass "隔离容器成功执行检查点：图片存在、ground truth 与 answer 不可见，--network none 的 DNS 探测失败（rc=0）"
   else
-    pass "容器挂载面实证：/in 内只有图片（$(printf '%s' "$out" | tr '\n' ' ')），ground truth 与答案文件都不在容器可见路径上"
-  fi
-  # 2) 识别阶段确实没有网络：容器里 DNS/外联必须失败
-  if docker run --rm --network none --entrypoint getent "$OCR_IMAGE" hosts github.com >/dev/null 2>&1; then
-    fail "--network none 下仍然解析到了 github.com ⇒ 网络隔离没生效"
-  else
-    pass "网络隔离实证：--network none 下容器无法解析外部主机名（样本不出这台机器）"
+    cat "$WORK/isolation/result.log"
+    fail "隔离容器/测试未成功完成或缺少完整检查点（helper rc=$rc；原始 Docker rc 见上方收据）"
   fi
   # 3) 零 capability：CapEff 必须是全 0（不靠肉眼读 --cap-drop ALL 的字面意思）
   case "$(docker run --rm --cap-drop ALL --network none --entrypoint cat "$OCR_IMAGE" /proc/self/status 2>/dev/null | awk '/^CapEff:/{print $2}')" in

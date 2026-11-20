@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { cleanupOwnedResources, registerOwnedResource } from './stage5a-resources.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const SCRIPT = join(ROOT, 'docs/scripts/stage5a.sh');
@@ -60,4 +62,62 @@ test('F13 source contract requires exact 150-flow plan, wall summary and four 15
   for (const stage of ['challenge', 'redeem', 'siteverify', 'pow-tool']) assert.match(text, new RegExp(`${stage}.*n=150`));
   assert.match(text, /err=/);
   assert.match(text, /失败类别/);
+});
+
+test('stage5a fake Docker resource ownership preserves pre-existing and uncreated assets', () => {
+  const calls = [];
+  const fakeDocker = (_command, args) => {
+    calls.push(args);
+    return { status: 0, stdout: '', stderr: '' };
+  };
+  const empty = { armed: false, containers: [], volumes: [], networks: [], pulledImages: [] };
+  assert.deepEqual(cleanupOwnedResources(empty, 'docker', fakeDocker), { status: 0, calls: [] });
+  assert.deepEqual(calls, [], 'preflight failure must not invoke Docker cleanup');
+
+  const owned = { armed: true, containers: [], volumes: [], networks: [], pulledImages: [] };
+  for (const [kind, id] of [['containers', 'c-own'], ['volumes', 'v-own'], ['networks', 'n-own'], ['pulledImages', 'sha256:image-own']]) {
+    registerOwnedResource(owned, kind, id);
+    registerOwnedResource(owned, kind, id);
+  }
+  assert.throws(() => registerOwnedResource(owned, 'containers', ''));
+  assert.throws(() => registerOwnedResource(owned, 'unknown', 'id'));
+  const created = cleanupOwnedResources(owned, 'docker', fakeDocker);
+  assert.equal(created.status, 0);
+  assert.deepEqual(created.calls, [
+    ['rm', '-f', 'c-own'], ['volume', 'rm', 'v-own'], ['network', 'rm', 'n-own'], ['image', 'rm', 'sha256:image-own'],
+  ]);
+  assert.deepEqual(calls, created.calls);
+});
+
+
+test('occupied-port preflight never invokes Docker cleanup or touches same-named assets', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'epocha-stage5a-fake-docker-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const bin = join(dir, 'bin');
+  const record = join(dir, 'docker.log');
+  const script = (name, body) => {
+    const path = join(bin, name);
+    writeFileSync(path, `#!/usr/bin/env bash\n${body}\n`);
+    chmodSync(path, 0o700);
+  };
+  mkdirSync(bin);
+  script('docker', `printf '%s\\n' "$*" >>"$EPOCHA_FAKE_DOCKER_LOG"\n[[ "$1 $2" == "info " ]]`);
+  script('ss', 'printf "State Recv-Q Send-Q Local Address:Port Peer Address:Port\\nLISTEN 0 128 127.0.0.1:18080 0.0.0.0:*\\n"');
+  for (const name of ['curl', 'jq', 'openssl']) script(name, 'exit 0');
+
+  const result = spawnSync('bash', [SCRIPT], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    timeout: 30_000,
+    env: {
+      ...process.env,
+      PATH: `${bin}${delimiter}${process.env.PATH}`,
+      EPOCHA_FAKE_DOCKER_LOG: record,
+      EPOCHA_5A_PORT: '18080',
+    },
+  });
+  assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+  const calls = readFileSync(record, 'utf8').trim().split(/\r?\n/);
+  assert.deepEqual(calls, ['info'], 'preflight must not run compose down, rm, network rm or image rmi');
+  assert.match(result.stderr, /端口 18080 已被占用/);
 });

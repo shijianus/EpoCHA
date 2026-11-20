@@ -106,6 +106,8 @@ type Criteria struct {
 
 type GeneratorResult struct {
 	Generator            string   `json:"generator"`
+	MeasurementStatus    string   `json:"measurement_status"`
+	ValidSamples         int      `json:"valid_samples"`
 	Total                int      `json:"total"`
 	Solved               int      `json:"solved"`
 	SuccessRate          float64  `json:"success_rate"`
@@ -336,8 +338,18 @@ func Run(ctx context.Context, cfg Config, logf func(string, ...any)) (Summary, [
 		res.Total = len(genRecords)
 		res.Solved = countSolved(genRecords)
 		res = summarizeGenerator(res, genRecords)
+		validity := MeasurementValidity{
+			Expected:              cfg.Challenges,
+			MinimumValid:          minimumValidSamples(cfg.Challenges),
+			PositiveControlPassed: false,
+			ContractMatched:       true,
+		}
+		res = applyMeasurementValidity(res, genRecords, validity)
+		res.Verdict = "BLOCKED"
+		res.Recommendation = "NONE"
 		results = append(results, res)
-		logf("%s: verdict=%s rate=%.4f p95=%s(%.3fms)", id, res.Verdict, res.SuccessRate, res.P95TimingBasis, res.P95CPUMs)
+		logf("%s: measurement=%s verdict=%s rate=%.4f p95=%s(%.3fms)", id, res.MeasurementStatus, res.Verdict, res.SuccessRate, res.P95TimingBasis, res.P95CPUMs)
+
 	}
 	finished := time.Now().UTC()
 	sum := Summary{
@@ -357,6 +369,12 @@ func Run(ctx context.Context, cfg Config, logf func(string, ...any)) (Summary, [
 			"solver_input":             "public /api/challenge question DTO only (whitelist + base64 PNG)",
 			"solver_forbidden":         "verifier, DB answers, generator private seed, admin API",
 			"measurement_method":       "os-process-cpu-v2; wall-proxy when any sample has insufficient resolution",
+			"measurement_validity": map[string]any{
+				"minimum_valid_samples":           minimumValidSamples(cfg.Challenges),
+				"expected_samples_per_generator":  cfg.Challenges,
+				"contract_match_positive_control": "NOT_RUN; this tool does not execute a separate positive-control harness",
+				"invalid_attempts_retained":       true,
+			},
 			"cpu_unit_seconds":         "Windows FILETIME 100ns / Linux timeval 1us; unit is not effective resolution",
 			"cpu_effective_resolution": "not calibrated; per-sample zero/error marked and CPU p95 not used",
 			"requested":                cfg.Challenges * len(cfg.Generators), "completed": len(records),
@@ -450,6 +468,59 @@ func guessSingle(id string) (float64, string) {
 	}
 }
 
+type MeasurementValidity struct {
+	Expected              int
+	MinimumValid          int
+	ContractMatched       bool
+	PositiveControlPassed bool
+}
+
+func minimumValidSamples(expected int) int {
+	if expected <= 0 {
+		return 0
+	}
+	minimum := expected * 9 / 10
+	if minimum < 1 {
+		minimum = 1
+	}
+	return minimum
+}
+
+func applyMeasurementValidity(result GeneratorResult, records []ChallengeRecord, validity MeasurementValidity) GeneratorResult {
+	valid, parseFailed, contractMismatch := 0, 0, false
+	for _, record := range records {
+		if record.ParseFailed || record.Status == "parse_failed" || record.Status == "contract_mismatch" || record.Status == "empty_output" {
+			parseFailed++
+			if record.Status == "contract_mismatch" || record.Status == "empty_output" {
+				contractMismatch = true
+			}
+			continue
+		}
+		if record.Status != "generation_error" && record.Status != "dto_error" && record.Status != "interrupted" {
+			valid++
+		}
+	}
+	result.ValidSamples = valid
+	result.ParseFailureRate = float64(parseFailed) / float64(len(records))
+
+	switch {
+	case !validity.ContractMatched || contractMismatch || !validity.PositiveControlPassed || valid == 0:
+		result.MeasurementStatus = "INVALID"
+	case validity.Expected <= 0 || len(records) < validity.Expected || valid < validity.MinimumValid:
+		result.MeasurementStatus = "INCOMPLETE"
+	default:
+		result.MeasurementStatus = "VALID"
+	}
+	if parseFailed > 0 && valid == 0 {
+		result.MeasurementStatus = "INVALID"
+	}
+	if result.MeasurementStatus != "VALID" {
+		result.Verdict = "BLOCKED"
+		result.Recommendation = "NONE"
+	}
+	return result
+}
+
 func countSolved(recs []ChallengeRecord) int {
 	n := 0
 	for _, r := range recs {
@@ -467,6 +538,8 @@ func summarizeGenerator(res GeneratorResult, recs []ChallengeRecord) GeneratorRe
 		if res.Verdict == "" {
 			res.Verdict = "BLOCKED"
 		}
+		res.MeasurementStatus = "INVALID"
+		res.ValidSamples = 0
 		res.Recommendation = "NONE"
 		return res
 	}
@@ -529,7 +602,8 @@ func summarizeGenerator(res GeneratorResult, recs []ChallengeRecord) GeneratorRe
 	}
 	res.SignificantAbove = res.Solved >= 10 && res.CI95Low > res.RandomGuessSingle
 	switch {
-	case res.Verdict == "BLOCKED":
+	case res.MeasurementStatus != "VALID":
+		res.Verdict = "BLOCKED"
 		res.Recommendation = "NONE"
 	case res.SuccessRate >= 0.80 && timingP95 <= 1000:
 		res.Verdict = "FAIL"
@@ -574,10 +648,10 @@ func summarizeOverall(recs []ChallengeRecord, results []GeneratorResult) Overall
 func WriteCSV(w io.Writer, records []ChallengeRecord) error {
 	cw := csv.NewWriter(w)
 	if err := cw.Write([]string{
-		"generator", "index", "solved", "parse_failed", "gave_up",
-		"solver_cpu_ms", "solver_wall_ms", "rss_bytes", "asset_bytes",
+		"generator", "index", "solved", "parse_failed", "gave_up", "solver_cpu_ms", "solver_wall_ms", "rss_bytes", "asset_bytes",
 		"payload_bytes", "generation_attempts", "note", "status", "public_sha256", "asset_sha256",
 		"os_cpu_status", "os_user_ms", "os_system_ms", "runtime_estimate_user_ms", "generation_wall_ms",
+
 		"preparation_wall_ms", "grading_wall_ms", "harness_wall_ms", "gc_count", "gc_pause_ms",
 	}); err != nil {
 		return err

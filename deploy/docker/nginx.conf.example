@@ -125,7 +125,7 @@ server {
         proxy_read_timeout    10s;
     }
 
-    location = /widget/v1.worker.js {
+    location = /widget/v1.interactive.js {
         proxy_pass http://epocha_backend;
         proxy_http_version 1.1;
         proxy_set_header Connection "";

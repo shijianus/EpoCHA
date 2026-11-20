@@ -31,6 +31,39 @@ func TestEmptySummaryHasUninformativeInterval(t *testing.T) {
 	}
 }
 
+func TestParserFailureCannotQualifyAttackMeasurement(t *testing.T) {
+	rows := []ChallengeRecord{{ParseFailed: true, Status: "parse_failed", OSCPUStatus: "ok"}, {ParseFailed: true, Status: "parse_failed", OSCPUStatus: "ok"}}
+	got := summarizeGenerator(GeneratorResult{Generator: "tile-rotation-v1", KeepExperimental: true, Total: len(rows)}, rows)
+	got = applyMeasurementValidity(got, rows, MeasurementValidity{Expected: len(rows), MinimumValid: len(rows), ContractMatched: true})
+	if got.MeasurementStatus != "INVALID" || got.Verdict != "BLOCKED" || got.Recommendation != "NONE" || summarizeOverall(rows, []GeneratorResult{got}).PassCount != 0 {
+		t.Fatalf("parser failure was treated as a measurement: %+v", got)
+	}
+}
+
+func TestM4MeasurementInvalidityPrecedesSolverSuccessVerdict(t *testing.T) {
+	cases := []struct {
+		name string
+		rows []ChallengeRecord
+		want string
+	}{
+		{name: "all parse failed", rows: []ChallengeRecord{{ParseFailed: true, Status: "parse_failed"}}, want: "INVALID"},
+		{name: "contract mismatch", rows: []ChallengeRecord{{ParseFailed: true, Status: "contract_mismatch"}}, want: "INVALID"},
+		{name: "empty output", rows: []ChallengeRecord{{ParseFailed: true, Status: "empty_output"}}, want: "INVALID"},
+		{name: "no valid samples", rows: []ChallengeRecord{{Status: "generation_error"}}, want: "INVALID"},
+		{name: "insufficient samples", rows: []ChallengeRecord{{Status: "wrong"}}, want: "INCOMPLETE"},
+		{name: "positive control failed", rows: []ChallengeRecord{{Status: "wrong"}}, want: "INVALID"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := summarizeGenerator(GeneratorResult{Generator: "tile-rotation-v1", KeepExperimental: true}, tc.rows)
+			got = applyMeasurementValidity(got, tc.rows, MeasurementValidity{Expected: 10, MinimumValid: 8, PositiveControlPassed: tc.name != "positive control failed", ContractMatched: tc.name != "contract mismatch"})
+			if got.MeasurementStatus != tc.want || got.Verdict != "BLOCKED" || got.Recommendation != "NONE" || summarizeOverall(tc.rows, []GeneratorResult{got}).PassCount != 0 {
+				t.Fatalf("invalid measurement produced solver verdict: %+v", got)
+			}
+		})
+	}
+}
+
 func TestCSVPreservesTimingPrecision(t *testing.T) {
 	want := 0.123456789123
 	var out bytes.Buffer

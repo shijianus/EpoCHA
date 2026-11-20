@@ -84,6 +84,138 @@ func TestInFlightCreateRejectsActorRevokedBeforeWrite(t *testing.T) {
 	}
 }
 
+func TestInFlightProtectedSiteWritesRejectRevokedActor(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   func(int64) string
+		body   func(int64) []byte
+		check  func(*testing.T, *h, int64)
+	}{
+		{
+			name: "lower pow bits", method: http.MethodPut,
+			path: func(id int64) string { return pathSite(id) },
+			body: func(int64) []byte { return []byte(`{"pow_bits":10}`) },
+			check: func(t *testing.T, x *h, id int64) {
+				site, err := x.db.SiteByID(t.Context(), id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if site.Policy.PowBits != 14 {
+					t.Fatalf("pow bits changed: %d", site.Policy.PowBits)
+				}
+			},
+		},
+		{
+			name: "switch to pow only", method: http.MethodPut,
+			path: func(id int64) string { return pathSite(id) },
+			body: func(int64) []byte { return []byte(`{"verify_mode":"pow_only","generator_id":""}`) },
+			check: func(t *testing.T, x *h, id int64) {
+				site, err := x.db.SiteByID(t.Context(), id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if site.Policy.VerifyMode != store.ModePowQuestion {
+					t.Fatalf("verify mode changed: %s", site.Policy.VerifyMode)
+				}
+			},
+		},
+		{
+			name: "allow missing origin", method: http.MethodPut,
+			path: func(id int64) string { return pathSite(id) },
+			body: func(int64) []byte { return []byte(`{"allow_missing_origin":true}`) },
+			check: func(t *testing.T, x *h, id int64) {
+				site, err := x.db.SiteByID(t.Context(), id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if site.Policy.AllowMissingOrigin {
+					t.Fatal("allow_missing_origin changed")
+				}
+			},
+		},
+		{
+			name: "replace origins", method: http.MethodPut,
+			path: func(id int64) string { return pathSite(id) + "/origins" },
+			body: func(int64) []byte { return []byte(`{"origins":["https://new.example.com"]}`) },
+			check: func(t *testing.T, x *h, id int64) {
+				origins, err := x.db.Origins(t.Context(), id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(origins) != 0 {
+					t.Fatalf("origins changed: %v", origins)
+				}
+			},
+		},
+		{
+			name: "enable site", method: http.MethodPost,
+			path: func(id int64) string { return pathSite(id) + "/enable" },
+			body: func(int64) []byte { return []byte(`{}`) },
+			check: func(t *testing.T, x *h, id int64) {
+				site, err := x.db.SiteByID(t.Context(), id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if site.Enabled {
+					t.Fatal("site enabled after actor revoke")
+				}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			x := newHarness(t, nil)
+			created, _ := x.createSite("in-flight-"+strings.ReplaceAll(tc.name, " ", "-"), "pk-in-flight-"+strings.ReplaceAll(tc.name, " ", "-"))
+			id := siteID(created)
+			if got := x.do(http.MethodPost, pathSite(id)+"/disable", map[string]any{}); got.status != http.StatusOK {
+				t.Fatalf("disable: %d %s", got.status, got.body)
+			}
+			body := tc.body(id)
+			gate := &gatedBody{started: make(chan struct{}), release: make(chan struct{}), data: bytes.NewReader(body)}
+			req := httptest.NewRequest(tc.method, tc.path(id), nil)
+			req.Header.Set("Authorization", "Bearer "+sentinelAdminKey)
+			req.Header.Set("Content-Type", "application/json")
+			req.Body = gate
+			rr := httptest.NewRecorder()
+			done := make(chan struct{})
+			go func() { x.srv.Handler().ServeHTTP(rr, req); close(done) }()
+			select {
+			case <-gate.started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("in-flight request did not reach body read")
+			}
+			who := x.do(http.MethodGet, "/api/admin/whoami", nil)
+			actorID, _ := who.got["key_id"].(string)
+			if actorID == "" {
+				t.Fatal("missing actor key id")
+			}
+			if revoked := x.do(http.MethodPost, "/api/admin/admin-keys/"+actorID+"/revoke", map[string]any{"transition_sec": 0}); revoked.status != http.StatusOK {
+				t.Fatalf("revoke: %d %s", revoked.status, revoked.body)
+			}
+			close(gate.release)
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("in-flight request did not finish")
+			}
+			if rr.Code != http.StatusUnauthorized || !strings.Contains(rr.Body.String(), `"error":"unauthorized"`) {
+				t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			tc.check(t, x, id)
+			entries, err := x.db.ListAudit(t.Context(), 0, 500)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				if entry.Success && entry.Target == "site:"+itoaTest(id) && entry.Action != "site.create" {
+					t.Fatalf("successful audit for rejected write: %+v", entry)
+				}
+			}
+		})
+	}
+}
+
 func TestC08ListSecretsParentHTTPAdditional(t *testing.T) {
 	x := newHarness(t, nil)
 	if got := x.do(http.MethodGet, "/api/admin/sites/999999/secrets", nil); got.status != http.StatusNotFound || got.got["error"] != CodeNotFound {

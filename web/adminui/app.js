@@ -549,18 +549,26 @@
   function genLabel(g) {
     var lc = genLifecycle(g);
     var tail = lc ? (lc.production_ready ? "生产可用" : "未达生产可用") : "状态未知";
-    return g.id + " · " + (g.media || "未知介质") + " · " + (g.version || "无版本") + " · " + tail;
+    var channel = [];
+    if (g && g.accessible) channel.push("无障碍专用");
+    if (g && g.motion) channel.push("动态题");
+    return g.id + " · " + (g.media || "未知介质") + " · " + (g.version || "无版本") + " · " + tail + (channel.length ? " · " + channel.join("/") : "");
   }
 
   // 下拉选项：本进程登记的题型 + 站点当前值（即使它已不在登记表里，也要能如实显示）。
+  // current 为空（新建表单）时给一个显式占位项：不允许任何隐式默认题型（ADR-034 §7）。
   function genOptions(gens, current) {
     var ids = [];
     var seen = {};
     ((gens && gens.generators) || []).forEach(function (g) {
       if (!seen[g.id]) { seen[g.id] = g; ids.push(g.id); }
     });
-    var opts = ids.map(function (id) {
-      return el("option", { value: id, text: genLabel(seen[id]), selected: id === current });
+    var opts = [];
+    if (!current) {
+      opts.push(el("option", { value: "", text: "— 明确选择题型 —", selected: true }));
+    }
+    ids.forEach(function (id) {
+      opts.push(el("option", { value: id, text: genLabel(seen[id]), selected: id === current }));
     });
     if (current && !seen[current]) {
       opts.unshift(el("option", {
@@ -718,9 +726,10 @@
       el("option", { value: "pow_only", text: "pow_only（只要求 PoW，不下发题目）", selected: true }),
       el("option", { value: "pow_question", text: "pow_question（PoW + 题目）" })
     ]);
-    var first = gens && gens.generators && gens.generators.length ? gens.generators[0].id : "";
+    // 下拉默认不预选任何题型：Registry 按字母排序的首项是无障碍专用题（accessible-choice-v1），
+    // 隐式选中它再切 pow_question 会提交一个普通通道永远 503 的站点（ADR-034 §7）。
     var gen = el("select", { id: idGen, name: "generator_id" },
-      genOptions(gens, first));
+      genOptions(gens, ""));
     var diff = el("select", { id: idDiff, name: "difficulty" }, diffOptions(gens, 1));
     var pool = poolPicker(gens, []);
     var genNote = div({ class: "note", id: idGen + "-note", text: noteOf(gens, gen.value) });
@@ -753,7 +762,7 @@
         p("仅池内题型会参与风险/设备加权调度；无障碍题型必须显式加入池。", "hint")
       ]),
       genNote,
-      p("pow_only 不下发题目，题型与难度档不生效；选 pow_question 时必须有一个本进程登记的题型。", "hint"),
+      p("pow_only 不下发题目，题型与难度档不生效；选 pow_question 时必须明确选择一个题型——没有隐式默认。无障碍专用题型只服务显式无障碍请求，必须加入生成器池；普通站点选它会变成普通请求永远 503。", "hint"),
       div({ class: "panel-actions" }, [
         el("button", { type: "submit", id: "new-submit", text: "创建站点" })
       ]),
@@ -768,6 +777,15 @@
       var line = document.getElementById("new-status");
       if (btn.disabled) return;
       var problems = checkCreateFields({ name: name, siteKey: siteKey, pow: pow });
+      if (mode.value === "pow_question" && !gen.value) {
+        problems.push("pow_question 必须明确选择题型：下拉没有隐式默认，请从列表中选择适用于普通通道的题型。");
+      }
+      if (mode.value === "pow_question" && gen.value && !pool.get().length) {
+        var picked = findGen(gens, gen.value);
+        if (picked && picked.accessible) {
+          problems.push("无障碍专用题型只服务显式无障碍请求：普通站点选它会永远 503。请改选普通通道题型，或把无障碍题型显式加入生成器池。");
+        }
+      }
       if (problems.length) {
         line.className = "status bad";
         line.textContent = problems.join(" ");

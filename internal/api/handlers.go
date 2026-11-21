@@ -346,12 +346,16 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		var candidates []dispatch.Candidate
+		// 预检的寿命边界必须与领取事务一致：题目要活到 challenge 的 ExpiresAt。
+		// 用 now 会把"还活着但撑不到 challenge 过期"的短命题算进候选——调度器选中它后
+		// 领取必然失败，明明同池有可领的长命题却给调用方 503（ADR-034 §6）。
+		needAfter := now.Add(site.Policy.ChallengeTTL)
 		for _, c := range configured {
 			g, err := s.gens.Lookup(c.ID)
 			if err != nil {
 				continue
 			}
-			n, err := s.db.ReadyCount(ctx, store.PoolSpec{GeneratorID: c.ID, Version: g.Version(), Difficulty: difficulty}, now)
+			n, err := s.db.ReadyCount(ctx, store.PoolSpec{GeneratorID: c.ID, Version: g.Version(), Difficulty: difficulty}, needAfter)
 			if err == nil && n > 0 {
 				candidates = append(candidates, c)
 			}

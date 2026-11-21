@@ -28,6 +28,9 @@ const CASES = [
   { id: "adminlife.policy-read-failure", title: "admin policy save preserves visible read failure result and sibling origin draft", required: true, file: "adminui_lifecycle.test.mjs" },
   { id: "adminlife.parallel-forms", title: "admin policy write freezes its own controls and allows an independent origin save", required: true, file: "adminui_lifecycle.test.mjs" },
   { id: "adminlife.toggle-drafts", title: "admin toggle preserves policy and origin drafts and their navigation guard", required: true, file: "adminui_lifecycle.test.mjs" },
+
+  // adminui_generator_default.test.mjs (Node-only generator default regression)
+  { id: "adminlife.generator-default", title: "admin create form has no implicit generator default and blocks channel-mismatched submits", required: true, file: "adminui_generator_default.test.mjs" },
   { id: "adminlife.unconfirmed-500", title: "admin 500 write says unconfirmed and its review button performs only a read", required: true, file: "adminui_lifecycle.test.mjs" },
   { id: "adminlife.origin-reread", title: "admin origin success makes an independent GET before claiming reread", required: true, file: "adminui_lifecycle.test.mjs" },
   { id: "adminlife.fetch-timeout", title: "admin fetch timeout restores controls and ignores a late successful write", required: true, file: "adminui_lifecycle.test.mjs" },

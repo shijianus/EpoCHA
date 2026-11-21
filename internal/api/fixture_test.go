@@ -44,6 +44,8 @@ type seededQuestion struct {
 	Tolerance int
 	// Verifier 非 nil 时直接使用（ADR-028 的 TSV 契约夹具）；nil 走旧的精确/逐字构造。
 	Verifier []byte
+	// Lifetime > 0 覆盖默认 30min 过期：用于构造"还活着但撑不满 ChallengeTTL"的短命题。
+	Lifetime time.Duration
 }
 
 // answerVerifier 在测试侧**独立实现** DESIGN §5.4 的 verifier 线格式：
@@ -135,7 +137,13 @@ func (h *harness) seedQuestions(t *testing.T, difficulty int, qs ...seededQuesti
 			Verifier:    ver,
 			CreatedAt:   created,
 			// 过期时间按序号递增：领取查询按 expires_at 升序取题，于是发出顺序 = 给定顺序。
-			ExpiresAt: h.clock.Add(30*time.Minute + time.Duration(idx)*time.Minute),
+			// Lifetime > 0 时覆盖为短命题（题池剩余寿命回归用，ADR-034 §6）。
+			ExpiresAt: func() time.Time {
+				if q.Lifetime > 0 {
+					return h.clock.Add(q.Lifetime)
+				}
+				return h.clock.Add(30*time.Minute + time.Duration(idx)*time.Minute)
+			}(),
 			Asset:     q.Asset,
 			AssetMime: assetMimeFor(q.Asset),
 		}

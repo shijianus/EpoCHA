@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"time"
 
+	"github.com/shijianus/EpoCHA/internal/dispatch"
 	"github.com/shijianus/EpoCHA/internal/generator"
 	"github.com/shijianus/EpoCHA/internal/store"
 )
@@ -788,6 +790,7 @@ func applyToUpdate(base store.SitePolicy, u store.SiteUpdate) store.SitePolicy {
 // 管理面写站点时必须从这个列表里选，否则站点会指向一个运行时不存在的题型（只能拿 503）。
 func (s *Server) handleGenerators(w http.ResponseWriter, r *http.Request) {
 	out := []map[string]any{}
+	catalog := dispatch.Catalog()
 	for _, id := range s.gens.IDs() {
 		g, err := s.gens.Lookup(id)
 		if err != nil {
@@ -796,11 +799,17 @@ func (s *Server) handleGenerators(w http.ResponseWriter, r *http.Request) {
 		// 自我标记必须是**默认拒绝**的：新登记的题型若没有明确的生产结论，
 		// 就只能落在 experimental:true + production_ready:false 上（DESIGN §8.5）。
 		exp, ready := generatorLifecycle(id)
+		// 通道事实来自 dispatch 的静态画像（与签发时同一份硬约束）：
+		// accessible=true 表示"只服务显式 accessibility 请求"；motion=true 表示
+		// reduced_motion 请求会排除它。管理台用它们展示通道限制，不再让调用方猜。
+		channel := catalog[id]
 		out = append(out, map[string]any{
 			"id": id, "version": g.Version(), "media": g.Media(),
 			"experimental":     exp,
 			"production_ready": ready,
 			"note":             noteForGenerator(id),
+			"accessible":       channel.Accessible,
+			"motion":           channel.Motion,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"generators": out, "max_difficulty": generator.MaxDifficulties})
@@ -981,6 +990,14 @@ func (s *Server) checkModePolicy(mode, genID string, pool []string, difficulty i
 		if g.Version() == "" {
 			return errors.New("admin: 生成器缺少协议版本")
 		}
+	}
+	// 通道可达性（ADR-034 §7）：无障碍专用题型只服务显式 accessibility 请求，必须
+	// **显式加入 generator_pool**（管理台提示一直写明这条）。generator_id 单选
+	// accessible-only + 空池是隐式默认造成的意外形状——普通请求会被 dispatch 硬约束
+	// 排除成 0 候选 ⇒ 整站 503。拒绝这个形状不是禁用无障碍站点：显式 pool 的
+	// accessibility-only 配置仍是合法用法（配额回归与调度测试都用它）。
+	if len(pool) == 0 && len(ids) == 1 && dispatch.Catalog()[ids[0]].Accessible {
+		return fmt.Errorf("admin: 无障碍专用题型 %s 必须显式加入 generator_pool", ids[0])
 	}
 	if difficulty < 1 || difficulty > generator.MaxDifficulties {
 		return errors.New("admin: 难度档越界")

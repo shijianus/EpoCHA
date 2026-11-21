@@ -280,9 +280,14 @@ else
     "http://127.0.0.1:$ADMIN_PORT/api/admin/sites/$SITE_ID/disable" 2>/dev/null || echo 000)"
   [[ "$dis" == "200" ]] || fail "停用应 200，实得 $dis"
   grep -q '"enabled":false' "$WORK/http/dis.json" || fail "停用响应未反映 enabled=false"
-  en="$(acode_of "http://127.0.0.1:$ADMIN_PORT/api/admin/sites/$SITE_ID/enable" /dev/null)"
+  # /enable 只注册了 POST（admin.go）；用 acode_of（GET）会被 mux 回 405。
+  en="$(curl -s -o "$WORK/http/en.json" -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer $ADMIN_KEY_VAL" -d '{}' \
+    "http://127.0.0.1:$ADMIN_PORT/api/admin/sites/$SITE_ID/enable" 2>/dev/null || echo 000)"
   [[ "$en" == "200" ]] || fail "启用应 200，实得 $en"
-  if [[ "$dis" == "200" && "$en" == "200" ]] && grep -q '"enabled":false' "$WORK/http/dis.json"; then
+  grep -q '"enabled":true' "$WORK/http/en.json" || fail "启用响应未反映 enabled=true"
+  if [[ "$dis" == "200" && "$en" == "200" ]] && grep -q '"enabled":false' "$WORK/http/dis.json" \
+    && grep -q '"enabled":true' "$WORK/http/en.json"; then
     pass "停用/启用走真实端点且状态可见"
   fi
 fi

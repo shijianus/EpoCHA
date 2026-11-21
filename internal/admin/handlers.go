@@ -889,31 +889,31 @@ func noteForGenerator(id string) string {
 			"M4/人工可读性/辅助技术 NOT_RUN，不声称抗 AI；production_ready 保持 false"
 	case generator.TileRotationID:
 		return "路径块旋转题（3×3，每格独立旋转；生成器枚举证明唯一解，答案提交最终 edge mask 向量）：" +
-			"有效旋转候选空间 ≥64，3 次随机猜测上界 <10%；M4/人工可读性/辅助技术 NOT_RUN，" +
+			"有效旋转候选空间 ≥64，3 次随机猜测上界 <10%；M4 最近实测 2026-11-12（正式 1000 题/型×7）与 2026-11-14 复核均为 FAIL（机器可解；见 docs/reviews/CAPTCHA-M4-BASELINE-2026-11-12.md；当前源码未复测，数字不自动继承）；人工可读性/辅助技术 NOT_RUN，不声称抗 AI；" +
 			"不声称抗 AI；production_ready 保持 false"
 	case generator.SymbolPathID:
 		return "符号路径题（6×6，按目标符号序列连接相邻格；唯一匹配路径由 DFS 证明）：" +
-			"合法位置路径 ≥128，3 次随机猜测上界 <10%；M4/人工可读性/辅助技术 NOT_RUN，" +
+			"合法位置路径 ≥128，3 次随机猜测上界 <10%；M4 最近实测 2026-11-12（正式 1000 题/型×7）与 2026-11-14 复核均为 FAIL（机器可解；见 docs/reviews/CAPTCHA-M4-BASELINE-2026-11-12.md；当前源码未复测，数字不自动继承）；人工可读性/辅助技术 NOT_RUN，不声称抗 AI；" +
 			"不声称抗 AI；production_ready 保持 false"
 	case generator.CrowdFindID:
 		return "找相同角色题（36 个程序化非人形角色，目标签名恰好出现一次）：" +
-			"单次随机猜中 1/36，3 次上界约 8.3%；M4/人工可读性/辅助技术 NOT_RUN，" +
+			"单次随机猜中 1/36，3 次上界约 8.3%；M4 最近实测 2026-11-12（正式 1000 题/型×7）与 2026-11-14 复核均为 FAIL（机器可解；见 docs/reviews/CAPTCHA-M4-BASELINE-2026-11-12.md；当前源码未复测，数字不自动继承）；人工可读性/辅助技术 NOT_RUN，不声称抗 AI；" +
 			"不声称抗 AI；production_ready 保持 false"
 	case generator.VisualRankID:
 		return "视觉排序题（5 张折线卡，按线段数从少到多排列；卡片 ID 随机）：" +
-			"单次 1/120，3 次 2.5%；M4/人工可读性/辅助技术 NOT_RUN，不声称抗 AI；" +
+			"单次 1/120，3 次 2.5%；M4 最近实测 2026-11-12（正式 1000 题/型×7）与 2026-11-14 复核均为 FAIL（机器可解；见 docs/reviews/CAPTCHA-M4-BASELINE-2026-11-12.md；当前源码未复测，数字不自动继承）；人工可读性/辅助技术 NOT_RUN，不声称抗 AI；不声称抗 AI；" +
 			"production_ready 保持 false"
 	case generator.ProgressiveTargetID:
 		return "渐进定位题（三轮 3×3，每轮点击与顶部样本相同的图形；客户端不判对错）：" +
-			"单次 1/729，3 次约 0.41%；M4/人工可读性/辅助技术 NOT_RUN，不声称抗 AI；" +
+			"单次 1/729，3 次约 0.41%；M4 最近实测 2026-11-12（正式 1000 题/型×7）与 2026-11-14 复核均为 FAIL（机器可解；见 docs/reviews/CAPTCHA-M4-BASELINE-2026-11-12.md；当前源码未复测，数字不自动继承）；人工可读性/辅助技术 NOT_RUN，不声称抗 AI；不声称抗 AI；" +
 			"production_ready 保持 false"
 	case generator.ShellTrackID:
 		return "容器跟踪题（三轮四容器交换，服务端预渲染帧；动画结束前不可选）：" +
 			"单次 1/64，3 次约 4.7%；动画/重播的一致性未做跨浏览器实测，" +
-			"M4/人工可读性/辅助技术 NOT_RUN，不声称抗 AI；production_ready 保持 false"
+			"M4 最近实测 2026-11-12（正式 1000 题/型×7）与 2026-11-14 复核均为 FAIL（机器可解；见 docs/reviews/CAPTCHA-M4-BASELINE-2026-11-12.md；当前源码未复测，数字不自动继承）；人工可读性/辅助技术 NOT_RUN，不声称抗 AI；不声称抗 AI；production_ready 保持 false"
 	case generator.SilhouetteAssemblyID:
 		return "轮廓装配题（5 部件/5 槽位，离散旋转与放置；生成器枚举唯一匹配）：" +
-			"答案空间 5!×4^5，3 次随机猜测上界约 2.4e-5；M4/人工可读性/辅助技术 NOT_RUN，" +
+			"答案空间 5!×4^5，3 次随机猜测上界约 2.4e-5；M4 最近实测 2026-11-12（正式 1000 题/型×7）与 2026-11-14 复核均为 FAIL（机器可解；见 docs/reviews/CAPTCHA-M4-BASELINE-2026-11-12.md；当前源码未复测，数字不自动继承）；人工可读性/辅助技术 NOT_RUN，不声称抗 AI；" +
 			"不声称抗 AI；production_ready 保持 false"
 
 	default:

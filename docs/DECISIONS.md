@@ -1572,3 +1572,57 @@ verifier 与历史结果；`shape-grid-v1` 的旧池行（无 polarity 字段）
 ### 验收边界
 
 五包（store/admin/api/pool/server）在 Windows + LockFileEx 诊断 overlay 下全绿（2026-11-22 记录，Go 1.27.3 pinned）；linux/arm64 交叉 vet 通过。真实 Linux flock、子进程互斥、race、容器互斥仍以 Linux 实测为准，未因 overlay 记为通过。五条 HTTP 层在途写用例 + store 层 `TestUpdateSiteRejectsRevokedActor`/`TestSetSiteEnabledRejectsRevokedActor` + siteverify 两方向线性化用例构成本决策的钉子。
+
+## ADR-035 2026-11-22（DRAFT 决策稿，未批准）：生产防重放账本的提交持久性目标（WAL + synchronous=FULL）
+
+### 状态
+
+**DRAFT — 未批准**。本稿只提出决策内容与验收计划；**不修改任何生产 SQL/PRAGMA**，
+不改 `synchronous=NORMAL` 现状，不把风险接受写成已批准。B-03（掉电时已提交状态丢失）
+沿 ADR-022/032 保持发布阻断。批准本 ADR 需要用户明确授权；未批准前生产批准继续为 false。
+
+## 背景与问题
+
+- 现状：SQLite WAL + `synchronous=NORMAL`（实现自阶段 1，受 1 vCPU/1GB 目标机约束）。
+- NORMAL 下 WAL 提交不强制 fsync：进程崩溃由 SQLite 崩溃恢复兜底（账本不损坏），
+  但**系统崩溃/断电**可能丢失"已返回 siteverify success"的最近若干提交。
+- 丢失语义的具体后果：调用方拿到 `success:true` 但账本行未持久 ⇒ 重放同一 token 得到
+  `timeout-or-duplicate` 之外的不一致；一次性消费与撤销/停用的持久性承诺在掉电窗口内不成立。
+- ADR-022/032 把这定为 B-03 发布阻断；ADR-033 §5 明确"不改 SQLite 耐久性"留待单独决策。
+
+## 建议决策（待批准后生效）
+
+1. **生产防重放账本采用 `synchronous=FULL`**（WAL 模式不变）：
+   每次提交 fsync WAL ⇒ 提交返回即已到持久介质（前提：存储栈自身正确实现 flush/fsync——
+   这一假设必须由第 4 节的故障演练验证，不能只靠 PRAGMA 声明）。
+2. **范围**：仅权威库连接（服务与 `epocha-ops` 写路径）。开发期/评测工具不适用此目标。
+3. **回退条款**：若 1C1G 实测显示 FULL 使 p95 redeem 超出可接受预算且无配置级缓解
+   （如 `wal_autocheckpoint` 调优），回退决策必须记录为"接受 B-03 风险"并保持 release_ready=false，
+   不得写成已批准。
+4. **配套不变量**：一次性消费四条保证（ADR-004）、提交后返回成功（红线 12）、
+   fail-closed（提交失败一律拒绝）全部保持；本决策不改动任何 SQL 语义，只改持久性等级。
+
+## 验收计划（批准后执行，全部 NOT_RUN 现状）
+
+| 项 | 方法 | 通过判据 |
+|---|---|---|
+| 性能基准 | 隔离数据集上 NORMAL vs FULL 各跑 `cmd/loadtest --pace` 有界负载 | 记录提交 p95/p99、吞吐、CPU、WAL 增长；超出预算即触发回退条款 |
+| 进程崩溃 | kill -9 服务进程后重启 | 已确认的成功不可重放、未确认（返回前崩溃）不一致窗口按 sqlite 恢复语义收敛；账本 integrity_check 通过 |
+| 系统崩溃/断电 | 真实掉电或 VM 硬断电演练（**kill -9 不等于掉电**） | 掉电前已返回 success 的提交在恢复后必须可被证明已消费（或该提交未被返回——两者按时间线逐条对账）；不得出现"返回 success 且账本无记录且无 WAL 残留"的静默丢失 |
+| 磁盘满 / 临时目录不足 | 独占 SQLITE_TMPDIR + 容量预算预检（ADR-033 §5 延续） | fail closed，不静默降级 |
+| 只读文件系统 | 只读挂载演练（5A 已有形状） | /readyz 拒绝就绪或启动失败，不照常服务 |
+| 备份/恢复 | 既有 VACUUM INTO 流程 | FULL 不改变备份产物语义；恢复后旧 token 仍被拒 |
+| 撤销/停用/无障碍额度的掉电语义 | 上述掉电演练叠加管理写 | 撤销先提交 ⇒ 恢复后凭据保持撤销；站点停用版本不回退；额度表与 challenge 同事务语义保持 |
+
+## 与其他决策的接口
+
+- 不改 flock 单实例边界（ADR-015/018）。
+- 不解除任何 B 系阻断：B-03 的解除以本表全部 PASS 为前提，缺一项即保持阻断。
+- 与 ADR-034 §1 的关系：`persistence-policy` 与 `durability-faults` 两个准入项
+  在本 ADR 批准并验收前保持 NOT_RUN/BLOCKED，production_approval 恒 false。
+
+## 记录
+
+- 本稿由 2026-11-20 授权的"验收可信性"工作流第八节要求产出（"先准备 ADR 决策稿……
+  没有明确决策授权时，不悄悄修改现有持久性策略"）。
+- 2026-11-22：稿成；无批准动作。

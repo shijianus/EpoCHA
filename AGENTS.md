@@ -129,6 +129,12 @@ manifest **无签名** ⇒ 不得宣称抵御恶意替换（备份目录的可�
 边界见 ADR-024。站点**仍只选一个** `generator_id`，按权重混合多题型仍未实现。
 操作与 M1–M4 见 `docs/QUESTION-TYPES.md`。
 
+**2026-11-12 M4 Gate B 实测（历史 FAIL，未复测）**：正式 1,000 题/型 ×7（Wave 1/2 全部七型）
+结果 6,836/7,000（97.66%），7/7 FAIL（≥80% 且 p95<1 CPU 秒），2026-11-14 复核 6,824/7,000 同为 FAIL。
+证据在 `docs/reviews/CAPTCHA-M4-BASELINE-2026-11-12.md` 与 `docs/reviews/audit-evidence/2026-11-14/`。
+七型备注（管理面）已改为"实测 FAIL + 当前源码未复测、数字不自动继承"（ADR-034 §8）——
+不得再把这七型的 M4 写成 NOT_RUN，也不得把旧数字当成当前源码的测量。
+
 **2026-11-12 题库整改新增**（ADR-030 / ADR-031，不是阶段完成）：新增 Wave 1
 `tile-rotation-v1`（3×3 路径块旋转，`masks`）、`symbol-path-v1`（6×6 符号路径，`path`）、
 `crowd-find-v1`（36 选 1 程序化非人形角色，`select`）、`visual-rank-v1`（5 卡线段数排序，`order`），

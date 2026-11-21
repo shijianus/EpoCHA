@@ -1,4 +1,4 @@
-# 题型目录与操作边界（2026-11-06，ADR-024）
+# 题型目录与操作边界（2026-11-06 首版，ADR-024；2026-11-22 事实同步，ADR-034）
 
 本文说明当前登记了哪些题型、怎么选、怎么本地预览、答案怎么编码，以及**哪些结论还没测**。
 它不是效果评测报告：除特别标注的历史数字外，本文的 M4、人工可读性、抗 AI/抗 OCR 都是
@@ -16,16 +16,16 @@
 | `text-image-v3` | image | `text` | 6 字符抽象文字；字形层模糊/位移/擦除 + 单字容差 | 否（M4/OCR/人工可读性 NOT_RUN） |
 | `shape-grid-v1` | image | `cells` | 3×3 图形点选：点选所有满足判据的格子 | 否（M4 NOT_RUN） |
 | `shape-count-v1` | image | `pairs` | 两类图形计数：两个数字 | 否（M4 NOT_RUN） |
-| `parallax-code-v1` | image | `text` | 4 位数字分散在 8–12 帧视差动画中；单帧只有部分笔画 | 否（M4/人工可读性 NOT_RUN） |
+| `parallax-code-v1` | image | `text` | 4 位数字分散在 8–12 帧视差动画中；单帧只有部分笔画 | 否（M4 已实测：2026-11-12（1000 题/型×7）与 11-14 复核均 FAIL（机器可解；当前源码未复测，数字不自动继承）；人工可读性 NOT_RUN） |
 | `bank-shot-v1` | image | `angle` | 一次反弹物理题；0.1° 角度 + TSV 容差 | 否（M4 NOT_RUN） |
 | `accessible-choice-v1` | text | `text` | 无障碍通道：12 选 1 纯文本单选；显式申请 + 24h 一次 | 否（M4/辅助技术 NOT_RUN） |
-| `energy-window-v1` | image | `timing` | 36 帧能量游标，进入标记窗口时记录时机；TSV 时间桶 | 否（M4/人工可读性 NOT_RUN） |
+| `energy-window-v1` | image | `timing` | 36 帧能量游标，进入标记窗口时记录时机；TSV 时间桶 | 否（M4 已实测：2026-11-12（1000 题/型×7）与 11-14 复核均 FAIL（机器可解；当前源码未复测，数字不自动继承）；人工可读性 NOT_RUN） |
 | `pipe-connect-v1` | image | `cells` | 4×4 拓扑网格，点选主路径 2 个断点 | 否（M4 NOT_RUN） |
-| `intersection-point-v1` | image | `point` | 两条虚线在随机位置相交，点击延长线交点；网格量化 + 3×3 邻格 TSV | 否（M4/人工可读性 NOT_RUN） |
-| `tile-rotation-v1` | image | `masks` | 3×3 路径块旋转，连成一张无越界边的网络；唯一解由枚举证明 | 否（M4/人工可读性 NOT_RUN） |
-| `symbol-path-v1` | image | `path` | 6×6 符号路径，按目标序列连接相邻格；唯一匹配路径由 DFS 证明 | 否（M4/人工可读性 NOT_RUN） |
-| `crowd-find-v1` | image | `select` | 36 个程序化非人形角色，点击与顶部样本完全相同的一个 | 否（M4/人工可读性 NOT_RUN） |
-| `visual-rank-v1` | image | `order` | 5 张折线卡按线段数从少到多排列 | 否（M4/人工可读性 NOT_RUN） |
+| `intersection-point-v1` | image | `point` | 两条虚线在随机位置相交，点击延长线交点；网格量化 + 3×3 邻格 TSV | 否（M4 已实测：2026-11-12（1000 题/型×7）与 11-14 复核均 FAIL（机器可解；当前源码未复测，数字不自动继承）；人工可读性 NOT_RUN） |
+| `tile-rotation-v1` | image | `masks` | 3×3 路径块旋转，连成一张无越界边的网络；唯一解由枚举证明 | 否（M4 已实测：2026-11-12（1000 题/型×7）与 11-14 复核均 FAIL（机器可解；当前源码未复测，数字不自动继承）；人工可读性 NOT_RUN） |
+| `symbol-path-v1` | image | `path` | 6×6 符号路径，按目标序列连接相邻格；唯一匹配路径由 DFS 证明 | 否（M4 已实测：2026-11-12（1000 题/型×7）与 11-14 复核均 FAIL（机器可解；当前源码未复测，数字不自动继承）；人工可读性 NOT_RUN） |
+| `crowd-find-v1` | image | `select` | 36 个程序化非人形角色，点击与顶部样本完全相同的一个 | 否（M4 已实测：2026-11-12（1000 题/型×7）与 11-14 复核均 FAIL（机器可解；当前源码未复测，数字不自动继承）；人工可读性 NOT_RUN） |
+| `visual-rank-v1` | image | `order` | 5 张折线卡按线段数从少到多排列 | 否（M4 已实测：2026-11-12（1000 题/型×7）与 11-14 复核均 FAIL（机器可解；当前源码未复测，数字不自动继承）；人工可读性 NOT_RUN） |
 | `progressive-target-v1` | image | `sequence` | 三轮 3×3 定位，客户端逐轮推进不判对错 | 否（M4/人工可读性 NOT_RUN） |
 | `shell-track-v1` | image | `sequence` | 三轮四容器交换；服务端预渲染 33 帧雪碧图，动画结束前不可选 | 否（M4/跨浏览器动画 NOT_RUN） |
 | `silhouette-assembly-v1` | image | `placements` | 5 部件/5 槽位离散旋转装配，唯一匹配由枚举证明 | 否（M4/人工可读性 NOT_RUN） |
@@ -42,7 +42,10 @@
 
 ## 2. 站点怎么选题型
 
-站点策略仍只有**一个** `generator_id`（ADR-024 没有实现按权重混合多题型）：
+站点策略有两种形态：单个 `generator_id`（等价于只含该题型的池），或显式 `generator_pool`（多候选）。
+池内候选由调度器按风险带/设备/reduced_motion 硬约束加权选型（ADR-026）；无障碍专用题型
+（`accessible-choice-v1`）只服务显式 accessibility 请求且必须**显式入池**——`generator_id`
+单选无障碍题型 + 空池会被服务端拒绝（普通通道将整站 503，ADR-034 §7）：
 
 ```bash
 # 创建站点：pow_question + 指定题型与难度

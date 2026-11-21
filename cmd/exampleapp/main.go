@@ -488,7 +488,7 @@ func (a *app) commitProtected(ctx context.Context, text, response string) (int, 
 		// 验证服务不可达/超时/响应不可解析 ⇒ fail closed。
 		a.log.Error("siteverify 调用失败", "err", errKind(verifyErr))
 		return http.StatusServiceUnavailable, errVerifyDown,
-			"验证服务暂时不可用，留言**没有**写入。请稍后重新验证。"
+			"验证服务暂时不可用，留言没有写入。请稍后重新验证。"
 	}
 	if !ok {
 		code := strings.Join(codes, ",")
@@ -505,7 +505,7 @@ func (a *app) commitProtected(ctx context.Context, text, response string) (int, 
 	if a.shouldFailWrite() {
 		a.log.Error("留言写入失败（token 已被消费）")
 		return http.StatusInternalServerError, "epocha-write-failed",
-			"留言写入失败，而这次验证凭据**已经作废**（一次性）。请重新验证后再提交。"
+			"留言写入失败，而这次验证凭据已经作废（一次性）。请重新验证后再提交。"
 	}
 	verifiedAt := time.Now().UTC().Format(time.RFC3339)
 	prefix := response[:minInt(len(response), 12)]
@@ -513,7 +513,7 @@ func (a *app) commitProtected(ctx context.Context, text, response string) (int, 
 		text, verifiedAt, prefix); err != nil {
 		a.log.Error("留言写入失败（token 已被消费）", "err", errKind(err))
 		return http.StatusInternalServerError, "epocha-write-failed",
-			"留言写入失败，而这次验证凭据**已经作废**（一次性）。请重新验证后再提交。"
+			"留言写入失败，而这次验证凭据已经作废（一次性）。请重新验证后再提交。"
 	}
 	a.log.Info("留言已写入", "verified_at", verifiedAt)
 	return http.StatusCreated, "", "留言已写入"
@@ -815,7 +815,7 @@ const fixtureTemplate = `<!doctype html>
   <div id="captcha"></div>
   <p id="wstate" class="sub">组件状态：<code>idle</code></p>
   <button type="submit">提交订单</button>
-  <p class="sub">注意：提交按钮**一直可点**。没完成验证也会被服务端拒绝 —— 前端的
+  <p class="sub">注意：提交按钮<strong>一直可点</strong>。没完成验证也会被服务端拒绝 —— 前端的
      onSuccess 不是授权。</p>
 </form>
 

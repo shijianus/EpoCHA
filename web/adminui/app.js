@@ -146,7 +146,7 @@
       case 404: return "没找到目标对象。";
       case 409: return "与现有记录冲突（站点名或 site_key 已存在）。";
       case 429: return "请求过于频繁，请稍后再试。";
-      case 500: return "服务端内部错误（500）。本次改动**没有**生效，请重试或查看服务端日志。";
+      case 500: return "服务端内部错误（500）。本次改动没有生效，请重试或查看服务端日志。";
       case 503: return "服务暂时不可用（题目池或依赖组件未就绪）。";
       default: return "服务返回错误 " + res.status + "。" + errCode(res);
     }
@@ -1099,13 +1099,15 @@
 
   function confirmToggle(s, enable) {
     var note = enable
-      ? "启用后新领题会按站点当前配置签发。站点版本会提升：停用期间没有任何东西被复活。"
-      : "停用会让领题与兑换立即失败。站点版本会提升，因此**停用前签发但尚未消费的 token 在重新启用后也不会复活**（DESIGN §5.3）。";
+      ? ["启用后新领题会按站点当前配置签发。站点版本会提升：停用期间没有任何东西被复活。"]
+      : ["停用会让领题与兑换立即失败。站点版本会提升，因此",
+        el("strong", { text: "停用前签发但尚未消费的 token 在重新启用后也不会复活" }),
+        "（DESIGN §5.3）。"];
     var target = "站点「" + s.name + "」  id=" + s.id + "  site_key=" + s.site_key + "  当前版本 " + s.version;
     var box = div({ class: "banner warn" }, [
       el("strong", { text: (enable ? "确认启用：" : "确认停用：") }),
       p(target, "wrap-anywhere"),
-      p(note),
+      el("p", null, note),
       div({ class: "panel-actions" }, [
         el("button", {
           type: "button", text: enable ? "确认启用" : "确认停用", onclick: async function (ev) {

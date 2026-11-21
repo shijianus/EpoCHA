@@ -379,7 +379,11 @@ func TestWatermarkIsPerBucket(t *testing.T) {
 func TestDisabledSiteNeedsNoQuestions(t *testing.T) {
 	h := newHarness(t, func(c *Config) { c.LowWatermark = 2; c.HighWatermark = 4; c.BatchPerTick = 8 }, nil)
 	site := h.questionSite("alpha", 1)
-	if _, err := h.db.SetSiteEnabled(t.Context(), site.ID, false); err != nil {
+	key, _, err := h.db.NewAdminKeyWithID(t.Context(), "test-pool-disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.db.SetSiteEnabled(t.Context(), site.ID, false, key.KeyID); err != nil {
 		t.Fatal(err)
 	}
 	if made, err := h.w.Tick(t.Context()); err != nil || made != 0 {

@@ -54,6 +54,8 @@ type harness struct {
 	siteA     *store.Site
 	siteB     *store.Site
 	cleanup   []func()
+	// diagActor 缓存测试专用管理 key_id（stage2 helper 惰性创建）；业务写 helper 显式传 actor。
+	diagActor string
 }
 
 // allBodies 是并发安全地取回全部响应体（按值扫描哨兵用）。

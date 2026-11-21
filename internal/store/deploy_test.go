@@ -111,6 +111,12 @@ func TestReadyFailsWhenDataDirReadOnly(t *testing.T) {
 		t.Skipf("无法改目录权限（环境限制）: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	if probe, err := os.CreateTemp(dir, "readonly-probe-*"); err == nil {
+		_ = probe.Close()
+		_ = os.Remove(probe.Name())
+		// chmod 555 在 Windows ACL 语义下可能不阻止写入：权限前提不成立 ⇒ 不是 PASS 也不是 FAIL。
+		t.Skip("当前环境 chmod 555 未实际阻止目录写入；只读目录行为须在 Linux 权限模型下验收")
+	}
 	if err := d.Ready(t.Context()); err == nil {
 		t.Fatal("数据目录不可写却返回就绪（SQLite 建不了 -wal/-shm）")
 	}
@@ -229,6 +235,12 @@ func TestBackupRefusesToOverwriteAndLeavesNoPartial(t *testing.T) {
 		t.Skipf("无法把目标目录改成只读: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(ro, 0o755) })
+	if probe, err := os.CreateTemp(ro, "readonly-probe-*"); err == nil {
+		_ = probe.Close()
+		_ = os.Remove(probe.Name())
+		// chmod 555 在 Windows ACL 语义下可能不阻止写入：权限前提不成立 ⇒ 显式跳过，不冒充验收。
+		t.Skip("当前环境 chmod 555 未实际阻止目录写入；只读目录行为须在 Linux 权限模型下验收")
+	}
 	if _, err := Backup(t.Context(), BackupOptions{SrcPath: path, DestDir: ro, Now: now.Add(time.Minute), Pepper: testPepper()}); err == nil {
 		t.Fatal("目标目录不可写却报告成功")
 	}

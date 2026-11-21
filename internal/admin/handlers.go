@@ -348,7 +348,12 @@ func (s *Server) handleUpdateSite(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, CodeBadRequest)
 		return
 	}
-	site, err := s.db.UpdateSite(r.Context(), id, updateFrom(&req))
+	actorID, err := actor(r)
+	if err != nil {
+		fail(w, http.StatusUnauthorized, CodeUnauthorized)
+		return
+	}
+	site, err := s.db.UpdateSite(r.Context(), id, updateFrom(&req), actorID)
 	if err != nil {
 		s.auditFail(r.Context(), r, "site.update", "site:"+strconv.FormatInt(id, 10))
 		failFromErr(w, err)
@@ -369,7 +374,12 @@ func (s *Server) handleSetEnabled(enabled bool) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		site, err := s.db.SetSiteEnabled(r.Context(), id, enabled)
+		actorID, err := actor(r)
+		if err != nil {
+			fail(w, http.StatusUnauthorized, CodeUnauthorized)
+			return
+		}
+		site, err := s.db.SetSiteEnabled(r.Context(), id, enabled, actorID)
 		if err != nil {
 			s.auditFail(r.Context(), r, actionForEnabled(enabled), "site:"+strconv.FormatInt(id, 10))
 			failFromErr(w, err)
@@ -391,7 +401,12 @@ func (s *Server) handleDeleteSite(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	site, err := s.db.SetSiteEnabled(r.Context(), id, false)
+	actorID, err := actor(r)
+	if err != nil {
+		fail(w, http.StatusUnauthorized, CodeUnauthorized)
+		return
+	}
+	site, err := s.db.SetSiteEnabled(r.Context(), id, false, actorID)
 	if err != nil {
 		s.auditFail(r.Context(), r, "site.revoke", "site:"+strconv.FormatInt(id, 10))
 		failFromErr(w, err)
@@ -433,7 +448,12 @@ func (s *Server) handlePutOrigins(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	target := "site:" + strconv.FormatInt(id, 10)
-	origins, err := s.db.ReplaceOrigins(r.Context(), id, req.Origins)
+	actorID, err := actor(r)
+	if err != nil {
+		fail(w, http.StatusUnauthorized, CodeUnauthorized)
+		return
+	}
+	origins, err := s.db.ReplaceOriginsAudited(r.Context(), id, req.Origins, actorID)
 	if err != nil {
 		s.auditFail(r.Context(), r, "site.origins", target)
 		failFromErr(w, err)

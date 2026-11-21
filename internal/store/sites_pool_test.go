@@ -47,7 +47,8 @@ func TestSiteGeneratorPoolPersistenceAndValidation(t *testing.T) {
 		}
 	}
 	next := []string{"shape-grid-v1"}
-	updated, err := d.UpdateSite(context.Background(), site.ID, SiteUpdate{GeneratorPool: &next})
+	poolActor := testAdminActor(t, d, "actor-pool")
+	updated, err := d.UpdateSite(context.Background(), site.ID, SiteUpdate{GeneratorPool: &next}, poolActor)
 	if err != nil {
 		t.Fatalf("UpdateSite pool: %v", err)
 	}
@@ -67,7 +68,7 @@ func TestSiteGeneratorPoolPersistenceAndValidation(t *testing.T) {
 	}
 	// 空池回落单 generator_id。
 	empty := []string{}
-	updated, err = d.UpdateSite(context.Background(), site.ID, SiteUpdate{GeneratorPool: &empty})
+	updated, err = d.UpdateSite(context.Background(), site.ID, SiteUpdate{GeneratorPool: &empty}, poolActor)
 	if err != nil {
 		t.Fatal(err)
 	}

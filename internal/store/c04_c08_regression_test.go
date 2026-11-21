@@ -168,7 +168,7 @@ func TestC08ListSecretsParentResourceSemantics(t *testing.T) {
 	if got, err := d.ListSecrets(t.Context(), site.ID); err != nil || len(got) != 0 {
 		t.Fatalf("existing site with no secrets must remain a valid empty list: rows=%v err=%v", got, err)
 	}
-	if _, err := d.SetSiteEnabled(t.Context(), site.ID, false); err != nil {
+	if _, err := d.SetSiteEnabled(t.Context(), site.ID, false, testAdminActor(t, d, "actor-c08")); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := d.ListSecrets(t.Context(), site.ID); err != nil || len(got) != 0 {

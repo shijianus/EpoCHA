@@ -102,6 +102,8 @@ var (
 	ErrConflict       = errors.New("store: 与已有记录冲突")
 	ErrDisabled       = errors.New("store: 站点已停用")
 	ErrRevoked        = errors.New("store: 凭据已撤销或不在有效期")
+	ErrSiteDisabled   = errors.New("store: 站点已停用或版本已变更")
+	ErrSiteOwnership  = errors.New("store: response 不属于该站点")
 
 	// timeLayout 用固定 9 位小数（不裁剪尾零）：账本里的过期判定是 SQL 内的字符串比较，
 	// 只有定宽格式才能让字典序与时间序一致。time.RFC3339Nano 会裁掉尾随零，
@@ -541,6 +543,77 @@ WHERE id=? AND site_id=? AND used=0 AND expires_at>?`,
 	}
 	if n, _ := res.RowsAffected(); n != 1 {
 		return nil, ErrConsumed
+	}
+	v := &Verification{SiteID: siteID}
+	var created string
+	err = tx.QueryRowContext(ctx, `
+SELECT r.challenge_id, c.created_at, c.origin
+FROM responses r JOIN challenges c ON c.id = r.challenge_id
+WHERE r.id=? AND r.site_id=?`, responseID, siteID).Scan(&v.ChallengeID, &created, &v.Origin)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrConsumed
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: 回读 challenge: %w", err)
+	}
+	if v.ChallengeCreatedAt, err = parseTime(created); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: 提交验证: %w", err)
+	}
+	return v, nil
+}
+
+// ConsumeResponseSiteChecked 是 siteverify 的消费入口：站点裁决（enabled + 版本）
+// 与消费 UPDATE 在**同一事务**内，线性化点就是这个事务——
+// 停用/版本提升先提交 ⇒ 未消费的 response 不得被接受（ErrSiteDisabled，response 保持未用）；
+// 消费先提交 ⇒ 成功保留，随后的停用不改写已消费事实。
+// 判定顺序刻意是"先消费、后裁决"：已消费/不存在/过期的重放一律 ErrConsumed
+// （与既有重放语义一致，不因站点停用泄露新状态）；只有"本次真正消费成功"才要求站点在事务内仍有效。
+func (d *DB) ConsumeResponseSiteChecked(ctx context.Context, responseID string, siteID int64, expectedVersion int64, now time.Time) (*Verification, error) {
+	tx, err := d.h.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("store: 验证事务: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// 同事务内先判 token 归属：RID 全局唯一且行上带 site_id。不存在或不属于本站点
+	// 都按各自错误族返回，与跨站点保护一致（红线 4、§10.1）。
+	var ownedSite int64
+	err = tx.QueryRowContext(ctx, `SELECT site_id FROM responses WHERE id=?`, responseID).Scan(&ownedSite)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrConsumed // 不存在与过期同形（timeout-or-duplicate），不泄露行是否存在
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: 读取 response: %w", err)
+	}
+	if ownedSite != siteID {
+		return nil, ErrSiteOwnership
+	}
+
+	res, err := tx.ExecContext(ctx, `
+UPDATE responses SET used=1
+WHERE id=? AND site_id=? AND used=0 AND expires_at>?`,
+		responseID, siteID, formatTime(now.UTC()))
+	if err != nil {
+		return nil, fmt.Errorf("store: 条件更新 response: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return nil, ErrConsumed
+	}
+	var enabled int64
+	var currentVersion int64
+	err = tx.QueryRowContext(ctx, `SELECT enabled, version FROM sites WHERE id=?`, siteID).Scan(&enabled, &currentVersion)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: 读取站点状态: %w", err)
+	}
+	if enabled == 0 || currentVersion != expectedVersion {
+		// 停用/版本先提交 ⇒ 本次消费失败并回滚（response 保持未用）；统一 ErrSiteDisabled 族（红线 8）。
+		return nil, ErrSiteDisabled
 	}
 	v := &Verification{SiteID: siteID}
 	var created string

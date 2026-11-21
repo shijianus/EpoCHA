@@ -404,8 +404,12 @@ func TestSiteFileDoesNotOverwriteDatabaseOnRestart(t *testing.T) {
 	if !site.Enabled {
 		t.Fatal("首导入站点应为启用")
 	}
-	// 运维停用该站点
-	if _, err := d.SetSiteEnabled(ctx, site.ID, false); err != nil {
+	// 运维停用该站点（测试专用管理 key 提供 actor；守卫要求业务写显式携带）
+	key, _, err := d.NewAdminKeyWithID(ctx, "test-disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.SetSiteEnabled(ctx, site.ID, false, key.KeyID); err != nil {
 		t.Fatal(err)
 	}
 	versionAfterDisable := site.Version

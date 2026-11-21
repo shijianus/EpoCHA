@@ -1552,3 +1552,21 @@ verifier 与历史结果；`shape-grid-v1` 的旧池行（无 polarity 字段）
 ### 验收边界
 
 报告见 `docs/reviews/BASELINE-RECOVERY-2026-11-19.md`。日志、红绿对照与资源不足的未执行项分别登记。完整必要证据不足时结论必须不可发布，不输出 `RELEASE_APPROVED=true`。
+
+## ADR-034 2026-11-21：验收可信性、在途写事务授权与 siteverify 线性化
+
+### 背景与授权
+
+用户要求推进"验收可信性、事务授权和部署闭环"修复：先重建基线（`fix/baseline-recovery-20261119` = `41bd49b125f020ca2869b7c643e718dcf61f0565`，main = `de65ec72696102c26bc1360a3203b50600e54d5e`，落后 56 提交；11-19 full 归档绑定 `3ed3a15`，是 INCOMPLETE/3 历史证据，非本轮执行），按问题先红后绿，不扩展题型、不把门禁改绿、不推送不部署。
+
+### 决策
+
+1. **工程验收与生产批准在数据模型上分离**。`release-check.mjs` 升级到 schema 2：summary 保留原 verdict/exit_code（0/1/3 语义与 PASS/FAIL/BLOCKED/NOT_RUN 不变），新增独立 `production_approval` 记录——候选身份（支持范围/源码 OID/清单哈希/Go 版本/构建参数/二进制与镜像哈希）九项准入（效果、人工可读性、辅助技术、真机、持久化策略、耐久故障、平台、产物冒烟、发布权威）与指纹绑定，全部 PASS 才可能推进，且当前无受信任审批人身份锚点 ⇒ `approved:false` 是**设计默认**，不存在任何强制通过开关。`release_ready` 不再由工程退出码推导。
+2. **管理在途写的授权裁决必须在业务事务内**。红线 13 族扩展：`UpdateSite`、`SetSiteEnabled`、`ReplaceOriginsAudited` 在同事务内 `guardAuditedActor`（取写槽→查 actor→UPDATE→RowsAffected==1→commit），撤销先提交 ⇒ 在途变更按既有 `ErrRevoked`→401 族拒绝、状态不变、无成功审计；写先提交 ⇒ 结果保留（ADR-021 的"紧急收紧不回滚"边界不变：撤销/停用的成功审计仍在事务外收尾）。启动期配置导入 `importSites` 没有 actor，走无守卫的 `ReplaceOrigins` 变体且**永不写审计**；它只发生一次、不覆盖库内权威（`ImportSite` 幂等）。
+3. **siteverify 的线性化点是消费事务**。新增 `ConsumeResponseSiteChecked`：同一事务内完成 token 归属校验（`ErrSiteOwnership`，RID 全局唯一 + 行上 site_id）、站点 enabled+版本裁决（`ErrSiteDisabled`，先提交 ⇒ 拒绝且 response 保持未用；版本不回退 ⇒ 重新启用不复活）、原子条件消费（RowsAffected==1）。判定顺序刻意"先消费后裁决站点"：已消费/不存在/过期的重放**永远** `ErrConsumed`→`timeout-or-duplicate`，不因站点停用向调用方泄露新状态（红线 8）。消费先提交 ⇒ 成功保留。secret 撤销仍由 `FindSiteBySecret` 在触碰 token 状态前独立裁决（红线 4 不变）。嵌套 BEGIN IMMEDIATE 仍禁止；`SetMaxOpenConns(1)` 依旧不是安全边界。
+4. **Windows 诊断 overlay 按平台事实记录**。仓库外 overlay（不进源码、不改变正式 gate）把 `internal/store/lock.go` 替换为 kernel32 `LockFileEx(LOCKFILE_EXCLUSIVE_LOCK|LOCKFILE_FAIL_IMMEDIATELY)` + **`UnlockFileEx`** 实现——探针实测 `LockFileEx(flags=0)` 不是解锁而是共享锁尝试（会留下"释放后仍持有"的假象）；锁文件 POSIX 位断言在 Windows 按平台条件跳过（0600 纪律以 Linux 实测为准）；`cmd/server` 依赖 SIGTERM/SIGKILL 的真实子进程互斥用例在 Windows 跳过（`Process.Signal` 返回 EWINDOWS）。这些是诊断证据，不是 Linux flock/子进程/容器验收。
+5. **测试夹具基线必须取"创建后快照"**。`createSite` 不带 `verify_mode` 时 `withDefaults` 落 `pow_only`——把"被拒更新不得改变站点"断言写成对照创建时显式策略（`TestUpdateSiteRejectsRevokedActor` 显式建 `pow_question` 站点），否则断言本身恒真或恒假（本轮实测撞过一次：HTTP 用例误把默认值当被篡改证据）。
+
+### 验收边界
+
+五包（store/admin/api/pool/server）在 Windows + LockFileEx 诊断 overlay 下全绿（2026-11-22 记录，Go 1.27.3 pinned）；linux/arm64 交叉 vet 通过。真实 Linux flock、子进程互斥、race、容器互斥仍以 Linux 实测为准，未因 overlay 记为通过。五条 HTTP 层在途写用例 + store 层 `TestUpdateSiteRejectsRevokedActor`/`TestSetSiteEnabledRejectsRevokedActor` + siteverify 两方向线性化用例构成本决策的钉子。

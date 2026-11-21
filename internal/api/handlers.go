@@ -798,20 +798,19 @@ func (s *Server) handleSiteverify(w http.ResponseWriter, r *http.Request) {
 		verifyFail(w, ErrInvalidInputResponse)
 		return
 	}
-	// 停用站点或版本变动后旧 response token 一律不放行；重新启用也不会让它复活。
-	if !site.Enabled || site.Version != claims.Svid {
-		verifyFail(w, ErrInvalidInputResponse)
-		return
-	}
-	if claims.Sid != site.ID {
-		verifyFail(w, ErrInvalidInputResponse)
-		return
-	}
-	v, err := s.db.ConsumeResponse(ctx, claims.RID, site.ID, now)
+	// 站点裁决（enabled + 版本）与消费 UPDATE 在同一事务内（ADR 线性化点 = 消费事务）：
+	// 停用/版本提升先提交 ⇒ 本次验证拒绝且 response 保持未用；消费先提交 ⇒ 成功保留。
+	// ErrSiteDisabled 与"版本不匹配"统一映射 invalid-input-response，不向调用方区分原因（红线 8）。
+	v, err := s.db.ConsumeResponseSiteChecked(ctx, claims.RID, site.ID, claims.Svid, now)
 	if err != nil {
 		if errors.Is(err, store.ErrConsumed) || errors.Is(err, store.ErrNotFound) {
 			// 已使用、不存在或已过期：与 reCAPTCHA 的 timeout-or-duplicate 语义一致。
 			verifyFail(w, ErrTimeoutOrDuplicate)
+			return
+		}
+		// 停用/版本变动与跨站点归属错误都统一 invalid-input-response，不区分原因（红线 8）。
+		if errors.Is(err, store.ErrSiteDisabled) || errors.Is(err, store.ErrSiteOwnership) {
+			verifyFail(w, ErrInvalidInputResponse)
 			return
 		}
 		s.internalError(w, r, "消费 response", err)

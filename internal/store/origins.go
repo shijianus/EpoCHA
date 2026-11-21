@@ -154,7 +154,19 @@ func OriginHost(canonical string) string {
 
 // ReplaceOrigins 全量替换站点的允许来源。空列表是合法状态："该站点不接受任何浏览器来源"，
 // 此时只有 allow_missing_origin 放行的直接 API 调用能签发。
+// 这是**配置一次性导入**专用变体：启动期没有管理 actor，不写审计、不做 actor 守卫；
+// 管理请求必须走 ReplaceOriginsAudited（撤销先提交 ⇒ 在途替换拒绝）。
 func (d *DB) ReplaceOrigins(ctx context.Context, siteID int64, origins []string) ([]string, error) {
+	return d.replaceOrigins(ctx, siteID, origins, nil)
+}
+
+// ReplaceOriginsAudited 是管理请求的来源替换入口：actor 有效性在**本事务**内重验
+// （与撤销在同一写槽上串行）：入口鉴权只是快照，撤销先提交时在途替换不得落库。
+func (d *DB) ReplaceOriginsAudited(ctx context.Context, siteID int64, origins []string, actor string) ([]string, error) {
+	return d.replaceOrigins(ctx, siteID, origins, &actor)
+}
+
+func (d *DB) replaceOrigins(ctx context.Context, siteID int64, origins []string, actor *string) ([]string, error) {
 	if _, err := d.SiteByID(ctx, siteID); err != nil {
 		return nil, err
 	}
@@ -167,6 +179,11 @@ func (d *DB) ReplaceOrigins(ctx context.Context, siteID int64, origins []string)
 		return nil, fmt.Errorf("store: 来源事务: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if actor != nil {
+		if err := guardAuditedActor(ctx, tx, *actor); err != nil {
+			return nil, err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM site_origins WHERE site_id=?`, siteID); err != nil {
 		return nil, fmt.Errorf("store: 清空来源: %w", err)
 	}

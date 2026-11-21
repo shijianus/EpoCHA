@@ -342,7 +342,7 @@ type SiteUpdate struct {
 //
 // Name 走同一条 UPDATE：显示名不参与任何判定（账本按 site_id 外键、下发按 site_key），
 // 改它不会让任何已签发东西失效，也不需要提升站点版本。
-func (d *DB) UpdateSite(ctx context.Context, id int64, u SiteUpdate) (*Site, error) {
+func (d *DB) UpdateSite(ctx context.Context, id int64, u SiteUpdate, actor string) (*Site, error) {
 	cur, err := d.SiteByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -362,7 +362,16 @@ func (d *DB) UpdateSite(ctx context.Context, id int64, u SiteUpdate) (*Site, err
 	if err != nil {
 		return nil, err
 	}
-	res, err := d.h.ExecContext(ctx, `
+	tx, err := d.h.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("store: 更新站点事务: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	// actor 重验与业务 UPDATE 在同一事务内：撤销先提交 ⇒ 在途策略变更拒绝（红线 13 同族）。
+	if err := guardAuditedActor(ctx, tx, actor); err != nil {
+		return nil, err
+	}
+	res, err := tx.ExecContext(ctx, `
 UPDATE sites SET name=?, pow_bits=?, challenge_ttl_sec=?, response_ttl_sec=?, rate_ip_rpm=?, rate_site_rpm=?,
                  allow_missing_origin=?, verify_mode=?, generator_id=?, generator_pool=?, difficulty=?
 WHERE id=?`,
@@ -380,12 +389,15 @@ WHERE id=?`,
 	if n, _ := res.RowsAffected(); n != 1 {
 		return nil, ErrNotFound
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: 提交站点更新: %w", err)
+	}
 	return d.SiteByID(ctx, id)
 }
 
 // SetSiteEnabled 启停站点。每次**状态变化**都提升站点版本：
 // 停用使未消费的 token 立即失效，重新启用也不会让它们复活。
-func (d *DB) SetSiteEnabled(ctx context.Context, id int64, enabled bool) (*Site, error) {
+func (d *DB) SetSiteEnabled(ctx context.Context, id int64, enabled bool, actor string) (*Site, error) {
 	cur, err := d.SiteByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -393,13 +405,25 @@ func (d *DB) SetSiteEnabled(ctx context.Context, id int64, enabled bool) (*Site,
 	if cur.Enabled == enabled {
 		return cur, nil
 	}
-	res, err := d.h.ExecContext(ctx, `
+	tx, err := d.h.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("store: 启停站点事务: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	// 启停提升版本并立即影响 siteverify 判定：actor 重验必须在同一事务内（红线 13 同族）。
+	if err := guardAuditedActor(ctx, tx, actor); err != nil {
+		return nil, err
+	}
+	res, err := tx.ExecContext(ctx, `
 UPDATE sites SET enabled=?, version=version+1 WHERE id=?`, b2i(enabled), id)
 	if err != nil {
 		return nil, fmt.Errorf("store: 启停站点: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n != 1 {
 		return nil, ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: 提交启停站点: %w", err)
 	}
 	return d.SiteByID(ctx, id)
 }

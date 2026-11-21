@@ -1525,6 +1525,8 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
 
 ## 19. 变更日志
 
+- 2026-11-21 **验收可信性、在途写授权与 siteverify 线性化（ADR-034）**：发布 summary 升级 schema 2——工程 verdict 与 `production_approval` 分离，后者默认 `approved:false` 且需候选绑定九项准入，`release_ready` 不再由工程退出码推导；`UpdateSite`/`SetSiteEnabled`/`ReplaceOriginsAudited` 在业务事务内重验管理 actor（撤销先提交 ⇒ 拒绝且无成功审计；启动导入走无守卫无审计变体）；新增 `ConsumeResponseSiteChecked` 把 token 归属 + 站点 enabled/版本裁决与原子消费放进同一事务（线性化点=消费事务；已消费/不存在/过期重放恒为 `ErrConsumed`，不泄露停用状态）；stage5a 资源清理改为按本轮登记 ID（唯一 project 名 + LockFileEx 诊断 overlay 见 ADR-034 §4）。Linux flock/子进程/容器互斥仍以 Linux 实测为准。
+
 - 2026-11-19 **基线恢复与候选治理（ADR-033）**：先保存既有 WIP、合入 `adcbe0b4`；Windows 修改→GitHub OID 核对→Linux 拉取。新增 Wave 夹具集合、PNG 与单帧雪碧图契约、CSS 显示尺寸与声明分离、浏览器资源所有权回归；SQLite 临时目录容量独立检查。Linux amd64 的补充测试不替代正式 arm64 / 专用 Docker 与人工验收；不改变题型安全等级。原始命令、状态与阻断见 `docs/reviews/BASELINE-RECOVERY-2026-11-19.md`。
 
 - 2026-11-12 **M4 Gate B（Qualification Gate B，review）**：新增 dev-only `cmd/m4baseline/` +

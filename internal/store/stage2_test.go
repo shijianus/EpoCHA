@@ -277,6 +277,107 @@ func TestRevokedSecretCannotConsumeValidResponse(t *testing.T) {
 
 // --- 站点版本与启停 ---
 
+// TestUpdateSiteRejectsRevokedActor 钉住策略更新与撤销的提交顺序语义：
+// 撤销先提交 ⇒ 在途策略更新必须按 ErrRevoked 拒绝且站点字段不变（同事务裁决）。
+func TestUpdateSiteRejectsRevokedActor(t *testing.T) {
+	d := newDB(t)
+	// withDefaults 会把空 VerifyMode 落成 pow_only；这里显式建 pow_question 站点，
+	// 才能把"更新被拒后字段保持创建时快照"表达出来。
+	site, _, err := d.CreateSite(t.Context(), "update-guard", "pk-update-guard", SitePolicy{PowBits: 14, VerifyMode: ModePowQuestion, GeneratorID: "arithmetic-baseline-v1", Difficulty: MinDifficulty})
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := testAdminActor(t, d, "actor-update-guard")
+	if _, err := d.RevokeAdminKey(t.Context(), actor, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.UpdateSite(t.Context(), site.ID, SiteUpdate{VerifyMode: strp(string(ModePowOnly)), GeneratorID: strp("")}, actor); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("撤销后策略更新应 ErrRevoked，got %v", err)
+	}
+	after, err := d.SiteByID(t.Context(), site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Policy.VerifyMode != ModePowQuestion || after.Version != site.Version {
+		t.Fatalf("被拒更新不得改变站点: mode=%s version=%d", after.Policy.VerifyMode, after.Version)
+	}
+}
+
+// --- siteverify 与停用/撤销的线性化 ---
+
+// TestConsumeResponseRejectsSiteDisabledBeforeCommit：停用先提交 ⇒ 消费必须拒绝且 response 保持未用。
+// 线性化点定义为消费事务本身：站点裁决（enabled/version）与消费 UPDATE 在同一事务内。
+func TestConsumeResponseRejectsSiteDisabledBeforeCommit(t *testing.T) {
+	d := newDB(t)
+	site := mustSite(t, d, "sv-disable")
+	c := newChallenge(t, d, site.ID, time.Hour)
+	r, err := d.Redeem(t.Context(), c.ID, time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.SetSiteEnabled(t.Context(), site.ID, false, testAdminActor(t, d, "actor-sv-disable")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ConsumeResponseSiteChecked(t.Context(), r.ID, site.ID, site.Version, time.Now()); !errors.Is(err, ErrSiteDisabled) {
+		t.Fatalf("停用先提交后消费应 ErrSiteDisabled，got %v", err)
+	}
+}
+
+// TestConsumeResponseCommitBeforeDisable：消费先提交 ⇒ 成功保留；随后的停用不得改写已消费事实。
+func TestConsumeResponseCommitBeforeDisable(t *testing.T) {
+	d := newDB(t)
+	site := mustSite(t, d, "sv-order")
+	c := newChallenge(t, d, site.ID, time.Hour)
+	r, err := d.Redeem(t.Context(), c.ID, time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := d.ConsumeResponseSiteChecked(t.Context(), r.ID, site.ID, site.Version, time.Now())
+	if err != nil {
+		t.Fatalf("消费先于停用应成功: %v", err)
+	}
+	if v.SiteID != site.ID {
+		t.Fatalf("回读 SiteID = %d, want %d", v.SiteID, site.ID)
+	}
+	if _, err := d.SetSiteEnabled(t.Context(), site.ID, false, testAdminActor(t, d, "actor-sv-order")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ConsumeResponseSiteChecked(t.Context(), r.ID, site.ID, site.Version, time.Now()); !errors.Is(err, ErrConsumed) {
+		t.Fatalf("已消费 response 在停用后仍应 ErrConsumed，got %v", err)
+	}
+}
+
+// TestSiteDisableInvalidatesTokensAcrossRestart 钉住启停与撤销的提交顺序语义：
+// 撤销先提交 ⇒ 在途启停必须按 ErrRevoked 拒绝且站点状态不变；
+// 启停先提交 ⇒ 结果保留（真实成功）。守卫与业务 UPDATE 在同一事务内裁决。
+func TestSetSiteEnabledRejectsRevokedActor(t *testing.T) {
+	d := newDB(t)
+	site := mustSite(t, d, "enable-guard")
+	actor := testAdminActor(t, d, "actor-enable")
+	if _, err := d.RevokeAdminKey(t.Context(), actor, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.SetSiteEnabled(t.Context(), site.ID, false, actor); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("撤销后启停应 ErrRevoked，got %v", err)
+	}
+	after, err := d.SiteByID(t.Context(), site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.Enabled || after.Version != site.Version {
+		t.Fatalf("被拒启停不得改变站点状态: enabled=%v version=%d", after.Enabled, after.Version)
+	}
+	entries, err := d.ListAudit(t.Context(), 0, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.Success && entry.Actor == actor {
+			t.Fatalf("被拒启停不得写成功审计: %+v", entry)
+		}
+	}
+}
+
 func TestSiteDisableInvalidatesTokensAcrossRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "epocha.db")
 	d, _ := newDBAt(t, path)
@@ -289,7 +390,8 @@ func TestSiteDisableInvalidatesTokensAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 停用：版本提升
-	off, err := d.SetSiteEnabled(t.Context(), site.ID, false)
+	actor := testAdminActor(t, d, "actor-restart")
+	off, err := d.SetSiteEnabled(t.Context(), site.ID, false, actor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +399,7 @@ func TestSiteDisableInvalidatesTokensAcrossRestart(t *testing.T) {
 		t.Fatalf("停用应提升版本: %+v", off)
 	}
 	// 重复停用不再提升版本（幂等：启停是状态动作，不是计数器）
-	again, err := d.SetSiteEnabled(t.Context(), site.ID, false)
+	again, err := d.SetSiteEnabled(t.Context(), site.ID, false, actor)
 	if err != nil || again.Version != off.Version {
 		t.Fatalf("重复停用不应再改版本: %+v err %v", again, err)
 	}
@@ -307,7 +409,7 @@ func TestSiteDisableInvalidatesTokensAcrossRestart(t *testing.T) {
 
 	// 重启 + 重新启用：未消费的 response 不得复活
 	d2, _ := newDBAt(t, path)
-	on, err := d2.SetSiteEnabled(t.Context(), site.ID, true)
+	on, err := d2.SetSiteEnabled(t.Context(), site.ID, true, testAdminActor(t, d2, "actor-restart-2"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,9 +504,10 @@ func TestOriginHostExtraction(t *testing.T) {
 func TestReplaceOriginsAndMatching(t *testing.T) {
 	d := newDB(t)
 	site := mustSite(t, d, "alpha")
-	got, err := d.ReplaceOrigins(t.Context(), site.ID, []string{
+	originsActor := testAdminActor(t, d, "actor-origins")
+	got, err := d.ReplaceOriginsAudited(t.Context(), site.ID, []string{
 		"https://app.example.com:443", "http://localhost:8080", "https://app.example.com",
-	})
+	}, originsActor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,14 +532,14 @@ func TestReplaceOriginsAndMatching(t *testing.T) {
 		}
 	}
 	// 全量替换语义：第二批生效后第一批立刻不可用（安全动作不缓存）
-	if _, err := d.ReplaceOrigins(t.Context(), site.ID, []string{"https://only.example.com"}); err != nil {
+	if _, err := d.ReplaceOriginsAudited(t.Context(), site.ID, []string{"https://only.example.com"}, originsActor); err != nil {
 		t.Fatal(err)
 	}
 	if ok, _ := d.OriginAllowed(t.Context(), site.ID, "https://app.example.com"); ok {
 		t.Fatal("替换后旧来源仍被放行")
 	}
 	// 空列表 = 不接受任何浏览器来源
-	if _, err := d.ReplaceOrigins(t.Context(), site.ID, nil); err != nil {
+	if _, err := d.ReplaceOriginsAudited(t.Context(), site.ID, nil, originsActor); err != nil {
 		t.Fatal(err)
 	}
 	if ok, _ := d.OriginAllowed(t.Context(), site.ID, "https://only.example.com"); ok {
@@ -447,10 +550,10 @@ func TestReplaceOriginsAndMatching(t *testing.T) {
 	for i := 0; i <= MaxOriginsPerSite; i++ {
 		tooMany = append(tooMany, "https://s"+itoaTest(int64(i))+".example.com")
 	}
-	if _, err := d.ReplaceOrigins(t.Context(), site.ID, tooMany); !errors.Is(err, ErrBadConfig) {
+	if _, err := d.ReplaceOriginsAudited(t.Context(), site.ID, tooMany, originsActor); !errors.Is(err, ErrBadConfig) {
 		t.Fatalf("来源条目超限应拒绝，got %v", err)
 	}
-	if _, err := d.ReplaceOrigins(t.Context(), site.ID, []string{"https://ok.example.com", "null"}); !errors.Is(err, ErrBadConfig) {
+	if _, err := d.ReplaceOriginsAudited(t.Context(), site.ID, []string{"https://ok.example.com", "null"}, originsActor); !errors.Is(err, ErrBadConfig) {
 		t.Fatal("一条非法来源应整批拒绝（不接受部分生效的白名单）")
 	}
 	if ok, _ := d.OriginAllowed(t.Context(), site.ID, "https://ok.example.com"); ok {

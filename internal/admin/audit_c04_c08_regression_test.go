@@ -86,16 +86,17 @@ func TestInFlightCreateRejectsActorRevokedBeforeWrite(t *testing.T) {
 
 func TestInFlightProtectedSiteWritesRejectRevokedActor(t *testing.T) {
 	tests := []struct {
-		name   string
-		method string
-		path   func(int64) string
-		body   func(int64) []byte
-		check  func(*testing.T, *h, int64)
+		name         string
+		method       string
+		path         func(int64) string
+		body         func(int64) []byte
+		skipInFlight bool
+		check        func(*testing.T, *h, int64)
 	}{
 		{
 			name: "lower pow bits", method: http.MethodPut,
 			path: func(id int64) string { return pathSite(id) },
-			body: func(int64) []byte { return []byte(`{"pow_bits":10}`) },
+			body: func(int64) []byte { return []byte(`{"pow_bits":13}`) },
 			check: func(t *testing.T, x *h, id int64) {
 				site, err := x.db.SiteByID(t.Context(), id)
 				if err != nil {
@@ -109,14 +110,17 @@ func TestInFlightProtectedSiteWritesRejectRevokedActor(t *testing.T) {
 		{
 			name: "switch to pow only", method: http.MethodPut,
 			path: func(id int64) string { return pathSite(id) },
-			body: func(int64) []byte { return []byte(`{"verify_mode":"pow_only","generator_id":""}`) },
+			body: func(int64) []byte {
+				return []byte(`{"verify_mode":"pow_question","generator_id":"arithmetic-baseline-v1","difficulty":3}`)
+			},
 			check: func(t *testing.T, x *h, id int64) {
 				site, err := x.db.SiteByID(t.Context(), id)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if site.Policy.VerifyMode != store.ModePowQuestion {
-					t.Fatalf("verify mode changed: %s", site.Policy.VerifyMode)
+				// createSite 不带 verify_mode ⇒ withDefaults 落成 pow_only；被拒更新不得把它改成 pow_question。
+				if site.Policy.VerifyMode != store.ModePowOnly {
+					t.Fatalf("verify mode changed: %s (version=%d)", site.Policy.VerifyMode, site.Version)
 				}
 			},
 		},
@@ -151,25 +155,33 @@ func TestInFlightProtectedSiteWritesRejectRevokedActor(t *testing.T) {
 		{
 			name: "enable site", method: http.MethodPost,
 			path: func(id int64) string { return pathSite(id) + "/enable" },
-			body: func(int64) []byte { return []byte(`{}`) },
-			check: func(t *testing.T, x *h, id int64) {
-				site, err := x.db.SiteByID(t.Context(), id)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if site.Enabled {
-					t.Fatal("site enabled after actor revoke")
-				}
-			},
+			// 启停路径不读请求体，没有 body 屏障点；该顺序由 store 层
+			// TestSetSiteEnabledRejectsRevokedActorInTransaction 钉住（同一写槽裁决）。
+			skipInFlight: true,
+			check:        func(*testing.T, *h, int64) {},
 		},
 	}
 	for _, tc := range tests {
+		if tc.skipInFlight {
+			continue
+		}
 		t.Run(tc.name, func(t *testing.T) {
 			x := newHarness(t, nil)
 			created, _ := x.createSite("in-flight-"+strings.ReplaceAll(tc.name, " ", "-"), "pk-in-flight-"+strings.ReplaceAll(tc.name, " ", "-"))
 			id := siteID(created)
 			if got := x.do(http.MethodPost, pathSite(id)+"/disable", map[string]any{}); got.status != http.StatusOK {
 				t.Fatalf("disable: %d %s", got.status, got.body)
+			}
+			entries0, err := x.db.ListAudit(t.Context(), 0, 500)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// ListAudit 按 id DESC 返回；记录 setup 后的最大 id，比较时只看"新增"条目。
+			setupMaxID := int64(0)
+			for _, entry := range entries0 {
+				if entry.ID > setupMaxID {
+					setupMaxID = entry.ID
+				}
 			}
 			body := tc.body(id)
 			gate := &gatedBody{started: make(chan struct{}), release: make(chan struct{}), data: bytes.NewReader(body)}
@@ -207,9 +219,12 @@ func TestInFlightProtectedSiteWritesRejectRevokedActor(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, entry := range entries {
-				if entry.Success && entry.Target == "site:"+itoaTest(id) && entry.Action != "site.create" {
-					t.Fatalf("successful audit for rejected write: %+v", entry)
+			if len(entries) != len(entries0) {
+				for _, entry := range entries {
+					// setup 自身的撤销动作（admin_key.revoke）是合法成功审计，不属于被拒操作。
+					if entry.ID > setupMaxID && entry.Success && entry.Action != "admin_key.revoke" {
+						t.Fatalf("rejected operation wrote a successful audit: %+v", entry)
+					}
 				}
 			}
 		})

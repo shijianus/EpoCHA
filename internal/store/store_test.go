@@ -41,6 +41,16 @@ func mustSite(t *testing.T, d *DB, name string) *Site {
 	return s
 }
 
+// testAdminActor 建一把专用管理 key 并返回 key_id，供需要显式 actor 的业务写调用使用。
+func testAdminActor(t *testing.T, d *DB, label string) string {
+	t.Helper()
+	key, _, err := d.NewAdminKeyWithID(t.Context(), label)
+	if err != nil {
+		t.Fatalf("NewAdminKeyWithID(%s): %v", label, err)
+	}
+	return key.KeyID
+}
+
 // mustSiteSecret 建一个测试站点并返回它；secret 由调用方给定，便于直接拿去验证。
 func mustSiteSecret(t *testing.T, d *DB, name, secret string) *Site {
 	t.Helper()
@@ -207,10 +217,11 @@ func TestUpdateSiteName(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := site.Version
+	actor := testAdminActor(t, d, "actor-update")
 
 	// nil = 不改：省略 Name 的策略更新不能把名字清空或改掉。
 	seven := 7
-	got, err := d.UpdateSite(t.Context(), site.ID, SiteUpdate{PowBits: uint8p(16), RateSiteRPM: &seven})
+	got, err := d.UpdateSite(t.Context(), site.ID, SiteUpdate{PowBits: uint8p(16), RateSiteRPM: &seven}, actor)
 	if err != nil {
 		t.Fatalf("只改策略字段: %v", err)
 	}
@@ -218,7 +229,7 @@ func TestUpdateSiteName(t *testing.T) {
 		t.Errorf("未提供 name 时不应改动显示名，got %q", got.Name)
 	}
 
-	got, err = d.UpdateSite(t.Context(), site.ID, SiteUpdate{Name: strp("alpha-renamed")})
+	got, err = d.UpdateSite(t.Context(), site.ID, SiteUpdate{Name: strp("alpha-renamed")}, actor)
 	if err != nil {
 		t.Fatalf("改名字: %v", err)
 	}
@@ -248,8 +259,9 @@ func TestUpdateSiteName(t *testing.T) {
 	}
 
 	// 与创建路径同一套边界：空白、空串、超长都拒。
+	badActor := testAdminActor(t, d2, "actor-update-2")
 	for _, bad := range []string{"  x  ", "", strings.Repeat("n", MaxNameLen+1), "带\n换行"} {
-		if _, err := d2.UpdateSite(t.Context(), site.ID, SiteUpdate{Name: strp(bad)}); !errors.Is(err, ErrBadConfig) {
+		if _, err := d2.UpdateSite(t.Context(), site.ID, SiteUpdate{Name: strp(bad)}, badActor); !errors.Is(err, ErrBadConfig) {
 			t.Errorf("非法名字 %q 应 ErrBadConfig，got %v", bad, err)
 		}
 	}
@@ -258,7 +270,7 @@ func TestUpdateSiteName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d2.UpdateSite(t.Context(), beta.ID, SiteUpdate{Name: strp("alpha-renamed")}); !errors.Is(err, ErrConflict) {
+	if _, err := d2.UpdateSite(t.Context(), beta.ID, SiteUpdate{Name: strp("alpha-renamed")}, badActor); !errors.Is(err, ErrConflict) {
 		t.Errorf("重复站点名应 ErrConflict，got %v", err)
 	}
 	if again, err := d2.SiteByID(t.Context(), site.ID); err != nil || again.Name != "alpha-renamed" {

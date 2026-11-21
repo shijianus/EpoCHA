@@ -197,7 +197,7 @@ func TestQuestionBucketsUsesEnabledTTL(t *testing.T) {
 			t.Fatal(err)
 		}
 		if !tc.enabled {
-			if _, err := d.SetSiteEnabled(t.Context(), site.ID, false); err != nil {
+			if _, err := d.SetSiteEnabled(t.Context(), site.ID, false, testAdminActor(t, d, "actor-pool-"+tc.name)); err != nil {
 				t.Fatal(err)
 			}
 		}

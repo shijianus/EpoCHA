@@ -21,11 +21,26 @@ import (
 	"github.com/shijianus/EpoCHA/internal/token"
 )
 
+// diagAdminActor 惰性创建一把测试管理 key，供需要显式 actor 的业务写 helper 使用。
+// 结果缓存在 harness 上；key 与具体用例无关（这里不测管理面鉴权）。
+func (h *harness) diagAdminActor() string {
+	h.t.Helper()
+	if h.diagActor != "" {
+		return h.diagActor
+	}
+	key, _, err := h.db.NewAdminKeyWithID(context.Background(), "diag-actor")
+	if err != nil {
+		h.t.Fatalf("NewAdminKeyWithID: %v", err)
+	}
+	h.diagActor = key.KeyID
+	return h.diagActor
+}
+
 // setOrigins 用管理面之外的最短路径设置允许来源：直接走 store（来源策略的 HTTP 侧行为在这里测，
 // 管理 API 自身的鉴权/审计在 internal/admin 测）。
 func (h *harness) setOrigins(siteID int64, origins []string) {
 	h.t.Helper()
-	if _, err := h.db.ReplaceOrigins(context.Background(), siteID, origins); err != nil {
+	if _, err := h.db.ReplaceOriginsAudited(context.Background(), siteID, origins, h.diagAdminActor()); err != nil {
 		h.t.Fatalf("ReplaceOrigins: %v", err)
 	}
 }
@@ -33,7 +48,7 @@ func (h *harness) setOrigins(siteID int64, origins []string) {
 // tuneSitePolicy 改站点策略（模拟管理 API 的配置更新）；nil 字段保持不变。
 func (h *harness) tuneSitePolicy(siteID int64, u store.SiteUpdate) {
 	h.t.Helper()
-	if _, err := h.db.UpdateSite(context.Background(), siteID, u); err != nil {
+	if _, err := h.db.UpdateSite(context.Background(), siteID, u, h.diagAdminActor()); err != nil {
 		h.t.Fatalf("UpdateSite: %v", err)
 	}
 }
@@ -49,14 +64,14 @@ func upAll(b uint8, c, r time.Duration, missing bool) store.SiteUpdate {
 
 func (h *harness) disable(siteID int64) {
 	h.t.Helper()
-	if _, err := h.db.SetSiteEnabled(context.Background(), siteID, false); err != nil {
+	if _, err := h.db.SetSiteEnabled(context.Background(), siteID, false, h.diagAdminActor()); err != nil {
 		h.t.Fatalf("停用站点: %v", err)
 	}
 }
 
 func (h *harness) enable(siteID int64) {
 	h.t.Helper()
-	if _, err := h.db.SetSiteEnabled(context.Background(), siteID, true); err != nil {
+	if _, err := h.db.SetSiteEnabled(context.Background(), siteID, true, h.diagAdminActor()); err != nil {
 		h.t.Fatalf("启用站点: %v", err)
 	}
 }

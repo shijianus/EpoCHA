@@ -175,6 +175,9 @@ func NewSource(trustProxy bool, cidrs []string) (*Source, error) {
 		if err != nil {
 			return nil, fmt.Errorf("risk: 受信代理网段 %q: %w", c, err)
 		}
+		if prefix, _ := network.Mask.Size(); prefix == 0 {
+			return nil, fmt.Errorf("%w: 受信代理网段不能覆盖全网（/0）", ErrBadConfig)
+		}
 		s.nets = append(s.nets, network)
 	}
 	if trustProxy && len(s.nets) == 0 {

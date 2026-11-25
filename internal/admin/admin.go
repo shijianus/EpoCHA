@@ -71,6 +71,11 @@ func New(cfg *config.Config, db *store.DB, log *slog.Logger, observer PoolObserv
 	if cfg == nil || db == nil || gens == nil {
 		return nil, errors.New("admin: 构造参数不完整")
 	}
+	if cfg.ProductionProfile {
+		if err := gens.RequireProduction(); err != nil {
+			return nil, err
+		}
+	}
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}

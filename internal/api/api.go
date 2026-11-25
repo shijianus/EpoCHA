@@ -84,6 +84,11 @@ func New(cfg *config.Config, db *store.DB, signer *token.Signer, gens *generator
 	if cfg == nil || db == nil || signer == nil || gens == nil {
 		return nil, errors.New("api: 构造参数不完整")
 	}
+	if cfg.ProductionProfile {
+		if err := gens.RequireProduction(); err != nil {
+			return nil, err
+		}
+	}
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}

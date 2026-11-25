@@ -738,9 +738,7 @@ func (d *DB) transform(ctx context.Context, adminKey string, now time.Time) erro
 	}
 	// key_mac 必须与 AddAdminKey/MatchAdminKey 同一种编码（hex）：写成原始字节
 	// 会让"恢复装入的新管理凭据"在鉴权时因 hex.DecodeString 失败而永久不可用。
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO admin_keys(key_id, label, key_mac, created_at) VALUES(?,?,?,?)`,
-		keyID, restoreAdminLabel, hex.EncodeToString(d.AdminKeyMac(adminKey)), formatTime(now)); err != nil {
+	if err := d.insertAdminKey(ctx, tx, keyID, restoreAdminLabel, adminKey, now); err != nil {
 		return fmt.Errorf("store: 装入新管理凭据失败")
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -880,9 +878,7 @@ func (d *DB) RecoverAdminKey(ctx context.Context, key string, now time.Time) (*R
 	}
 
 	label := recoverLabelPrefix + "@" + keyID
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO admin_keys(key_id, label, key_mac, created_at) VALUES(?,?,?,?)`,
-		keyID, label, hex.EncodeToString(d.AdminKeyMac(key)), formatTime(now.UTC())); err != nil {
+	if err := d.insertAdminKey(ctx, tx, keyID, label, key, now); err != nil {
 		return attempted(fmt.Errorf("store: 登记恢复用管理凭据: %w", err), false), err
 	}
 	if _, err := tx.ExecContext(ctx,

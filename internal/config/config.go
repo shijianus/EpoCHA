@@ -58,12 +58,13 @@ const (
 	envPoolTTL           = "EPOCHA_POOL_QUESTION_TTL_SEC"
 	envPoolPollMs        = "EPOCHA_POOL_POLL_MS"
 	// 阶段 3B：图片题桶独立的水位/预算/让步节奏 + 题型白名单。
-	envPoolImageLow   = "EPOCHA_POOL_IMAGE_LOW_WATERMARK"
-	envPoolImageHigh  = "EPOCHA_POOL_IMAGE_HIGH_WATERMARK"
-	envPoolImageBytes = "EPOCHA_POOL_IMAGE_MAX_TOTAL_BYTES"
-	envPoolImageYield = "EPOCHA_POOL_IMAGE_YIELD_MS"
-	envGenerators     = "EPOCHA_GENERATORS"
-	envDemoPage       = "EPOCHA_DEMO_PAGE"
+	envPoolImageLow      = "EPOCHA_POOL_IMAGE_LOW_WATERMARK"
+	envPoolImageHigh     = "EPOCHA_POOL_IMAGE_HIGH_WATERMARK"
+	envPoolImageBytes    = "EPOCHA_POOL_IMAGE_MAX_TOTAL_BYTES"
+	envPoolImageYield    = "EPOCHA_POOL_IMAGE_YIELD_MS"
+	envGenerators        = "EPOCHA_GENERATORS"
+	envDemoPage          = "EPOCHA_DEMO_PAGE"
+	envProductionProfile = "EPOCHA_PRODUCTION_PROFILE"
 )
 
 // TTL 上下界。上界不是形式主义：challenge/response 的有效期直接决定防重放账本里
@@ -137,8 +138,9 @@ type Config struct {
 	ChallengeTTL time.Duration
 	ResponseTTL  time.Duration
 
-	TrustProxy     bool
-	TrustedProxies []string
+	TrustProxy        bool
+	TrustedProxies    []string
+	ProductionProfile bool
 
 	RateIPRPM    int
 	RateSiteRPM  int
@@ -269,6 +271,13 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 		c.TrustProxy = true
 	default:
 		return nil, fmt.Errorf("%w: %s 必须是 true/false", ErrInvalid, envTrustProxy)
+	}
+	switch strings.ToLower(getenv(envProductionProfile)) {
+	case "", "false", "0":
+	case "true", "1":
+		c.ProductionProfile = true
+	default:
+		return nil, fmt.Errorf("%w: %s 必须是 true/false", ErrInvalid, envProductionProfile)
 	}
 	switch strings.ToLower(getenv(envDemoPage)) {
 	case "", "false", "0":
@@ -560,12 +569,12 @@ func (c *Config) SafeSummary() string {
 		}
 		return s
 	}
-	return fmt.Sprintf("listen=%s admin_listen=%s db=%s site_imports=%d challenge_ttl=%s response_ttl=%s trust_proxy=%t ip_rpm=%d site_rpm=%d max_active=%d max_active_per_site=%d max_ledger_rows=%d admin_key_present=%t master_key_source=%s pepper_source=%s prev_master_source=%s admin_key_source=%s pool=%t pool_low=%d pool_high=%d pool_max=%d pool_workers=%d pool_ttl=%s pool_poll=%s pool_image_low=%d pool_image_high=%d pool_image_bytes=%d pool_image_yield=%s generators=%s",
+	return fmt.Sprintf("listen=%s admin_listen=%s db=%s site_imports=%d challenge_ttl=%s response_ttl=%s trust_proxy=%t ip_rpm=%d site_rpm=%d max_active=%d max_active_per_site=%d max_ledger_rows=%d admin_key_present=%t master_key_source=%s pepper_source=%s prev_master_source=%s admin_key_source=%s pool=%t pool_low=%d pool_high=%d pool_max=%d pool_workers=%d pool_ttl=%s pool_poll=%s pool_image_low=%d pool_image_high=%d pool_image_bytes=%d pool_image_yield=%s generators=%s production_profile=%t",
 		c.Listen, c.AdminListen, c.DBPath, len(c.Sites), c.ChallengeTTL, c.ResponseTTL, c.TrustProxy,
 		c.RateIPRPM, c.RateSiteRPM, c.MaxActiveChallenges, c.MaxActivePerSite, c.MaxLedgerRows, len(c.AdminKey) > 0,
 		or(c.MasterKeySource), or(c.PepperSource), or(c.PrevMasterSource), or(c.AdminKeySource),
 		c.PoolEnabled, c.PoolLow, c.PoolHigh, c.PoolMaxRows, c.PoolWorkers, c.PoolQuestionTTL, c.PoolPoll,
-		c.PoolImageLow, c.PoolImageHigh, c.PoolImageMaxBytes, c.PoolImageYield, generators)
+		c.PoolImageLow, c.PoolImageHigh, c.PoolImageMaxBytes, c.PoolImageYield, generators, c.ProductionProfile)
 }
 
 func firstNonEmpty(vals ...string) string {

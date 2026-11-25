@@ -41,6 +41,33 @@ type AdminKey struct {
 // adminMacInput 给管理密钥摘要加域分隔：站点 secret 与 admin key 即使明文相同也不会得到相同摘要。
 const adminMacInput = "epocha/v1|admin|"
 
+// Revoked rows remain part of this resource bound; rotation cannot grow the
+// authentication/history table indefinitely (ADR-036).
+const MaxAdminKeyRows = 256
+
+var ErrAdminKeyCapacity = fmt.Errorf("%w: 管理凭据全历史行数上限为 %d", ErrConflict, MaxAdminKeyRows)
+
+func (d *DB) insertAdminKey(ctx context.Context, tx *sql.Tx, id, label, key string, now time.Time) error {
+	res, err := tx.ExecContext(ctx, `
+INSERT INTO admin_keys(key_id, label, key_mac, created_at)
+SELECT ?, ?, ?, ? WHERE (SELECT count(*) FROM admin_keys) < ?`,
+		id, label, hex.EncodeToString(d.AdminKeyMac(key)), formatTime(now.UTC()), MaxAdminKeyRows)
+	if err != nil {
+		if isUniqueErr(err) {
+			return fmt.Errorf("%w: 管理凭据标签或摘要已存在", ErrConflict)
+		}
+		return fmt.Errorf("store: 登记管理凭据: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: 读取管理凭据登记结果: %w", err)
+	}
+	if n != 1 {
+		return ErrAdminKeyCapacity
+	}
+	return nil
+}
+
 // 站点 secret 的摘要算法保持阶段 1 不变（就是 SecretMac，不加域分隔串）：
 // 0002 迁移要把 sites.secret_mac 的值原样搬进 site_secrets，改算法会让升级后的旧密钥全部失效。
 // 管理凭据是新东西，所以它单独用域分隔串（见 AdminKeyMac）。理由见 ADR-010。
@@ -459,13 +486,8 @@ func (d *DB) addAdminKey(ctx context.Context, label, key string, auditActor *str
 			return nil, err
 		}
 	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO admin_keys(key_id, label, key_mac, created_at) VALUES(?,?,?,?)`,
-		keyID, label, hex.EncodeToString(d.AdminKeyMac(key)), formatTime(time.Now().UTC())); err != nil {
-		if isUniqueErr(err) {
-			return nil, fmt.Errorf("%w: 管理凭据标签已存在", ErrConflict)
-		}
-		return nil, fmt.Errorf("store: 登记管理凭据: %w", err)
+	if err := d.insertAdminKey(ctx, tx, keyID, label, key, time.Now().UTC()); err != nil {
+		return nil, err
 	}
 	if auditActor != nil {
 		if err := appendAudit(ctx, tx, *auditActor, "admin_key.add", "admin_key:"+keyID, true); err != nil {
@@ -541,13 +563,16 @@ func scanAdminKey(row *sql.Row, keyID string) (*AdminKey, error) {
 // ListAdminKeys 只返回元数据：标签、时间与撤销时刻。不含摘要、更不含明文。
 func (d *DB) ListAdminKeys(ctx context.Context) ([]*AdminKey, error) {
 	rows, err := d.h.QueryContext(ctx,
-		`SELECT key_id, label, created_at, revoked_at FROM admin_keys ORDER BY created_at, key_id`)
+		`SELECT key_id, label, created_at, revoked_at FROM admin_keys ORDER BY created_at, key_id LIMIT ?`, MaxAdminKeyRows+1)
 	if err != nil {
 		return nil, fmt.Errorf("store: 列管理凭据: %w", err)
 	}
 	defer rows.Close()
 	out := []*AdminKey{}
 	for rows.Next() {
+		if len(out) == MaxAdminKeyRows {
+			return nil, ErrAdminKeyCapacity
+		}
 		var (
 			keyID, label, created string
 			revoked               sql.NullString

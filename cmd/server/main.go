@@ -97,6 +97,10 @@ func serve(ctx context.Context, cfg *config.Config, ln, adminLn net.Listener, st
 		defer func() { _ = adminLn.Close() }()
 	}
 
+	gens, err := configuredGenerators(cfg, token.DerivePurpose(cfg.MasterKey, questionKeyPurpose))
+	if err != nil {
+		return err
+	}
 	// 运行锁必须在 store.Open（含迁移）**之前**取得，并且只能在 db.Close **之后**释放。
 	// defer 是 LIFO，所以这一条必须注册在 db.Close 的 defer 之前——顺序写反了会出现
 	// "锁已释放、库还开着"的窗口，那正好是离线运维能挤进来的缝。
@@ -126,38 +130,6 @@ func serve(ctx context.Context, cfg *config.Config, ln, adminLn net.Listener, st
 	}
 	if err := importSites(ctx, cfg, db, log); err != nil {
 		return err
-	}
-
-	// 题型注册表。登记失败（比如派生密钥太短）必须拒绝启动，
-	// 因为"站点配了 pow_question 却没有可用生成器"会在运行时变成一片 503。
-	gens := generator.NewRegistry()
-	qKey := token.DerivePurpose(cfg.MasterKey, questionKeyPurpose)
-	if len(qKey) < 32 {
-		return errors.New("初始化生成器: 题目 verifier 派生密钥长度不足")
-	}
-	known, err := knownGenerators(qKey)
-	if err != nil {
-		return fmt.Errorf("初始化生成器: %w", err)
-	}
-	for _, g := range known {
-		if !generatorEnabled(cfg.Generators, g.ID()) {
-			log.Info("生成器已按白名单禁用", "generator", g.ID())
-			continue
-		}
-		if err := gens.Register(g); err != nil {
-			return fmt.Errorf("登记生成器: %w", err)
-		}
-	}
-	// 白名单里的名字必须真的能登记：写错一个字符就拒绝启动。
-	// 静默忽略会让运维以为"已经关掉了某个题型"，而实际还开着——这比不关更危险。
-	for _, name := range cfg.Generators {
-		if !isKnownGeneratorID(known, name) {
-			return fmt.Errorf("初始化生成器: EPOCHA_GENERATORS 含未知题型名 %q（可登记：%v）",
-				name, generatorIDs(known))
-		}
-	}
-	if len(gens.IDs()) == 0 {
-		return errors.New("初始化生成器: 白名单里没有任何可用题型，拒绝启动")
 	}
 
 	// 题池 worker：只有存在 pow_question 站点时才会真正生成题目（QuestionBuckets 为空即空转等待）。
@@ -463,103 +435,98 @@ func errKindOf(err error) string {
 // 视觉生成器的构造可能因为内嵌字体缺字形而失败——那必须让服务拒绝启动，
 // 而不是带着一个"题面永远答不对"的题型上线（DESIGN §17 阶段 3B）。
 func knownGenerators(qKey []byte) ([]generator.Generator, error) {
-	arith, err := generator.NewArithmeticBaseline(qKey)
-	if err != nil {
-		return nil, fmt.Errorf("算术基线题型: %w", err)
+	return selectGenerators(generatorFactories(qKey), nil, false, generator.Lifecycle)
+}
+
+type generatorFactory struct {
+	id  string
+	new func() (generator.Generator, error)
+}
+
+func generatorFactories(qKey []byte) []generatorFactory {
+	return []generatorFactory{
+		{generator.ArithID, func() (generator.Generator, error) { return generator.NewArithmeticBaseline(qKey) }},
+		{generator.TextImageID, func() (generator.Generator, error) { return generator.NewTextImage(qKey) }},
+		{generator.TextImageV2ID, func() (generator.Generator, error) { return generator.NewTextImageV2(qKey) }},
+		{generator.TextImageV3ID, func() (generator.Generator, error) { return generator.NewTextImageV3(qKey) }},
+		{generator.ShapeGridID, func() (generator.Generator, error) { return generator.NewShapeGrid(qKey) }},
+		{generator.ShapeCountID, func() (generator.Generator, error) { return generator.NewShapeCount(qKey) }},
+		{generator.ParallaxID, func() (generator.Generator, error) { return generator.NewParallax(qKey) }},
+		{generator.BankShotID, func() (generator.Generator, error) { return generator.NewBankShot(qKey) }},
+		{generator.AccessibleChoiceID, func() (generator.Generator, error) { return generator.NewAccessibleChoice(qKey) }},
+		{generator.EnergyWindowID, func() (generator.Generator, error) { return generator.NewEnergyWindow(qKey) }},
+		{generator.PipeConnectID, func() (generator.Generator, error) { return generator.NewPipeConnect(qKey) }},
+		{generator.IntersectionPointID, func() (generator.Generator, error) { return generator.NewIntersectionPoint(qKey) }},
+		{generator.TileRotationID, func() (generator.Generator, error) { return generator.NewTileRotation(qKey) }},
+		{generator.SymbolPathID, func() (generator.Generator, error) { return generator.NewSymbolPath(qKey) }},
+		{generator.CrowdFindID, func() (generator.Generator, error) { return generator.NewCrowdFind(qKey) }},
+		{generator.VisualRankID, func() (generator.Generator, error) { return generator.NewVisualRank(qKey) }},
+		{generator.ProgressiveTargetID, func() (generator.Generator, error) { return generator.NewProgressiveTarget(qKey) }},
+		{generator.ShellTrackID, func() (generator.Generator, error) { return generator.NewShellTrack(qKey) }},
+		{generator.SilhouetteAssemblyID, func() (generator.Generator, error) { return generator.NewSilhouetteAssembly(qKey) }},
 	}
-	out := []generator.Generator{arith}
-	img, err := generator.NewTextImage(qKey)
-	if err != nil {
-		// 字体不可用是构建/环境问题，不是可以用"那就别开这个题型"绕过的运行时状态
-		return nil, fmt.Errorf("视觉题型: %w", err)
+}
+
+func selectGenerators(factories []generatorFactory, allow []string, production bool, lifecycle func(string) (bool, bool)) ([]generator.Generator, error) {
+	eligible := func(id string) bool {
+		experimental, ready := lifecycle(id)
+		return !experimental && ready
 	}
-	out = append(out, img)
-	imgV2, err := generator.NewTextImageV2(qKey)
-	if err != nil {
-		return nil, fmt.Errorf("视觉题型 v2: %w", err)
+	for _, id := range allow {
+		found := false
+		for _, f := range factories {
+			if f.id == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("初始化生成器: EPOCHA_GENERATORS 含未知题型名 %q", id)
+		}
+		if production && !eligible(id) {
+			return nil, generator.ErrProductionProfile
+		}
 	}
-	out = append(out, imgV2)
-	imgV3, err := generator.NewTextImageV3(qKey)
-	if err != nil {
-		return nil, fmt.Errorf("抽象文字题型 v3: %w", err)
+	var out []generator.Generator
+	for _, f := range factories {
+		if !generatorEnabled(allow, f.id) || (production && !eligible(f.id)) {
+			continue
+		}
+		g, err := f.new()
+		if err != nil {
+			return nil, fmt.Errorf("初始化生成器 %s: %w", f.id, err)
+		}
+		if g == nil || g.ID() != f.id {
+			return nil, errors.New("初始化生成器: 构造器标识不一致")
+		}
+		out = append(out, g)
 	}
-	out = append(out, imgV3)
-	grid, err := generator.NewShapeGrid(qKey)
-	if err != nil {
-		return nil, fmt.Errorf("图形点选题型: %w", err)
+	if len(out) == 0 && production {
+		return nil, generator.ErrProductionProfile
 	}
-	out = append(out, grid)
-	count, err := generator.NewShapeCount(qKey)
-	if err != nil {
-		return nil, fmt.Errorf("图形计数题型: %w", err)
-	}
-	out = append(out, count)
-	parallax, err := generator.NewParallax(qKey)
-	if err != nil {
-		return nil, fmt.Errorf("时序视差题型: %w", err)
-	}
-	out = append(out, parallax)
-	bank, err := generator.NewBankShot(qKey)
-	if err != nil {
-		return nil, fmt.Errorf("物理反弹题型: %w", err)
-	}
-	out = append(out, bank)
-	accessible, err := generator.NewAccessibleChoice(qKey)
-	if err != nil {
-		return nil, fmt.Errorf("无障碍文本题型: %w", err)
-	}
-	out = append(out, accessible)
-	energy, err := generator.NewEnergyWindow(qKey)
-	if err != nil {
-		return nil, fmt.Errorf("瞬态时机题型: %w", err)
-	}
-	out = append(out, energy)
-	pipe, err := generator.NewPipeConnect(qKey)
-	if err != nil {
-		return nil, fmt.Errorf("拓扑连通题型: %w", err)
-	}
-	out = append(out, pipe)
-	intersection, err := generator.NewIntersectionPoint(qKey)
-	if err != nil {
-		return nil, fmt.Errorf("交点外推题型: %w", err)
-	}
-	out = append(out, intersection)
-	tileRot, err := generator.NewTileRotation(qKey)
-	if err != nil {
-		return nil, fmt.Errorf("路径块旋转题型: %w", err)
-	}
-	out = append(out, tileRot)
-	symbolPath, err := generator.NewSymbolPath(qKey)
-	if err != nil {
-		return nil, fmt.Errorf("符号路径题型: %w", err)
-	}
-	out = append(out, symbolPath)
-	crowd, err := generator.NewCrowdFind(qKey)
-	if err != nil {
-		return nil, fmt.Errorf("找相同角色题型: %w", err)
-	}
-	out = append(out, crowd)
-	rank, err := generator.NewVisualRank(qKey)
-	if err != nil {
-		return nil, fmt.Errorf("视觉排序题型: %w", err)
-	}
-	out = append(out, rank)
-	progressive, err := generator.NewProgressiveTarget(qKey)
-	if err != nil {
-		return nil, fmt.Errorf("渐进定位题型: %w", err)
-	}
-	out = append(out, progressive)
-	shell, err := generator.NewShellTrack(qKey)
-	if err != nil {
-		return nil, fmt.Errorf("容器跟踪题型: %w", err)
-	}
-	out = append(out, shell)
-	silhouette, err := generator.NewSilhouetteAssembly(qKey)
-	if err != nil {
-		return nil, fmt.Errorf("轮廓装配题型: %w", err)
-	}
-	out = append(out, silhouette)
 	return out, nil
+}
+
+func configuredGenerators(cfg *config.Config, qKey []byte) (*generator.Registry, error) {
+	known, err := selectGenerators(generatorFactories(qKey), cfg.Generators, cfg.ProductionProfile, generator.Lifecycle)
+	if err != nil {
+		return nil, err
+	}
+	reg := generator.NewRegistry()
+	for _, g := range known {
+		if err := reg.Register(g); err != nil {
+			return nil, err
+		}
+	}
+	if len(reg.IDs()) == 0 {
+		return nil, errors.New("初始化生成器: 没有可用题型")
+	}
+	if cfg.ProductionProfile {
+		if err := reg.RequireProduction(); err != nil {
+			return nil, err
+		}
+	}
+	return reg, nil
 }
 
 // generatorEnabled：空白名单 = 全部启用。

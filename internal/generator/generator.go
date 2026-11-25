@@ -96,8 +96,9 @@ type Generator interface {
 
 // Registry 是按 id 索引的生成器表。
 type Registry struct {
-	mu   sync.RWMutex
-	byID map[string]Generator
+	mu        sync.RWMutex
+	byID      map[string]Generator
+	lifecycle func(string) (bool, bool)
 }
 
 func NewRegistry() *Registry { return &Registry{byID: map[string]Generator{}} }
@@ -109,6 +110,9 @@ func (r *Registry) Register(g Generator) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.lifecycle != nil && !productionEligible(r.lifecycle, g.ID()) {
+		return ErrProductionProfile
+	}
 	if _, dup := r.byID[g.ID()]; dup {
 		return errors.New("generator: 同 id 重复登记 " + g.ID())
 	}
@@ -121,6 +125,9 @@ func (r *Registry) Register(g Generator) error {
 func (r *Registry) Lookup(id string) (Generator, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	if r.lifecycle != nil && !productionEligible(r.lifecycle, id) {
+		return nil, ErrProductionProfile
+	}
 	g, ok := r.byID[id]
 	if !ok {
 		return nil, ErrUnknownGenerator
@@ -134,6 +141,9 @@ func (r *Registry) IDs() []string {
 	defer r.mu.RUnlock()
 	out := make([]string, 0, len(r.byID))
 	for id := range r.byID {
+		if r.lifecycle != nil && !productionEligible(r.lifecycle, id) {
+			continue
+		}
 		out = append(out, id)
 	}
 	sort.Strings(out)

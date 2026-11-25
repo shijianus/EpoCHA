@@ -591,6 +591,10 @@ func (s *Server) handleRevokeSecret(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListAdminKeys(w http.ResponseWriter, r *http.Request) {
 	keys, err := s.db.ListAdminKeys(r.Context())
 	if err != nil {
+		if errors.Is(err, store.ErrAdminKeyCapacity) {
+			failFromErr(w, err)
+			return
+		}
 		s.internal(w, "列管理凭据", err)
 		return
 	}
@@ -820,19 +824,7 @@ func (s *Server) handleGenerators(w http.ResponseWriter, r *http.Request) {
 // 所有题型现在都是 false/true 的**反面**：都不生产可用。写在这里的意义是
 // "未经评测不得改成 true"——评测通过也只证明"测过"，不等同于生产安全认证（ADR-002）。
 func generatorLifecycle(id string) (experimental, productionReady bool) {
-	switch id {
-	case generator.ArithID, generator.TextImageID, generator.TextImageV2ID, generator.TextImageV3ID,
-		generator.ShapeGridID, generator.ShapeCountID, generator.ParallaxID, generator.BankShotID,
-		generator.AccessibleChoiceID, generator.EnergyWindowID, generator.PipeConnectID,
-		generator.IntersectionPointID,
-		generator.TileRotationID, generator.SymbolPathID, generator.CrowdFindID,
-		generator.VisualRankID, generator.ProgressiveTargetID, generator.ShellTrackID,
-		generator.SilhouetteAssemblyID:
-		return true, false
-	default:
-		// 没登记结论的题型：按最保守的一档报，绝不让"忘了写"变成"看起来可用"
-		return true, false
-	}
+	return generator.Lifecycle(id)
 }
 
 func noteForGenerator(id string) string {

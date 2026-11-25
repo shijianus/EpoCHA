@@ -1525,6 +1525,8 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
 
 ## 19. 变更日志
 
+- 2026-11-26 **Phase 1 P0 门禁（ADR-036）**：拒绝 trusted proxy 的 /0；管理凭据全历史 256 行上限与有界列表、离线恢复同约束；生产 profile 只允许非 experimental 且 production_ready 的题型，空集合拒绝启动。当前 19 型生命周期不变；ADR-035 与 synchronous 不变。验收证据按本轮隔离快照记录。
+
 - 2026-11-22 **能力/证据矩阵与 Gate B 备注事实化（ADR-034 §8）**：`docs/reviews/CAPABILITY-EVIDENCE-MATRIX-2026-11-22.md` 成为单一事实表；管理面七型（Gate B 实测集）备注改为"2026-11-12/11-14 实测 FAIL（当前源码未复测，数字不自动继承）"，未实测题型保持 NOT_RUN 表述；ADR-035 决策稿（DRAFT，未批准）提出生产账本 `synchronous=FULL` 目标与掉电/磁盘满/只读/备份验收计划，现状 NORMAL 与 B-03 阻断不变。
 
 - 2026-11-21 **验收可信性、在途写授权与 siteverify 线性化（ADR-034）**：发布 summary 升级 schema 2——工程 verdict 与 `production_approval` 分离，后者默认 `approved:false` 且需候选绑定九项准入，`release_ready` 不再由工程退出码推导；`UpdateSite`/`SetSiteEnabled`/`ReplaceOriginsAudited` 在业务事务内重验管理 actor（撤销先提交 ⇒ 拒绝且无成功审计；启动导入走无守卫无审计变体）；新增 `ConsumeResponseSiteChecked` 把 token 归属 + 站点 enabled/版本裁决与原子消费放进同一事务（线性化点=消费事务；已消费/不存在/过期重放恒为 `ErrConsumed`，不泄露停用状态）；stage5a 资源清理改为按本轮登记 ID（唯一 project 名 + LockFileEx 诊断 overlay 见 ADR-034 §4）。Linux flock/子进程/容器互斥仍以 Linux 实测为准。

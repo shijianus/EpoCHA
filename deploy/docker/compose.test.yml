@@ -1,0 +1,12 @@
+# Explicit isolated engineering override; never use for production admission.
+services:
+  epocha:
+    user: "${EPOCHA_TEST_UID:-1000}:${EPOCHA_TEST_GID:-1000}"
+    labels:
+      io.epocha.drill: "${EPOCHA_DRILL_OWNER:?isolated drill owner required}"
+    environment:
+      EPOCHA_PRODUCTION_PROFILE: "false"
+networks:
+  default:
+    labels:
+      io.epocha.drill: "${EPOCHA_DRILL_OWNER:?isolated drill owner required}"

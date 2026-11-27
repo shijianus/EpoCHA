@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule EpoCHA readiness observation
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+Unit=epocha-healthcheck.service
+
+[Install]
+WantedBy=timers.target

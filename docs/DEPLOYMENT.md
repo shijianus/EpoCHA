@@ -40,7 +40,7 @@ sudo -u epocha -g epocha -- bash deploy/prepare-keys.sh /etc/epocha/keys
 
 `deploy/prepare-keys.sh` 在 Linux 下读取 `/dev/urandom`，不打印内容，不删除文件、不放宽已有权限、不覆盖 master/pepper/admin。目录和文件都必须由当前服务 UID/GID 持有，group/other 位为空。中途失败时保留已创建文件并报错，不能靠重跑偷偷轮换密钥。`admin` 只在数据库尚无任何管理凭据时作引导；已有数据库更换这个文件不会撤销或恢复已有管理密钥。
 
-`deploy/docker/.env`（由 `.env.example` 复制）里把 `EPOCHA_UID=1000`、`EPOCHA_GID=1000` 设成实际服务身份，
+生产 Compose 固定 `user: "1000:1000"`；`deploy/docker/.env`（由 `.env.example` 复制）里的
 `EPOCHA_DATA_DIR`/`EPOCHA_KEY_DIR`/`EPOCHA_BACKUP_DIR` 指向上面三个目录。
 
 **权限与"非 root 容器实际读得到什么"**：镜像的 `USER` 是数字 uid `65534:65534`（scratch 里没有
@@ -93,7 +93,9 @@ make docker-image
 EP=deploy/docker            # 部署根：compose 文件、.env、data/keys/backups 都在这里的相对位置
 COMPOSE="docker compose -f $EP/compose.yml --project-directory $EP --env-file $EP/.env"
 cp -n $EP/.env.example $EP/.env     # -n：已有 .env 不覆盖（按需改端口/目录/uid；这里不写任何密钥）
-make docker-image-local             # B 路径（受支持）：宿主静态编译 + named build context 装配
+# 先由运维把 .env 的 EPOCHA_IMAGE 替换为已批准 registry @sha256: 引用。
+# 当前 19 型仍未 production_ready，生产开关 true 会拒绝启动；本配方不构成上线批准。
+bash deploy/preflight.sh --strict --compose-file "$EP/compose.yml" --env-file "$EP/.env"
 $COMPOSE up -d --wait               # --wait 依镜像里的 /readyz 健康检查判定"可接流量"
 $COMPOSE ps                         # STATUS 应含 (healthy)
 ```
@@ -243,7 +245,7 @@ sudo nginx -t && sudo nginx -s reload
 
 ### 6.2 日志验收覆盖两个入口和全部载体
 
-`node --test --test-reporter=tap docs/scripts/preflight_regression.test.mjs` 只验证模板的字段白名单与
+`node docs/scripts/node-tests.mjs --test-reporter=tap docs/scripts/preflight_regression.test.mjs` 只验证模板的字段白名单与
 80/443 的显式配置，不启动 Nginx。本轮 Windows 的这项静态检查不等于 query 哨兵动态验收；后者 **NOT_RUN**。
 在获授权的隔离 Linux 环境中，还必须：
 
@@ -384,18 +386,20 @@ bash deploy/prepare-keys.sh "$EP/keys"
 # 已有 .env 保持原样。确认已有配置里的 UID/GID 与服务身份一致后才启动。
 if [[ ! -e "$EP/.env" ]]; then
   (set -C
-   sed "s|^EPOCHA_UID=.*|EPOCHA_UID=$(id -u)|;s|^EPOCHA_GID=.*|EPOCHA_GID=$(id -g)|;s|^# EPOCHA_ADMIN_KEY_FILE=.*|EPOCHA_ADMIN_KEY_FILE=/etc/epocha/keys/admin|" \
+   sed "s|^# EPOCHA_ADMIN_KEY_FILE=.*|EPOCHA_ADMIN_KEY_FILE=/etc/epocha/keys/admin|" \
      deploy/docker/.env.example > "$EP/.env")
 fi
-# 正式试部署先遵守 TRIAL-DEPLOYMENT §0 的固定 OID/已验收产物规则。
-make docker-image-local
-COMPOSE=(docker compose -f "$EP/compose.yml" --project-directory "$EP" --env-file "$EP/.env")
+# 以下仅隔离工程演练：显式本地镜像 + 测试 override，生产模式禁用不构成发布配置。
+export EPOCHA_IMAGE="epocha:local-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+export EPOCHA_DRILL_OWNER="epocha-local-$$"
+make docker-image-local DOCKER_IMAGE="$EPOCHA_IMAGE"
+COMPOSE=(docker compose -f "$EP/compose.yml" -f "$EP/compose.test.yml" --project-directory "$EP" --env-file "$EP/.env")
 "${COMPOSE[@]}" up -d --wait
 curl -fsS http://127.0.0.1:8080/readyz     # {"status":"ready"}
 "${COMPOSE[@]}" exec epocha /usr/local/bin/epocha-ops admin GET /api/admin/whoami
 ```
 
-- `EP` 在仓库外时，先把 `deploy/docker/compose.yml` 和 `.env.example` 复制到该部署根；源码构建仍在仓库根进行。
+- `EP` 在仓库外时，先把 `deploy/docker/compose.yml`、`compose.test.yml` 和 `.env.example` 复制到该部署根；源码构建仍在仓库根进行。
 - 多套部署使用不同的 compose 项目名、网络/子网与公共端口；不能让验收连接遗留进程。
 - `EPOCHA_PUBLIC_BIND=127.0.0.1` 保留；管理端口 8081 没有发布项。密钥目录只读挂载，数据目录属主须与服务 UID 一致。
 - 本地重建的镜像须重新验收；`git describe`、构建时间变化都会改变二进制哈希。不要把新构建套进旧清单。
@@ -406,7 +410,7 @@ curl -fsS http://127.0.0.1:8080/readyz     # {"status":"ready"}
 构建机显式安装 Go **1.27.3**、Node **24**、GNU Make、Bash；Linux race 需要 GCC。生产构建仍使用 `CGO_ENABLED=0`。首次依赖准备为 `GOTOOLCHAIN=local go mod download`；冻结后按 `go.sum` 验证，不自动升级版本。没有工具或 Linux 环境时，完整命令必须记录 BLOCKED。
 
 ```bash
-node --test --test-reporter=tap docs/scripts/release-check.test.mjs
+node docs/scripts/node-tests.mjs --test-reporter=tap docs/scripts/release-check.test.mjs
 node docs/scripts/release-check.mjs --profile engineering
 node docs/scripts/release-check.mjs --profile full
 ```
@@ -429,7 +433,7 @@ node docs/scripts/release-check.mjs --profile full
 - [ ] 恢复演练后的站点逐个确认再启用；管理凭据用恢复时新装入的那把。
 - [ ] 反代日志的磁盘占用与轮转确认（`logrotate` 或服务自己的 json-file 上限）。
 - [ ] `make stage5a-check` 在本机退出码 0；若非 0，逐条读 RESULT 行而不是把文件写完当成验收通过。
-- [ ] 在**目标机**上获授权后先跑一次 `bash deploy/preflight.sh --strict --text`（只读）。正式上线要求 strict 退出码为 0；若 strict 返回 3，先处理报告中的架构、UID/GID、Docker、目录、密钥、swap 和端口阻断，再部署：
+- [ ] 在**目标机**上获授权后先跑一次 `bash deploy/preflight.sh --strict --compose-file /srv/epocha/compose.yml --env-file /srv/epocha/.env --text`（只读）。正式上线要求 strict 退出码为 0；若 strict 返回 3，先处理报告中的架构、UID/GID、Docker、目录、密钥、swap 和端口阻断，再部署：
       密钥权限位、数据目录属主与 uid、端口占用、可用内存/swap、docker 组可达性。
       `ss`/其他探测失败必须是 `unknown`，不是 `free`；目录告警应同时出现在字段、warnings 与最终计数。
       退出码 0 只表示报告已生成，不表示端口全空闲或获准部署。开发机的预检结果不算目标机事实。

@@ -11,7 +11,7 @@
 #   - 只读：不安装、不提权、不拉镜像、不构建、不创建目录/用户、不改防火墙/DNS/证书/已有服务。
 #   - 不终止任何进程；端口被占只报告，"要不要停掉它"是人的决定。
 #   - 不读取、不打印任何凭据内容，也不列文件名：对密钥目录只取 stat 的属主与权限位。
-#   - 不输出容器环境变量、不做完整 inspect：只取 daemon 的两个字段与"运行中容器数量"。
+#   - 不输出完整配置或容器环境：容器核对只抽取镜像、身份、生产布尔开关、项目/服务和运行状态。
 #   - 唯一可能的写操作是 --out 指定的那一个报告文件，且已存在就拒绝覆盖。
 #   - 报告本身不是部署授权：Docker 可达、端口空闲、目录可写都不等于运维批准。
 #
@@ -19,7 +19,8 @@
 #   bash preflight.sh
 #   bash preflight.sh --data-dir /data/epocha --ports 80,443,8080 --out /tmp/pf.json
 #   bash preflight.sh --text
-#   bash preflight.sh --strict
+#   bash preflight.sh --strict --compose-file /srv/epocha/compose.yml --env-file /srv/epocha/.env
+#   可选 --require-container NAME_OR_ID：核对已运行容器，失败时 strict 返回 3。
 #   环境变量等价：EPOCHA_PREFLIGHT_{DATA_DIR,KEYS_DIR,BACKUP_DIR,PORTS}
 # 退出码：0=报告已生成；3=--strict 发现正式支持范围阻断；1=生成不了 / --out 已存在；2=用法错误。
 
@@ -33,14 +34,24 @@ OUT=""
 FORMAT=json
 STRICT=false
 STRICT_FAILURES=()
+COMPOSE_FILE=""
+ENV_FILE=""
+REQUIRE_CONTAINER=""
 
 while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --data-dir|--keys-dir|--backup-dir|--ports|--out|--compose-file|--env-file|--require-container)
+      [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || { printf '参数缺少值：%s\n' "$1" >&2; exit 2; } ;;
+  esac
   case "$1" in
     --data-dir)   DATA_DIR="${2:-}"; shift 2 ;;
     --keys-dir)   KEYS_DIR="${2:-}"; shift 2 ;;
     --backup-dir) BACKUP_DIR="${2:-}"; shift 2 ;;
     --ports)      PORTS="${2:-}"; shift 2 ;;
     --out)        OUT="${2:-}"; shift 2 ;;
+    --compose-file) COMPOSE_FILE="$2"; shift 2 ;;
+    --env-file) ENV_FILE="$2"; shift 2 ;;
+    --require-container) REQUIRE_CONTAINER="$2"; shift 2 ;;
     --text)       FORMAT=text; shift ;;
     --json)       FORMAT=json; shift ;;
     --strict|--require-supported) STRICT=true; shift ;;
@@ -206,6 +217,12 @@ f_bool docker_cli_present "$DOCKER_PRESENT"
 f_bool docker_daemon_reachable_by_runner "$DAEMON_OK"
 f_str  docker_version "${DOCKER_VER:-absent}"
 f_str  compose_version "${COMPOSE_VER:-absent}"
+COMPOSE_SUPPORTED=false
+if [[ "$COMPOSE_VER" =~ ^v?([0-9]+)\.[0-9]+\.[0-9]+([+~-].*)?$ ]]; then
+  major="${BASH_REMATCH[1]}"
+  if (( ${#major} < 9 && 10#$major >= 2 )); then COMPOSE_SUPPORTED=true; fi
+fi
+f_bool compose_supported "$COMPOSE_SUPPORTED"
 f_str  daemon_os "$DAEMON_OS"
 f_str  cgroup_driver "$CGROUP"
 f_num  running_containers_count "$CONTAINERS"
@@ -215,6 +232,52 @@ f_num  running_containers_count "$CONTAINERS"
 if [[ "$DAEMON_OK" == true && "$CONTAINERS" =~ ^[0-9]+$ ]] && (( CONTAINERS > 0 )); then
   warn "机器上已有 $CONTAINERS 个运行中的容器（只报数量，不列名字与配置）：端口冲突与磁盘竞争要在部署前对齐。"
 fi
+
+# Only selected non-secret fields leave the Compose/inspect subprocesses. Never print
+# the expanded config, Docker stderr (which can include config values), or all Env.
+DEPLOYMENT_VALID=true
+deployment_fail() {
+  DEPLOYMENT_VALID=false
+  if [[ "$STRICT" == true ]]; then strict_fail "[deployment] $1"; else warn "[deployment] $1"; fi
+}
+if [[ "$STRICT" == true || -n "$COMPOSE_FILE$ENV_FILE$REQUIRE_CONTAINER" ]]; then
+  if [[ ! -f "$COMPOSE_FILE" || ! -r "$COMPOSE_FILE" || ! -f "$ENV_FILE" || ! -r "$ENV_FILE" ]]; then
+    deployment_fail '需要可读的 --compose-file 与 --env-file'
+  elif [[ "$COMPOSE_SUPPORTED" != true ]] || ! have jq; then
+    deployment_fail '需要 Compose major >= 2 与 jq 来解析部署配置'
+  else
+    # env-file is parsed by Compose, never sourced as shell code. Absolute paths fix
+    # resolution even when invoked outside the repository.
+    COMPOSE_FILE="$(cd -- "$(dirname -- "$COMPOSE_FILE")" && pwd)/$(basename -- "$COMPOSE_FILE")"
+    ENV_FILE="$(cd -- "$(dirname -- "$ENV_FILE")" && pwd)/$(basename -- "$ENV_FILE")"
+    deployment_fields='[.name, .services.epocha.image, .services.epocha.user, .services.epocha.environment.EPOCHA_PRODUCTION_PROFILE] | if all(.[]; type == "string") then @tsv else error("missing fields") end'
+    if deployment="$(docker compose --project-directory "$(dirname -- "$COMPOSE_FILE")" -f "$COMPOSE_FILE" --env-file "$ENV_FILE" config --format json 2>/dev/null | jq -er "$deployment_fields" 2>/dev/null)"; then
+      IFS=$'\t' read -r DEPLOY_PROJECT DEPLOY_IMAGE DEPLOY_USER DEPLOY_PRODUCTION <<<"$deployment"
+      [[ "$DEPLOY_IMAGE" =~ ^[^[:space:]@]+@sha256:[a-f0-9]{64}$ ]] || deployment_fail '生产镜像必须是不可变 @sha256: digest'
+      [[ "$DEPLOY_USER" == 1000:1000 ]] || deployment_fail '服务身份必须是 1000:1000'
+      [[ "$DEPLOY_PRODUCTION" == true ]] || deployment_fail '必须显式启用 EPOCHA_PRODUCTION_PROFILE=true'
+      if [[ -n "$REQUIRE_CONTAINER" ]]; then
+        template='{"image":{{json .Config.Image}},"image_id":{{json .Image}},"user":{{json .Config.User}},"running":{{json .State.Running}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"production":"{{range .Config.Env}}{{if ge (len .) 26}}{{if eq (slice . 0 26) "EPOCHA_PRODUCTION_PROFILE="}}{{if eq . "EPOCHA_PRODUCTION_PROFILE=true"}}true{{else}}invalid{{end}}{{end}}{{end}}{{end}}"}'
+        if runtime="$(docker container inspect --format "$template" -- "$REQUIRE_CONTAINER" 2>/dev/null)" &&
+           image_id="$(docker image inspect --format '{{.Id}}' -- "$DEPLOY_IMAGE" 2>/dev/null)" &&
+           [[ -n "$image_id" ]] &&
+           jq -e --arg image "$DEPLOY_IMAGE" --arg image_id "$image_id" --arg project "$DEPLOY_PROJECT" \
+             '.running == true and .image == $image and .image_id == $image_id and .user == "1000:1000" and .production == "true" and .project == $project and .service == "epocha"' <<<"$runtime" >/dev/null 2>&1; then
+          :
+        else
+          deployment_fail '指定运行容器不存在或其镜像/身份/生产开关/项目/服务/运行状态与配置不一致'
+        fi
+      fi
+    else
+      deployment_fail 'Compose 配置无法解析或缺少必要字段'
+    fi
+    unset deployment runtime image_id
+  fi
+else
+  DEPLOYMENT_VALID=false
+  warn '[deployment] 未提供部署文件；普通信息报告不构成配置批准'
+fi
+f_bool deployment_valid "$DEPLOYMENT_VALID"
 
 # ---------- 端口 ----------
 LISTENER_TOOL=none
@@ -287,7 +350,7 @@ if [[ "$STRICT" == true ]]; then
   esac
   [[ "$RUN_UID:$RUN_GID" == "1000:1000" ]] || strict_fail "执行身份 $RUN_UID:$RUN_GID 不符合正式范围 1000:1000"
   [[ "$DOCKER_PRESENT" == true && "$DAEMON_OK" == true ]] || strict_fail "Docker CLI 或 daemon 对当前执行用户不可用"
-  [[ -n "$COMPOSE_VER" ]] || strict_fail "docker compose 子命令不可用"
+  [[ "$COMPOSE_SUPPORTED" == true ]] || strict_fail "Docker Compose 版本必须 major >= 2，空值或 v1 不可用"
   [[ -d "$DATA_DIR" && -w "$DATA_DIR" ]] || strict_fail "数据目录不存在或不可写：$DATA_DIR"
   [[ -d "$KEYS_DIR" && -w "$KEYS_DIR" ]] || strict_fail "密钥目录不存在或不可写：$KEYS_DIR"
   [[ -d "$BACKUP_DIR" && -w "$BACKUP_DIR" ]] || strict_fail "备份目录不存在或不可写：$BACKUP_DIR"

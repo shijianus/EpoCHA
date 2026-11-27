@@ -1527,6 +1527,8 @@ CF Worker/DO 仅在 §12 的重新评估结论为"做"时才实施，届时先�
 
 ## 19. 变更日志
 
+- 2026-11-27：Phase 4 部署/运维与证据规范，见 ADR-038、docs/PHASE4-OPS.md；本轮不执行 Firefox、生产部署或正式 ARM64 原生验收。
+
 - 2026-11-26：Phase 2 题库多样性压测、算术真实题面扩容与 Go 测试隔离，见 ADR-037；生命周期与正式 ARM64 验收边界不变。
 
 - 2026-11-26 **Phase 1 P0 门禁（ADR-036）**：拒绝 trusted proxy 的 /0；管理凭据全历史 256 行上限与有界列表、离线恢复同约束；生产 profile 只允许非 experimental 且 production_ready 的题型，空集合拒绝启动。当前 19 型生命周期不变；ADR-035 与 synchronous 不变。验收证据按本轮隔离快照记录。

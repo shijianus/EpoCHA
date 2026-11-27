@@ -65,6 +65,7 @@ bash preflight.sh --text
 # 正式上线前的硬门槛。Oracle 正式支持范围是 Linux/arm64、UID:GID 1000:1000。
 # strict 发现明确阻断时退出 3，仍然只读，不安装、不提权、不启动服务。
 bash preflight.sh --strict --json \
+  --compose-file /srv/epocha/compose.yml --env-file /srv/epocha/.env \
   --data-dir /var/lib/epocha --keys-dir /etc/epocha/keys --backup-dir /var/backups/epocha \
   --ports 80,443,8080,8081 --out /tmp/epocha-preflight-strict.json
 ```
@@ -76,7 +77,7 @@ bash preflight.sh --strict --json \
 探测失败或不可用时端口为 `unknown` 并告警；只有成功探测的空结果才能报告 `free`。
 目录不可写告警必须同时保留在目录字段、`warnings`、文本列表与最终 warn 计数中。
 
-本地最小回归入口为 `node --test --test-reporter=tap docs/scripts/preflight_regression.test.mjs`：
+本地最小回归入口为 `node docs/scripts/node-tests.mjs --test-reporter=tap docs/scripts/preflight_regression.test.mjs`：
 用 stub 运行真实 Bash 脚本，阻止 Docker/反代命令执行，覆盖探测失败/空闲/占用与目录告警丢失。
 这是工程回归，不是开发机或 VPS 的部署事实，更不会发起远端连接。
 

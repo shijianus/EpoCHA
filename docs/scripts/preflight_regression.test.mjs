@@ -9,6 +9,100 @@ import test from 'node:test';
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const PREFLIGHT = join(ROOT, 'deploy/preflight.sh').replaceAll('\\', '/');
 
+// A fully isolated supported-host fixture: all Docker calls are read-only mocks.
+const DEPLOY_HARNESS = String.raw`
+id() { case "$1" in -u|-g) echo 1000;; -un) echo fixture;; esac; }
+uname() { case "$1" in -m) echo aarch64;; *) echo Linux;; esac; }
+awk() {
+  case "$*" in
+    *MemTotal*|*MemAvailable*) echo 2000000;; *SwapTotal*) echo 524288;;
+    *) builtin command awk "$@";;
+  esac
+}
+cat() { if [[ "$1" == /proc/sys/vm/swappiness ]]; then echo 10; else builtin command cat "$@"; fi; }
+stat() { case "$2" in '%u:%g') echo 1000:1000;; '%u') echo 1000;; '%a') echo 600;; *) builtin command stat "$@";; esac; }
+nginx() { echo fixture; }
+systemctl() { echo active; }
+ss() { return 0; }
+command() { if [[ "$1" == -v && "$2" == caddy ]]; then return 1; fi; builtin command "$@"; }
+docker() {
+  printf '%s\n' "$*" >>"$PF_CALLS"
+  case "$*" in
+    '--version') echo 'Docker version 29.8.2';;
+    'info') return 0;;
+    'info --format '*) echo fixture;;
+    'compose version --short') printf '%s\n' "$PF_VERSION";;
+    'ps -q') echo fixture-id;;
+    'compose '*config*) [[ "$PF_BAD_CONFIG" != 1 ]] || return 9; cat "$PF_CONFIG";;
+    'container inspect '*) [[ "$PF_NO_CONTAINER" != 1 ]] || return 1; cat "$PF_CONTAINER";;
+    'image inspect '*) echo sha256:fixture-image;;
+    *) echo UNEXPECTED_DOCKER_CALL >&2; return 99;;
+  esac
+}
+script="$1"; shift
+source "$script" "$@"
+`;
+
+function deploymentFixture(t, { version = 'v5.6.0', strict = true, image, user, production, container = {}, noContainer = false, missingCompose = false, missingEnv = false, badConfig = false } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'epocha-deployment-preflight-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  for (const name of ['data', 'keys', 'backup']) mkdirSync(join(dir, name));
+  for (const name of ['master', 'pepper']) writeFileSync(join(dir, 'keys', name), 'NOT-A-REAL-KEY', { mode: 0o600 });
+  const digest = `example/epocha@sha256:${'a'.repeat(64)}`;
+  const service = { image: image ?? digest, user: user ?? '1000:1000', environment: { EPOCHA_PRODUCTION_PROFILE: production ?? 'true' } };
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ name: 'fixture', services: { epocha: service } }));
+  writeFileSync(join(dir, 'container.json'), JSON.stringify({ image: digest, image_id: 'sha256:fixture-image', user: '1000:1000', production: 'true', running: true, project: 'fixture', service: 'epocha', ...container }));
+  writeFileSync(join(dir, 'compose.yml'), 'services: {}\n');
+  writeFileSync(join(dir, '.env'), '# fixture\n');
+  const args = [PREFLIGHT, '--json', '--data-dir', join(dir, 'data'), '--keys-dir', join(dir, 'keys'), '--backup-dir', join(dir, 'backup'), '--compose-file', join(dir, missingCompose ? 'missing.yml' : 'compose.yml'), '--env-file', join(dir, missingEnv ? 'missing.env' : '.env'), '--require-container', 'fixture-container'];
+  if (strict) args.push('--strict');
+  const result = spawnSync('bash', ['--noprofile', '--norc', '-c', DEPLOY_HARNESS, 'deployment-preflight', ...args], {
+    cwd: ROOT, encoding: 'utf8', timeout: 15000,
+    env: { ...process.env, BASH_ENV: '', ENV: '', PF_VERSION: version, PF_CONFIG: join(dir, 'config.json'), PF_CONTAINER: join(dir, 'container.json'), PF_CALLS: join(dir, 'calls'), PF_NO_CONTAINER: noContainer ? '1' : '', PF_BAD_CONFIG: badConfig ? '1' : '' },
+  });
+  assert.ifError(result.error);
+  assert.doesNotMatch(result.stderr, /UNEXPECTED_DOCKER_CALL/);
+  assert.doesNotMatch(result.stdout + result.stderr, /NOT-A-REAL-KEY/);
+  assert.ok([0, 3].includes(result.status), result.stderr);
+  return { ...result, report: JSON.parse(result.stdout) };
+}
+
+for (const version of ['v2.0.0', '2.39.1', 'v5.6.0']) test(`strict deployment accepts Compose ${version}`, (t) => {
+  const { status, report } = deploymentFixture(t, { version });
+  assert.equal(status, 0, JSON.stringify(report.strict_failures));
+  assert.equal(report.compose_supported, true);
+  assert.deepEqual(report.strict_failures, []);
+  assert.equal(report.deployment_valid, true);
+});
+for (const version of ['', 'v1.29.2', 'garbage']) test(`strict deployment rejects Compose ${JSON.stringify(version)}`, (t) => {
+  const { status, report } = deploymentFixture(t, { version });
+  assert.equal(status, 3);
+  assert.equal(report.compose_supported, false);
+  assert.ok(report.strict_failures.some((s) => s.includes('Compose')));
+});
+for (const [name, options] of [
+  ['mutable image', { image: 'epocha:latest' }], ['wrong UID', { user: '65534:65534' }],
+  ['missing production', { production: '' }], ['false production', { production: 'false' }],
+  ['missing container', { noContainer: true }], ['container image', { container: { image: 'epocha:old' } }],
+  ['container image ID', { container: { image_id: 'sha256:other' } }],
+  ['container user', { container: { user: '65534:65534' } }], ['container production', { container: { production: 'false' } }],
+  ['container stopped', { container: { running: false } }], ['container project', { container: { project: 'other' } }],
+  ['container service', { container: { service: 'other' } }],
+  ['missing compose', { missingCompose: true }], ['missing env', { missingEnv: true }], ['invalid config', { badConfig: true }],
+]) test(`strict deployment refuses ${name}`, (t) => {
+  const { status, report } = deploymentFixture(t, options);
+  assert.equal(status, 3);
+  assert.equal(report.deployment_valid, false);
+  assert.ok(report.strict_failures.some((s) => s.includes('[deployment]')));
+});
+test('ordinary preflight reports bad deployment without claiming strict approval', (t) => {
+  const { status, report } = deploymentFixture(t, { strict: false, image: 'epocha:latest' });
+  assert.equal(status, 0);
+  assert.equal(report.deployment_valid, false);
+  assert.deepEqual(report.strict_failures, []);
+  assert.ok(report.warnings.some((s) => s.includes('[deployment]')));
+});
+
 // Source the actual script, but never contact Docker, a web server, or a remote host.
 const HARNESS = String.raw`
 unset SQLITE_TMPDIR TMPDIR

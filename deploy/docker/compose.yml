@@ -17,7 +17,7 @@ name: epocha
 
 services:
   epocha:
-    image: ${EPOCHA_IMAGE:-epocha:5a}
+    image: ${EPOCHA_IMAGE:?set an explicit image; production requires repo@sha256:digest}
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
@@ -38,9 +38,10 @@ services:
       - "${EPOCHA_BACKUP_DIR:-./backups}:/var/backups/epocha"
     read_only: true
     # 密钥文件必须是**只读**挂载：可写的"只读配置"意味着任何能进容器身份的东西都能换掉 pepper。
-    user: "${EPOCHA_UID:-65534}:${EPOCHA_GID:-65534}"
+    user: "1000:1000"
 
     environment:
+      EPOCHA_PRODUCTION_PROFILE: "${EPOCHA_PRODUCTION_PROFILE:-true}"
       # 镜像里已写死这两条；重复声明是为了让"监听形状"在这份文件里可读、可审计。
       EPOCHA_LISTEN: "0.0.0.0:8080"
       EPOCHA_ADMIN_LISTEN: "127.0.0.1:8081"

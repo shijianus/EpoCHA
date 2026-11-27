@@ -595,7 +595,11 @@ func revokeAndDisable(t *testing.T, dbPath string) {
 	if _, err := d.RevokeSecret(context.Background(), sites[0].ID, secrets[0].KeyID, time.Now()); err != nil {
 		t.Fatalf("RevokeSecret: %v", err)
 	}
-	if _, err := d.SetSiteEnabled(context.Background(), sites[0].ID, false); err != nil {
+	admins, err := d.ListAdminKeys(context.Background())
+	if err != nil || len(admins) != 1 || !admins[0].RevokedAt.IsZero() {
+		t.Fatalf("expected one live bootstrap actor: err=%v count=%d", err, len(admins))
+	}
+	if _, err := d.SetSiteEnabled(context.Background(), sites[0].ID, false, admins[0].KeyID); err != nil {
 		t.Fatalf("SetSiteEnabled: %v", err)
 	}
 }

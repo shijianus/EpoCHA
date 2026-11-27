@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/shijianus/EpoCHA/internal/generator"
@@ -25,10 +28,7 @@ func discardLog() *slog.Logger {
 
 func newTestServer(t *testing.T, apiSrv, adminSrv *httptest.Server) *server {
 	t.Helper()
-	ln, err := listenLoopback("127.0.0.1:8099")
-	if err != nil {
-		t.Fatal(err)
-	}
+	ln := testLoopbackListener(t, "127.0.0.1")
 	t.Cleanup(func() { _ = ln.Close() })
 	s, err := newServer(context.Background(), &options{
 		APIBase: apiSrv.URL, AdminBase: adminSrv.URL, AdminKey: "ak_test_key_value",
@@ -42,12 +42,11 @@ func newTestServer(t *testing.T, apiSrv, adminSrv *httptest.Server) *server {
 
 // TestListenLoopbackIsCheckNotDefault 非回环地址必须被拒——包括显式传进来的。
 func TestListenLoopbackIsCheckNotDefault(t *testing.T) {
-	// 端口一律用高位：低位端口需要 root，会让"能不能监听"变成权限问题而不是裁决问题。
-	ok := []string{"127.0.0.1:18090", "localhost:18091", "[::1]:18092", "127.5.5.5:18093"}
-	for _, a := range ok {
-		ln, err := listenLoopback(a)
-		if err != nil {
-			t.Fatalf("%s 应可监听: %v", a, err)
+	ok := []string{"127.0.0.1", "localhost", "::1", "127.5.5.5"}
+	for _, host := range ok {
+		ln := testLoopbackListener(t, host)
+		if a, ok := ln.Addr().(*net.TCPAddr); !ok || !a.IP.IsLoopback() || a.Port == 0 {
+			t.Fatalf("%s 实际监听地址不合法: %v", host, ln.Addr())
 		}
 		_ = ln.Close()
 	}
@@ -59,6 +58,36 @@ func TestListenLoopbackIsCheckNotDefault(t *testing.T) {
 			t.Fatalf("%s 应被拒绝：预览不得绑定非回环地址", a)
 		}
 	}
+}
+
+// Production intentionally rejects port 0 for origin allowlisting. Reserve an
+// ephemeral port, then exercise that unchanged check; only a bind race retries.
+func testLoopbackListener(t *testing.T, host string) net.Listener {
+	t.Helper()
+	for range 10 {
+		probe, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, port, err := net.SplitHostPort(probe.Addr().String())
+		if err != nil {
+			_ = probe.Close()
+			t.Fatal(err)
+		}
+		if err := probe.Close(); err != nil {
+			t.Fatal(err)
+		}
+		ln, err := listenLoopback(net.JoinHostPort(host, port))
+		if errors.Is(err, syscall.EADDRINUSE) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ln
+	}
+	t.Fatal("ephemeral loopback port repeatedly taken")
+	return nil
 }
 
 func TestParseFlags(t *testing.T) {

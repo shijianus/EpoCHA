@@ -223,22 +223,23 @@ assert set(d)=={"token","expires_in","pow","mode","question"}, sorted(d)
 assert set(d["pow"])=={"algo","seed","bits"}, sorted(d["pow"])' \
   || fail "签发响应的顶层/pow 键集合与契约不符: $(body)"
 ANSWER="$(python3 -c '
-import sys
-# 与 devclient 同一条语法契约的第三种实现：独立求值，避免"客户端和服务端共享同一个错误"
-s = sys.argv[1].replace("×","*").replace("÷","/")
-def flat(x):
-    a, op, b = x.split()
-    a, b = int(a), int(b)
-    return {"+":lambda:a+b,"-":lambda:a-b,"*":lambda:a*b,"/":lambda:a//b}[op]()
-if s.startswith("("):
-    i = s.index(")")
-    v = flat(s[1:i])
-    rest = s[i+1:].strip()
-    if not rest: print(v); sys.exit()
-    op, num = rest.split()[0], rest.split()[1]
-    print({"+":lambda:v+int(num),"-":lambda:v-int(num),"*":lambda:v*int(num),"/":lambda:v//int(num)}[op]())
-else:
-    print(flat(s))
+import ast, sys
+# 独立于 Go 实现的受限 AST 求值；不执行 eval、不允许调用或非整数。
+s = sys.argv[1].replace("×", "*").replace("÷", "/")
+if len(s) > 256: raise ValueError("expression too long")
+def value(node):
+    if isinstance(node, ast.Constant) and type(node.value) is int and abs(node.value) <= 1000000:
+        return node.value
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        return -value(node.operand)
+    if not isinstance(node, ast.BinOp): raise ValueError("unsupported expression")
+    a, b = value(node.left), value(node.right)
+    if isinstance(node.op, ast.Add): return a + b
+    if isinstance(node.op, ast.Sub): return a - b
+    if isinstance(node.op, ast.Mult): return a * b
+    if isinstance(node.op, ast.Div) and b and a % b == 0: return a // b
+    raise ValueError("unsupported or non-integral operation")
+print(value(ast.parse(s, mode="eval").body))
 ' "$TASK")"
 [[ "$ANSWER" =~ ^-?[0-9]+$ ]] || fail "题面求值失败：task=$TASK"
 # redeem-only：拿到一条**尚未消费**的 response，好让下面这次 siteverify 是第一次验证

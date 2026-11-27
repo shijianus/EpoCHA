@@ -38,14 +38,15 @@ LOAD_PORT="${EPOCHA_5A_LOAD_PORT:-18083}"
 PROJECT="${EPOCHA_5A_PROJECT:-epocha5a-$(date -u +%Y%m%dt%H%M%sz)-$$-${RANDOM}}"
 [[ "$PROJECT" =~ ^[a-z0-9][a-z0-9-]{1,45}$ ]] || exit 2
 IMAGE="${EPOCHA_IMAGE:-epocha:$PROJECT}"
-export EPOCHA_DRILL_OWNER="$PROJECT-$$-${RANDOM}"
+DRILL_OWNER="$PROJECT-$$-${RANDOM}"
+export EPOCHA_DRILL_OWNER="$DRILL_OWNER"
 READONLY_PORT="${EPOCHA_5A_READONLY_PORT:-18082}"
 RESTORE_NAME="${PROJECT}-restore"
 PROXY_NAME="${PROJECT}-proxy"
 READONLY_NAME="${PROJECT}-readonly"
 LOAD_NAME="${PROJECT}-load"
-# 这台宿主没有 root，无法把绑定目录 chown 给 65534，因此演练用调用者 uid 跑容器。
-# 镜像本身的 USER 仍是 65534（交付形状），差异只影响“数据目录属主”这一条，见 docs/DEPLOYMENT.md §2。
+# 隔离演练使用调用者的 UID/GID，与新建绑定目录属主一致。
+# 镜像默认身份另行核验；此覆盖不改变生产 Compose 的 1000:1000 约束。
 RUN_UID="$(id -u)"
 RUN_GID="$(id -g)"
 # 容器内路径常量（与 compose 里的挂载点一致）。
@@ -80,9 +81,8 @@ PROXY_CID=""
 LOAD_CID=""
 LC_CID=""
 PULLED_PROXY_IMAGE_ID=""
-COMPOSE_CONTAINERS=()
-COMPOSE_VOLUMES=()
-COMPOSE_NETWORKS=()
+BUILT_IMAGE_ID=""
+source "$ROOT/docs/scripts/drill-resources.sh"
 
 log()  { printf '[stage5a] %s\n' "$*"; }
 pass()    { STEP=$((STEP+1)); N_PASS=$((N_PASS+1)); printf '[stage5a] PASS %d: %s\n' "$STEP" "$*"; }
@@ -154,66 +154,29 @@ pow-tool   n=150 p50=1ms p95=2ms max=3ms'
   printf '[stage5a] rules selftest PASS（真实默认输出解析：150/150、四段 n=150、无 err/失败类别）\n'
   exit 0
 fi
-cleanup_owned_resources() {
-  local id
-  [[ "$CLEANUP_ARMED" == "1" ]] || return 0
-  if [[ -n "$COMPOSE_STARTED" ]]; then
-    for id in "${COMPOSE_CONTAINERS[@]}"; do [[ -n "$id" ]] && docker rm -f "$id" >/dev/null 2>&1 || true; done
-    for id in "${COMPOSE_VOLUMES[@]}"; do [[ -n "$id" ]] && docker volume rm "$id" >/dev/null 2>&1 || true; done
-    for id in "${COMPOSE_NETWORKS[@]}"; do [[ -n "$id" ]] && docker network rm "$id" >/dev/null 2>&1 || true; done
-  fi
-  [[ -n "$RESTORE_CID" ]] && docker rm -f "$RESTORE_CID" >/dev/null 2>&1 || true
-  [[ -n "$READONLY_CID" ]] && docker rm -f "$READONLY_CID" >/dev/null 2>&1 || true
-  [[ -n "$PROXY_CID" ]] && docker rm -f "$PROXY_CID" >/dev/null 2>&1 || true
-  [[ -n "$LOAD_CID" ]] && docker rm -f "$LOAD_CID" >/dev/null 2>&1 || true
-  [[ -n "$LC_CID" ]] && docker rm "$LC_CID" >/dev/null 2>&1 || true
-  [[ -n "$PULLED_PROXY_IMAGE_ID" ]] && docker image rm "$PULLED_PROXY_IMAGE_ID" >/dev/null 2>&1 || true
-}
-register_compose_resources() {
-  local output rc=0
-  output="$(compose ps -aq --all)" || rc=$?
-  [[ $rc -eq 0 ]] || return "$rc"
-  while IFS= read -r id; do [[ -n "$id" ]] && COMPOSE_CONTAINERS+=("$id"); done <<<"$output"
-  output="$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT")" || return $?
-  while IFS= read -r id; do [[ -n "$id" ]] && COMPOSE_VOLUMES+=("$id"); done <<<"$output"
-  output="$(docker network ls -q --filter "label=com.docker.compose.project=$PROJECT")" || return $?
-  while IFS= read -r id; do [[ -n "$id" ]] && COMPOSE_NETWORKS+=("$id"); done <<<"$output"
-}
+register_compose_resources() { drill_collect "$PROJECT"; }
 if [[ "${1:-}" == "--selftest-resource-ownership" ]]; then
   ownership_case="${EPOCHA_STAGE5A_OWNERSHIP_CASE:-preflight}"
-  tmp="$(mktemp -d "${TMPDIR:-/tmp}/epocha-stage5a-ownership.XXXXXX")"
-  record="$tmp/docker.log"
-  fake="$tmp/docker"
-  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" "$*" >>"$EPOCHA_FAKE_DOCKER_LOG"' >"$fake"
-  chmod 700 "$fake"
-  export PATH="$tmp:$PATH" EPOCHA_FAKE_DOCKER_LOG="$record"
-  case "$ownership_case" in
-    preflight|create-failed|existing-named) CLEANUP_ARMED=0 ;;
-    created)
-      CLEANUP_ARMED=1; COMPOSE_STARTED=1
-      COMPOSE_CONTAINERS=(compose-owned-id); COMPOSE_VOLUMES=(volume-owned-id); COMPOSE_NETWORKS=(network-owned-id)
-      RESTORE_CID=restore-owned-id; READONLY_CID=readonly-owned-id; PROXY_CID=proxy-owned-id; LOAD_CID=load-owned-id
-      LC_CID=created-owned-id; PULLED_PROXY_IMAGE_ID=sha256:newly-pulled-image-id
-      ;;
-    *) rm -rf "$tmp"; exit 64 ;;
-  esac
-  cleanup_owned_resources
-  calls="$(cat "$record" 2>/dev/null || true)"
-  if [[ "$ownership_case" == "created" ]]; then
-    for expected in 'rm -f compose-owned-id' 'volume rm volume-owned-id' 'network rm network-owned-id' 'rm -f restore-owned-id' 'rm -f readonly-owned-id' 'rm -f proxy-owned-id' 'rm -f load-owned-id' 'rm created-owned-id' 'image rm sha256:newly-pulled-image-id'; do
-      grep -Fqx -- "$expected" "$record" || { rm -rf "$tmp"; exit 1; }
-    done
-  elif [[ -n "$calls" ]]; then rm -rf "$tmp"; exit 1; fi
-  printf '[stage5a] ownership selftest PASS: %s\n' "$ownership_case"
-  rm -rf "$tmp"
+  case "$ownership_case" in create-failed|existing-named) ownership_case=preflight ;; esac
+  drill_ownership_selftest "$ownership_case"
+  rm -rf -- "$WORK"
   exit 0
 fi
+cleanup_new_image() {
+  local ref="$1" expected="$2" actual
+  [[ -n "$expected" ]] || return 0
+  actual="$(docker image inspect "$ref" --format '{{.Id}}' 2>/dev/null)" || return 0
+  [[ "$actual" == "$expected" ]] || return 1
+  docker image rm -- "$ref" >/dev/null 2>&1
+}
 
 cleanup() {
   local rc=$?
   trap - EXIT
   set +e
   cleanup_owned_resources
+  cleanup_new_image "$IMAGE" "$BUILT_IMAGE_ID"
+  cleanup_new_image "$PROXY_IMAGE" "$PULLED_PROXY_IMAGE_ID"
   rm -rf "$WORK"
   script_exit "$rc"
 }
@@ -382,11 +345,12 @@ fi
 log "第 2 步：生产镜像构建与交付清单"
 if [[ $DOCKER_OK -eq 1 ]]; then
   rc=0
-  make docker-image-local >"$LOGS/docker-build.log" 2>&1 || rc=$?
+  make docker-image-local DOCKER_IMAGE="$IMAGE" >"$LOGS/docker-build.log" 2>&1 || rc=$?
   if [[ $rc -ne 0 ]]; then
     tail -n 30 "$LOGS/docker-build.log"
     fail "make docker-image-local 退出码 $rc"
   else
+    BUILT_IMAGE_ID="$(docker image inspect "$IMAGE" --format '{{.Id}}')"
     SZ="$(docker image inspect "$IMAGE" --format '{{.Size}}')"
     pass "镜像构建成功（$IMAGE，$((SZ / 1024 / 1024))MB）"
   fi
@@ -398,8 +362,8 @@ if [[ $DOCKER_OK -eq 1 ]]; then
   # `.dockerenv`、`/etc/hosts`、`/dev/*`、`/proc`、`/sys` 是运行时挂进去的，不属于镜像层。
   rc=0
   LC_CID=""
-  LC_CID="$(docker create "$IMAGE" true 2>/dev/null)" || rc=$?
-  if [[ $rc -eq 0 && -n "$LC_CID" ]]; then LC_CID="$(docker inspect -f '{{.Id}}' "$LC_CID")"; fi
+  LC_CID="$(docker create --label "io.epocha.drill=$DRILL_OWNER" "$IMAGE" true 2>/dev/null)" || rc=$?
+  if [[ $rc -eq 0 && -n "$LC_CID" ]]; then LC_CID="$(docker inspect -f '{{.Id}}' "$LC_CID")"; drill_register container "$LC_CID" "$PROJECT" || abort "镜像清单容器归属不符"; fi
   if [[ $rc -ne 0 || -z "$LC_CID" ]]; then
     fail "docker create 失败，无法列出镜像文件系统（rc=$rc）"
   else
@@ -437,7 +401,7 @@ usr/local/bin/epocha-ops'
         fail "镜像文件清单不是预期的两把二进制（server=$HASERVER ops=$HASOPS 其它路径=$NWAYSPUT）"
       fi
     fi
-    docker rm "$LC_CID" >/dev/null 2>&1 || true
+    drill_remove_container "$LC_CID" >/dev/null 2>&1 || true
     rm -f "$WORK/imagefs.tar"
   fi
 
@@ -594,7 +558,7 @@ if [[ $DOCKER_OK -eq 1 ]]; then
   # 拒绝生效、以及“覆盖方式是文档里写的那一种”。
   MASTER_B64_CONTENT="$(cat "$D/keys/master")"
   rc=0
-  docker run --rm --user "$RUN_UID:$RUN_GID" \
+  docker run --rm --label "io.epocha.drill=$DRILL_OWNER" --user "$RUN_UID:$RUN_GID" \
     -v "$D/keys:$C_KEYS:ro" -v "$D/data:/var/lib/epocha" \
     -e "EPOCHA_MASTER_KEY=$MASTER_B64_CONTENT" \
     "$IMAGE" >"$LOGS/bothset.log" 2>&1 || rc=$?
@@ -1118,7 +1082,7 @@ if [[ $DOCKER_OK -eq 1 && -n "$CID" ]]; then
 
   # 用**新的主密钥**启动恢复实例：恢复前签发的 token 一律不可用，且不保留签名回退。
   rc=0
-  RESTORE_CID="$(docker run -d --name "$RESTORE_NAME" \
+  RESTORE_CID="$(docker run -d --label "io.epocha.drill=$DRILL_OWNER" --name "$RESTORE_NAME" \
     --user "$RUN_UID:$RUN_GID" \
     --read-only \
     --cap-drop ALL --security-opt no-new-privileges \
@@ -1131,9 +1095,10 @@ if [[ $DOCKER_OK -eq 1 && -n "$CID" ]]; then
     -e EPOCHA_MASTER_KEY_FILE="$C_KEYS/master" -e EPOCHA_PEPPER_FILE="$C_KEYS/pepper" \
     -e EPOCHA_ADMIN_KEY_FILE="$C_KEYS/admin" \
     -e GOMEMLIMIT=56MiB -e GOMAXPROCS=1 \
-    "$IMAGE" >"$LOGS/restore-run.txt" 2>&1)" || rc=$?
+    "$IMAGE" 2>"$LOGS/restore-run.txt")" || rc=$?
   if [[ $rc -eq 0 && -n "$RESTORE_CID" ]]; then
     RESTORE_CID="$(docker inspect -f '{{.Id}}' "$RESTORE_CID")"
+    drill_register container "$RESTORE_CID" "$PROJECT" || abort "容器归属不符"
     if wait_status "http://127.0.0.1:$RESTORE_PORT/readyz" 200 30; then
       pass "恢复实例可服务探针连通（/readyz 200）——注意“可服务探针”不等于“业务开放”"
     else
@@ -1227,7 +1192,7 @@ if [[ $DOCKER_OK -eq 1 && -n "$CID" ]]; then
   else
     fail "恢复实例容器启动失败（rc=$rc）：$(tail -c 200 "$LOGS/restore-run.txt")"
   fi
-  docker rm -f "$RESTORE_CID" >/dev/null 2>&1 || true
+  drill_remove_container "$RESTORE_CID" >/dev/null 2>&1 || true
   RESTORE_CID=""
 else
   blocked "备份/校验/篡改检测/保守恢复/恢复实例语义：磁盘不足或容器未启动" "释放磁盘后：bash docs/scripts/stage5a.sh"
@@ -1247,20 +1212,21 @@ if [[ $DOCKER_OK -eq 1 && -n "$CID" ]]; then
   cp -a "$D/data" "$D/data-copy"
   chmod a-w "$D/data-copy"
   rc=0
-  READONLY_CID="$(docker run -d --name "$READONLY_NAME" \
+  READONLY_CID="$(docker run -d --label "io.epocha.drill=$DRILL_OWNER" --name "$READONLY_NAME" \
     --user "$RUN_UID:$RUN_GID" --read-only \
     -v "$D/data-copy:$C_DATA:ro" -v "$D/keys:$C_KEYS:ro" \
     -p "127.0.0.1:$READONLY_PORT:8080" \
     -e EPOCHA_DB="$C_DATA/epocha.db" -e EPOCHA_MASTER_KEY_FILE="$C_KEYS/master" -e EPOCHA_PEPPER_FILE="$C_KEYS/pepper" \
-    "$IMAGE" >/dev/null 2>&1)" || rc=$?
+    "$IMAGE" 2>"$LOGS/readonly-run.txt")" || rc=$?
   if [[ $rc -eq 0 && -n "$READONLY_CID" ]]; then
     READONLY_CID="$(docker inspect -f '{{.Id}}' "$READONLY_CID")"
+    drill_register container "$READONLY_CID" "$PROJECT" || abort "容器归属不符"
   fi
   sleep 4
   RO_CODE="$(code "http://127.0.0.1:$READONLY_PORT/readyz" 5)"
   RO_CH="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 8 -X POST -H 'Content-Type: application/json' -d "{\"site_key\":\"$SITE_KEY\"}" "http://127.0.0.1:$READONLY_PORT/api/challenge" 2>/dev/null || echo 000)"
   RO_V="$(curl -sS --max-time 8 -X POST -d "secret=$SECRET2&response=whatever" "http://127.0.0.1:$READONLY_PORT/siteverify" 2>/dev/null || echo "")"
-  docker rm -f "$READONLY_CID" >/dev/null 2>&1 || true
+  drill_remove_container "$READONLY_CID" >/dev/null 2>&1 || true
   chmod -R u+w "$D/data-copy"; rm -rf "$D/data-copy"
   if printf '%s' "$RO_V" | grep -q '"success":true'; then
     fail "数据库只读时居然返回了验证成功（红线 12）"
@@ -1354,7 +1320,7 @@ if [[ $DOCKER_OK -eq 1 && -n "$CID" ]]; then
 {"name":"stage5a-pool","verify_mode":"pow_question","generator_id":"text-image-v1","difficulty":5,"allow_missing_origin":true,"pow_bits":12,"rate_ip_rpm":6000,"rate_site_rpm":60000}
 JSON
   rc=0
-  LOAD_CID="$(docker run -d --name "$LOADCID" \
+  LOAD_CID="$(docker run -d --label "io.epocha.drill=$DRILL_OWNER" --name "$LOADCID" \
     --user "$RUN_UID:$RUN_GID" --read-only \
     --cap-drop ALL --security-opt no-new-privileges \
     --memory 128m --memory-swap 128m --cpus 1 --pids-limit 128 \
@@ -1365,10 +1331,11 @@ JSON
     -e EPOCHA_ADMIN_KEY_FILE="$C_KEYS/admin" \
     -e EPOCHA_RATE_IP_RPM=60000 -e EPOCHA_RATE_SITE_RPM=60000 \
     -e GOMEMLIMIT=56MiB -e GOMAXPROCS=1 \
-    "$IMAGE" >"$LOGS/load-run.txt" 2>&1)" || rc=$?
+    "$IMAGE" 2>"$LOGS/load-run.txt")" || rc=$?
   if [[ $rc -eq 0 && -n "$LOAD_CID" ]]; then
     LOADCID="$LOAD_CID"
     LOAD_CID="$(docker inspect -f '{{.Id}}' "$LOADCID")"
+    drill_register container "$LOAD_CID" "$PROJECT" || abort "容器归属不符"
   fi
   if [[ $rc -ne 0 ]]; then
     fail "容量测量实例起不来（rc=$rc）：$(tail -c 200 "$LOGS/load-run.txt")"
@@ -1445,7 +1412,7 @@ JSON
     log "  题池：ready 合计=$POOL_READY 行合计=$POOL_ROWS 图片字节=$IMG_BYTES（后台补池与请求并发进行）"
     log "  负载期间容器资源：$(cat "$LOGS/stats-during.txt" 2>/dev/null)"
     # 测完收掉测量实例并把库交还给编排服务。
-    docker rm -f "$LOAD_CID" >/dev/null 2>&1 || true
+    drill_remove_container "$LOAD_CID" >/dev/null 2>&1 || true
     compose up -d --wait --wait-timeout 60 >/dev/null 2>&1 || true
     CID="$(container_id)"
     if [[ -z "$CID" ]]; then
@@ -1501,16 +1468,17 @@ if [[ $NGINX_OK -eq 1 ]]; then
     fail "模板里的上游地址形状变了，演练没有按预期改写它"
   fi
   rc=0
-  PROXY_CID="$(docker run -d --name "$PROXY_NAME" \
+  PROXY_CID="$(docker run -d --label "io.epocha.drill=$DRILL_OWNER" --name "$PROXY_NAME" \
     --network "${PROJECT}_default" \
     -v "$WORK/nginx/epocha.conf:/etc/nginx/conf.d/epocha.conf:ro" \
     -v "$WORK/nginx/ssl:/etc/nginx/ssl:ro" \
     -p "127.0.0.1:$PROXY_PORT:443" \
-    "$PROXY_IMAGE" >/dev/null 2>&1)" || rc=$?
+    "$PROXY_IMAGE" 2>"$LOGS/proxy-run.txt")" || rc=$?
   if [[ $rc -ne 0 || -z "$PROXY_CID" ]]; then
     fail "反代容器启动失败（rc=$rc）"
   else
     PROXY_CID="$(docker inspect -f '{{.Id}}' "$PROXY_CID")"
+    drill_register container "$PROXY_CID" "$PROJECT" || abort "容器归属不符"
     sleep 3
     # 先确认反代能进 compose 网络里的服务，再谈路由边界。
     if [[ "$(pcode "https://127.0.0.1:$PROXY_PORT/healthz")" == "200" ]]; then
@@ -1585,7 +1553,7 @@ if [[ $NGINX_OK -eq 1 ]]; then
       fail "拿不到反代访问日志，无法证明日志形状"
     fi
   fi
-  docker rm -f "$PROXY_CID" >/dev/null 2>&1 || true
+  drill_remove_container "$PROXY_CID" >/dev/null 2>&1 || true
   PROXY_CID=""
 fi
 

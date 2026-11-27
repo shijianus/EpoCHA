@@ -244,6 +244,41 @@ func (w *syncWriter) String() string {
 	return w.buf.String()
 }
 
+func TestWhitelistDisabledGeneratorsAreLogged(t *testing.T) {
+	env := testEnv(t)
+	env["EPOCHA_GENERATORS"] = "arithmetic-baseline-v1"
+	cfg, err := config.Load(nil, getenvOf(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	var out bytes.Buffer
+	if err := serve(ctx, cfg, ln, nil, &out); err == nil {
+		t.Fatal("cancelled startup unexpectedly succeeded")
+	}
+	logs := out.String()
+	if got := strings.Count(logs, "生成器已按白名单禁用"); got != 18 {
+		t.Fatalf("disabled generator log count = %d, want 18", got)
+	}
+	for _, f := range generatorFactories(bytes.Repeat([]byte{7}, 32)) {
+		entry := "generator=" + f.id + "\n"
+		if strings.Contains(logs, entry) != (f.id != "arithmetic-baseline-v1") {
+			t.Errorf("incorrect whitelist log for %s", f.id)
+		}
+	}
+	for _, secret := range []string{env["EPOCHA_MASTER_KEY"], env["EPOCHA_PEPPER"]} {
+		if secret != "" && strings.Contains(logs, secret) {
+			t.Error("startup log exposed a credential value")
+		}
+	}
+}
+
 // TestPublicListenerHasNoAdminRoutes 是阶段 2 最重要的一条结构性保证：
 // 管理路由只存在于 admin 监听器上，公共端口上根本没有这条路——
 // 不是"有路由但鉴权失败"，而是"路由不存在"。

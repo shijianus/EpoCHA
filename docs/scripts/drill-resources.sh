@@ -48,9 +48,17 @@ cleanup_owned_resources() {
   done
 }
 
+drill_remove_container() {
+  local id="$1" owner
+  [[ -n "${DRILL_GROUP[container:$id]:-}" ]] || return 1
+  owner="$(drill_label container "$id")" || return 0 # already removed
+  [[ "$owner" == "$DRILL_OWNER" ]] || return 1
+  docker rm -f -- "$id" >/dev/null
+}
+
 drill_ownership_selftest() (
   set -euo pipefail
-  local scenario="$1" dir record cid nid foreign
+  local scenario="$1" dir record cid nid foreign relabeled=0
   dir="$(mktemp -d)"; record="$dir/docker.log"
   trap 'rm -rf -- "$dir"' EXIT
   : >"$record"
@@ -58,6 +66,7 @@ drill_ownership_selftest() (
   cid="$(printf '%064d' 1)"; nid="$(printf '%064d' 2)"; foreign="$(printf '%064d' 3)"
   docker() {
     if [[ "$2" == inspect ]]; then
+      [[ "$relabeled" == 0 ]] || { echo foreign-owner; return; }
       [[ "${*: -1}" != "$foreign" ]] || { echo foreign-owner; return; }
       echo "$DRILL_OWNER"; return
     fi
@@ -72,6 +81,12 @@ drill_ownership_selftest() (
       ;;
     foreign-label)
       if drill_register container "$foreign" fixture; then exit 1; fi
+      ;;
+    relabeled)
+      drill_register container "$cid" fixture
+      drill_register network "$nid" fixture
+      relabeled=1
+      if drill_remove_container "$cid"; then exit 1; fi
       ;;
     *) exit 64 ;;
   esac

@@ -101,3 +101,62 @@ test('admin enable checks true and lifecycle consumers use the actual guarded pa
   assert.match(read('docs/scripts/release-check.mjs'), /docs\/scripts\/browser\/adminui_lifecycle.test.mjs/);
   assert.match(read('Makefile'), /node docs\/scripts\/node-tests.mjs/);
 });
+
+
+test('stage5a uses label-verified captured IDs and rejects foreign ownership', () => {
+  const source = read('docs/scripts/stage5a.sh');
+  assert.match(source, /source .*drill-resources\.sh/);
+  for (const scenario of ['preflight', 'created', 'foreign-label', 'replaced-name', 'relabeled']) {
+    const result = spawnSync('bash', ['docs/scripts/stage5a.sh', '--selftest-resource-ownership'], {
+      env: { ...process.env, EPOCHA_STAGE5A_OWNERSHIP_CASE: scenario }, encoding: 'utf8', timeout: 10000,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, new RegExp(`ownership selftest PASS: ${scenario}`));
+  }
+});
+
+test('stage5a retains every detached docker run ID instead of redirecting it away', () => {
+  const source = read('docs/scripts/stage5a.sh');
+  const runs = [...source.matchAll(/(\w+_CID)="\$\(docker run -d[^]*?\)"/g)];
+  assert.equal(runs.length, 4);
+  for (const [, name] of runs) assert.match(source, new RegExp(`drill_register container "\\$${name}"`));
+  for (const [run] of runs) {
+    assert.match(run, /--label "io\.epocha\.drill=\$DRILL_OWNER"/);
+    assert.doesNotMatch(run, /(?<!2)>"?\$(?:LOGS|WORK)|>\/dev\/null/);
+  }
+  assert.match(source, /make docker-image-local DOCKER_IMAGE="\$IMAGE"/);
+});
+
+
+test('stage3a independent arithmetic evaluator covers nested public grammar and rejects code', () => {
+  const source = read('docs/scripts/stage3a.sh');
+  const python = source.match(/ANSWER="\$\(python3 -c '\n([^]*?)\n' "\$TASK"\)"/)?.[1];
+  assert.ok(python);
+  for (const [task, answer] of [['(8 + 19) + (27 + 4)', '58'], ['(100 - 9) - (19 - 2)', '74'],
+    ['(3 × 4) + (6 × 7)', '54'], ['(48 ÷ 6) + (27 ÷ 9)', '11'], ['3 + 4 × 5', '23']]) {
+    const result = spawnSync('python3', ['-c', python, task], {encoding:'utf8', timeout:5000});
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), answer);
+  }
+  for (const task of ['__import__("os").getcwd()', '1 / 0', '1 / 2', '2 ** 1000000', '3.5 + 2', 'True + 1']) {
+    assert.notEqual(spawnSync('python3', ['-c', python, task], {encoding:'utf8', timeout:5000}).status, 0, task);
+  }
+});
+
+
+test('stage5a image cleanup preserves existing and replaced references', () => {
+  const body = read('docs/scripts/stage5a.sh').match(/cleanup_new_image\(\) \{[^]*?\n\}/)?.[0];
+  assert.ok(body);
+  for (const [expected, actual, removal] of [['', 'old', false], ['sha256:ours', 'sha256:other', false], ['sha256:ours','sha256:ours',true]]) {
+    const script = `${body}\ndocker() { if [[ "$2" == inspect ]]; then printf '%s\\n' "$ACTUAL"; else printf 'REMOVED=%s\\n' "$*"; fi; }\ncleanup_new_image fixture "$EXPECTED"\n`;
+    // Capture the remove command through an exported function that has a
+    // separate audit descriptor; the helper may silence ordinary streams.
+    const audit = spawnSync('bash', ['-c', script.replace("printf 'REMOVED=%s\\n'", "printf 'REMOVED=%s\\n' >&3")], {
+      env: {...process.env,EXPECTED:expected,ACTUAL:actual},encoding:'utf8',timeout:5000,stdio:['ignore','pipe','pipe','pipe'],
+    });
+    assert.ifError(audit.error);
+    assert.equal(String(audit.output[3]).includes('REMOVED=image rm -- fixture'), removal);
+    assert.equal(audit.status, expected && expected !== actual ? 1 : 0);
+  }
+});

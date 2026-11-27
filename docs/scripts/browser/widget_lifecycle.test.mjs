@@ -44,6 +44,10 @@ class Element extends Events {
     this.disabled = false;
     this.text = "";
     this.style = {};
+    Object.defineProperty(this.style, "cssText", {
+      get: () => this.getAttribute("style") || "",
+      set: (value) => this.setAttribute("style", value),
+    });
   }
   setAttribute(name, value) { this.attributes.set(name, String(value)); }
   getAttribute(name) { return this.attributes.get(name) ?? null; }

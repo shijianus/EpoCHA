@@ -123,11 +123,19 @@ async function clickText(needle, tag = "button") {
     `(async()=>{const els=[...document.querySelectorAll(${JSON.stringify(tag)})];
       const el=els.find(e=>(e.textContent||"").trim()===${JSON.stringify(needle)});
       if(!el) return null;
-      el.scrollIntoView({block:'center', inline:'center'});
-      await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+      for(let attempt=0;attempt<30;attempt++){
+        el.scrollIntoView({block:'center', inline:'center',behavior:'instant'});
+        await new Promise(resolve=>setTimeout(resolve,50));
+        const r=el.getBoundingClientRect();
+        if(el.contains(document.elementFromPoint(r.left+r.width/2,r.top+r.height/2))) break;
+      }
       const r=el.getBoundingClientRect();
       const x=Math.round(r.left+r.width/2),y=Math.round(r.top+r.height/2);
-      if(!el.contains(document.elementFromPoint(x,y))) throw new Error('控件中心不能命中：'+${JSON.stringify(needle)});
+      if(!el.contains(document.elementFromPoint(x,y))) {
+        const hit=document.elementFromPoint(x,y);
+        throw new Error('控件中心不能命中：'+${JSON.stringify(needle)}+JSON.stringify({x,y,w:r.width,h:r.height,
+          vw:innerWidth,vh:innerHeight,hit:hit&&hit.tagName,hitId:hit&&hit.id,hitClass:hit&&hit.className}));
+      }
       return [x,y];})()`, true);
   if (!pos) throw new Error(`找不到文案为「${needle}」的 ${tag}`);
   return bidi.pointerClick(ctx, pos[0], pos[1]);
@@ -284,6 +292,15 @@ test(caseTitle("adminui.create-site"), async () => {
     `(()=>{const s=[...document.querySelectorAll(".create-site select")];return s[0].value;})()`);
   assert.equal(modeVal, "pow_question", `验证模式应被改成 pow_question，got ${modeVal}`);
 
+  assert.equal(await bidi.evaluate(ctx, `document.querySelector('.create-site select[name=generator_id]').value`), "",
+    "题型必须保持无隐式默认");
+  await clickText("创建站点");
+  await bidi.waitUntil(ctx, `document.getElementById('new-status').textContent.includes('必须明确选择题型')`);
+  assert.equal((await api("GET", "/api/admin/sites")).data.sites.length, 0, "未选题型不能创建站点");
+  await bidi.evaluate(ctx, `document.querySelector('.create-site select[name=generator_id]').focus()`);
+  await press("Home", "ArrowDown", "ArrowDown", "Enter", "Escape");
+  await bidi.waitUntil(ctx, `document.querySelector('.create-site select[name=generator_id]').value==='arithmetic-baseline-v1'`);
+  await new Promise((resolve) => setTimeout(resolve, 300));
   await clickText("创建站点");
   await bidi.waitUntil(ctx,
     `document.querySelector(".once textarea") && document.querySelector(".once textarea").value.length>10`,
@@ -308,6 +325,7 @@ test(caseTitle("adminui.create-site"), async () => {
   createdSiteKey = row.site_key;
   assert.equal(row.verify_mode, "pow_question");
   assert.ok(row.generator_id, "pow_question 站点必须有题型");
+  assert.equal(row.generator_id, "arithmetic-baseline-v1");
 
   // 复制按钮的真实行为：headless 无剪贴板权限时必须是**可见的回落**，不能假装成功
   await clickText("复制");

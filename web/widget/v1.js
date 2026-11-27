@@ -426,7 +426,10 @@ if (typeof self !== "undefined") {
 
   function el(tag, attrs, text) {
     var node = document.createElement(tag);
-    if (attrs) for (var k in attrs) if (Object.prototype.hasOwnProperty.call(attrs, k)) node.setAttribute(k, attrs[k]);
+    if (attrs) for (var k in attrs) if (Object.prototype.hasOwnProperty.call(attrs, k)) {
+      if (k === "style") node.style.cssText = attrs[k];
+      else node.setAttribute(k, attrs[k]);
+    }
     if (text != null) node.textContent = String(text);
     return node;
   }

@@ -373,6 +373,20 @@ func answerFromStream(g generator.Generator, stream io.Reader, params generator.
 		return generator.PipeConnectAnswerFrom(stream, params.Difficulty)
 	case generator.IntersectionPointID:
 		return generator.IntersectionPointAnswerFrom(stream, params.Difficulty)
+	case generator.TileRotationID:
+		return generator.TileRotationAnswerFrom(stream)
+	case generator.SymbolPathID:
+		return generator.SymbolPathAnswerFrom(stream)
+	case generator.CrowdFindID:
+		return generator.CrowdFindAnswerFrom(stream)
+	case generator.VisualRankID:
+		return generator.VisualRankAnswerFrom(stream)
+	case generator.ProgressiveTargetID:
+		return generator.ProgressiveTargetAnswerFrom(stream)
+	case generator.ShellTrackID:
+		return generator.ShellTrackAnswerFrom(stream)
+	case generator.SilhouetteAssemblyID:
+		return generator.SilhouetteAssemblyAnswerFrom(stream)
 	case generator.ArithID:
 		// 算术题：先按同一条流（同一难度）生成一次拿到题面，再独立求值
 		q, err := g.Generate(context.Background(), params, stream)

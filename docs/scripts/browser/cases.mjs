@@ -41,6 +41,14 @@ const CASES = [
   { id: "adminlife.current-401", title: "admin policy confirmation 401 clears the current session", required: true, file: "adminui_lifecycle.test.mjs" },
 
   // widget_browser.test.mjs
+  { id: "widget.point-keyboard", title: "真实 Firefox：point 点击坐标、方向键与 Home 复位", required: true, file: "widget_browser.test.mjs" },
+  { id: "widget.path-keyboard", title: "真实 Firefox：symbol-path 方向键导航、Backspace 撤销与 pressed", required: true, file: "widget_browser.test.mjs" },
+  { id: "widget.path-drag", title: "真实 Firefox：symbol-path 按下拖动与释放边界", required: true, file: "widget_browser.test.mjs" },
+  { id: "widget.coarse-pointer", title: "真实 Firefox：原生粗指针媒体查询拒绝密集路径题", required: true, file: "widget_browser.test.mjs" },
+  { id: "widget.reduced-motion", title: "真实 Firefox：原生减少动态效果设置拒绝动画题", required: true, file: "widget_browser.test.mjs" },
+  { id: "widget.sri-failure", title: "真实 Firefox：正确 SRI 可加载、错误 SRI 阻断组件且不签发响应", required: true, file: "widget_browser.test.mjs" },
+  { id: "widget.shell-early-submit", title: "真实 Firefox：shell-track 动画中与三轮未完成时禁止提前提交", required: true, file: "widget_browser.test.mjs" },
+  { id: "widget.silhouette-placeholder", title: "真实 Firefox：silhouette 空槽占位与选中放置状态", required: true, file: "widget_browser.test.mjs" },
   { id: "widget.closed-loop", title: "闭环：显示图片 → 输入 → 浏览器内 PoW → redeem → 业务表单 → 服务端写入", required: true, file: "widget_browser.test.mjs" },
   { id: "widget.wrong-answer-terminal", title: "答错即终结：同一题不能重试；换题拿到的是另一道题", required: true, file: "widget_browser.test.mjs" },
   { id: "widget.one-time-response", title: "一次性：同一个 token 重复提交必然被服务端拒绝", required: true, file: "widget_browser.test.mjs" },

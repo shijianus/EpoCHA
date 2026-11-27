@@ -196,3 +196,38 @@ func TestEvalExprTwoPairs(t *testing.T) {
 		}
 	}
 }
+
+// Every advertised Wave 1/2 constructor must support the same seeded-answer path
+// used by real browser fixtures, including all production difficulty buckets.
+func TestWaveQuestionSeedMatchesVerifier(t *testing.T) {
+	for _, id := range []string{generator.TileRotationID, generator.SymbolPathID, generator.CrowdFindID, generator.VisualRankID, generator.ProgressiveTargetID, generator.ShellTrackID, generator.SilhouetteAssemblyID} {
+		t.Run(id, func(t *testing.T) {
+			dir := t.TempDir()
+			key := bytes.Repeat([]byte{0x51}, 32)
+			db, err := store.Open(context.Background(), filepath.Join(dir, "epocha.db"), key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			g, err := buildGenerator(id, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for d := 1; d <= 5; d++ {
+				o := options{DBPath: filepath.Join(dir, "epocha.db"), OutDir: filepath.Join(dir, "assets"), Generator: id, Difficulty: d, TTL: time.Hour, MaxRows: 100, MaxImageB: 4 << 20}
+				rec, err := seedOne(context.Background(), db, g, o, d, time.Now().UTC())
+				if err != nil {
+					t.Fatalf("difficulty %d: %v", d, err)
+				}
+				q := readBack(t, o.DBPath, rec.PoolID)
+				if !g.Verify(generator.PrivateVerifier(q.Verifier), rec.Answer) {
+					t.Fatal("seeded answer rejected")
+				}
+				asset, err := os.ReadFile(filepath.Join(o.OutDir, rec.PNG))
+				if err != nil || !bytes.Equal(asset, q.Asset) || len(asset) == 0 {
+					t.Fatal("seeded asset differs from stored question")
+				}
+			}
+		})
+	}
+}

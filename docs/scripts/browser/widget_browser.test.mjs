@@ -38,6 +38,7 @@ import { BiDi } from "./bidi.mjs";
 import { BROWSER_CASE_TITLES } from "./cases.mjs";
 import { createWidgetCaseFixture } from "./widget_fixture.mjs";
 import { assertImageDimensions } from "./image-dimensions.mjs";
+import { firefoxPreferences, sriFixture } from "./interaction-fixture.mjs";
 
 const caseTitle = (id) => {
   const title = BROWSER_CASE_TITLES[id];
@@ -283,9 +284,17 @@ before(async () => {
 
 let caseFixture;
 beforeEach(async (t) => {
+  const generators = {
+    "widget.point-keyboard": "intersection-point-v1",
+    "widget.path-keyboard": "symbol-path-v1", "widget.path-drag": "symbol-path-v1",
+    "widget.coarse-pointer": "symbol-path-v1", "widget.reduced-motion": "shell-track-v1",
+    "widget.shell-early-submit": "shell-track-v1", "widget.silhouette-placeholder": "silhouette-assembly-v1",
+  };
+  const generator = Object.entries(generators).find(([id]) => caseTitle(id) === t.name)?.[1];
   caseFixture = await createWidgetCaseFixture({
     testName: t.name, parentDir: CASE_PARENT, serverBin: SERVER_BIN,
     devseedBin: DEVSEED_BIN, exampleappBin: EXAMPLEAPP_BIN, signal: t.signal,
+    generator,
   });
   applyFixture(caseFixture);
 });
@@ -1206,4 +1215,176 @@ test(caseTitle("widget.expiry-clears-response"), async () => {
   assert.equal(after.field, "", "过期后隐藏字段必须清空（不能只改 UI）");
   assert.equal(after.expired, 1, "onExpired 应恰好触发一次");
   void id; void c;
+});
+
+
+// Phase 3 additions: every action below is sent through Firefox BiDi. evaluate
+// only reads DOM/layout or focuses a control; it never calls widget handlers.
+const SR = `document.querySelector('${WIDGET_HOST}').shadowRoot`;
+async function nativeKeys(c, ...keys) {
+  const values = { ArrowLeft: "\uE012", ArrowUp: "\uE013", ArrowRight: "\uE014", ArrowDown: "\uE015",
+    Home: "\uE011", Backspace: "\uE003", Enter: "\uE007" };
+  await bidi.send("input.performActions", { context: c, actions: [{ type: "key", id: "interaction-keys",
+    actions: keys.flatMap(key => [{ type: "keyDown", value: values[key] || key }, { type: "keyUp", value: values[key] || key }]) }] });
+}
+const answerValue = c => bidi.evaluate(c, `${SR}.querySelector('.ans').value`);
+const pressedCells = c => bidi.evaluateJSON(c, `[...${SR}.querySelectorAll('[data-cell][aria-pressed=true]')].map(e=>Number(e.dataset.cell))`);
+async function noRedeem(c) {
+  assert.equal(await bidi.evaluate(c, `performance.getEntriesByType('resource').filter(e=>e.name.includes('/api/redeem')).length`), 0);
+  assert.equal((await probeState(c)).tokens[0], "");
+}
+
+test(caseTitle("widget.point-keyboard"), async () => {
+  const c = await openPage(EXAMPLE_URL); await waitFirstState(c, "ready");
+  const r = await bidi.evaluateJSON(c, `(()=>{const e=${SR}.querySelector('.pointlayer');e.scrollIntoView({block:'center'});
+    const r=e.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height};})()`);
+  assert.ok(r.w > 100 && r.h > 50);
+  const x = Math.round(r.x + r.w / 4), y = Math.round(r.y + r.h / 3);
+  await bidi.pointerClick(c, x, y);
+  const actual = (await answerValue(c)).split(',').map(Number);
+  assert.ok(Math.abs(actual[0] - (x-r.x)/r.w*999) <= 2, `x coordinate ${actual[0]}`);
+  assert.ok(Math.abs(actual[1] - (y-r.y)/r.h*999) <= 2, `y coordinate ${actual[1]}`);
+  await bidi.evaluate(c, `${SR}.querySelector('.pointlayer').focus()`);
+  await nativeKeys(c, "Home"); assert.equal(await answerValue(c), "500,500");
+  await nativeKeys(c, "ArrowRight", "ArrowDown"); assert.equal(await answerValue(c), "510,510");
+  await nativeKeys(c, "ArrowLeft", "ArrowUp"); assert.equal(await answerValue(c), "500,500");
+  assert.match(await bidi.evaluate(c, `${SR}.querySelector('.pointlayer').getAttribute('aria-label')`), /500/);
+  await noRedeem(c);
+});
+
+test(caseTitle("widget.path-keyboard"), async () => {
+  const c = await openPage(EXAMPLE_URL); await waitFirstState(c, "ready");
+  await bidi.evaluate(c, `${SR}.querySelector('[data-cell="0"]').focus()`);
+  await nativeKeys(c, "Enter", "ArrowRight", "Enter");
+  assert.deepEqual(await pressedCells(c), [0,1]);
+  await nativeKeys(c, "ArrowDown");
+  assert.equal(await bidi.evaluate(c, `${SR}.activeElement.dataset.cell`), "7");
+  await nativeKeys(c, "ArrowLeft", "ArrowUp");
+  assert.equal(await bidi.evaluate(c, `${SR}.activeElement.dataset.cell`), "0");
+  await nativeKeys(c, "Backspace"); assert.deepEqual(await pressedCells(c), [0]);
+  assert.equal(await bidi.evaluate(c, `${SR}.querySelector('[data-cell="1"]').getAttribute('aria-pressed')`), "false");
+  assert.equal(await answerValue(c), "");
+  await noRedeem(c);
+});
+
+test(caseTitle("widget.path-drag"), async () => {
+  const c = await openPage(EXAMPLE_URL); await waitFirstState(c, "ready");
+  const geometry = await bidi.evaluateJSON(c, `[...${SR}.querySelectorAll('[data-cell]')].slice(0,2).map(e=>({
+    attr:e.getAttribute('style'),left:getComputedStyle(e).left,width:getComputedStyle(e).width,x:e.getBoundingClientRect().x}))`);
+  assert.notEqual(geometry[0].x, geometry[1].x, `adjacent path hit targets overlap: ${JSON.stringify(geometry)}`);
+  const a = await bidi.deepCenter(c, "#widget", '[data-cell="0"]');
+  const b = await bidi.deepCenter(c, "#widget", '[data-cell="1"]');
+  await bidi.send("input.performActions", { context:c, actions:[{type:"pointer",id:"path-drag",parameters:{pointerType:"mouse"},actions:[
+    {type:"pointerMove",x:a[0],y:a[1]}, {type:"pointerDown",button:0},
+    {type:"pointerMove",x:b[0],y:b[1],duration:200}, {type:"pointerUp",button:0}]}] });
+  assert.deepEqual(await pressedCells(c), [0,1]);
+  const d = await bidi.deepCenter(c, "#widget", '[data-cell="2"]');
+  await bidi.send("input.performActions", {context:c,actions:[{type:"pointer",id:"path-drag",parameters:{pointerType:"mouse"},actions:[
+    {type:"pointerMove",x:d[0],y:d[1],duration:100}]}]});
+  assert.deepEqual(await pressedCells(c), [0,1], "hover after release must not extend the path");
+  await bidi.send("input.releaseActions", {context:c});
+  await noRedeem(c);
+});
+
+async function mediaCase(preferences, query, expectedError) {
+  const profile = await firefoxPreferences(CASE_PARENT, preferences);
+  const b = profile.bidi;
+  try {
+    const c = await b.newTab();
+    assert.equal(await b.evaluate(c, `matchMedia(${JSON.stringify(query)}).matches`), true, "Firefox native media preference must really apply");
+    await b.goto(c, EXAMPLE_URL);
+    await b.waitUntil(c, `window.EpoCHA && EpoCHA.ids().length===1 && EpoCHA.state(EpoCHA.ids()[0])==='error'`);
+    assert.match(await b.shadowText(c, "#widget", "[role=status]"), /给不出题目|unavailable/i,
+      "real backend must filter the only incompatible generator");
+    // Fault injection only at the transport boundary: obtain a real backend
+    // question without device hints, then prove the renderer independently
+    // refuses it under the unchanged native Firefox media preference.
+    const preload = await b.send("script.addPreloadScript", { contexts:[c], functionDeclaration:`()=>{
+      const original=window.fetch; window.__deviceHint=null;
+      window.fetch=function(url,opts){
+        if(String(url).includes('/api/challenge')&&opts&&opts.body){
+          const body=JSON.parse(opts.body);window.__deviceHint=body.device;delete body.device;
+          opts=Object.assign({},opts,{body:JSON.stringify(body)});
+        }
+        return original.call(this,url,opts);
+      };
+    }` });
+    await b.goto(c, EXAMPLE_URL);
+    await b.waitUntil(c, `window.EpoCHA && EpoCHA.ids().length===1 && EpoCHA.state(EpoCHA.ids()[0])==='error'`);
+    assert.equal(await b.evaluate(c, `matchMedia(${JSON.stringify(query)}).matches`), true);
+    const hint=await b.evaluateJSON(c, `window.__deviceHint`);
+    if(query.includes('pointer')) assert.equal(hint.pointer, 'coarse');
+    else assert.equal(hint.reduced_motion, true);
+    await b.send("script.removePreloadScript", {script:preload.script});
+    const status = await b.shadowText(c, "#widget", "[role=status]");
+    assert.match(status, expectedError);
+    assert.equal(await b.evaluate(c, `EpoCHA.getResponse(EpoCHA.ids()[0])`), "");
+    assert.equal(await b.evaluate(c, `performance.getEntriesByType('resource').filter(e=>e.name.includes('/api/redeem')).length`), 0);
+    console.log(`[实测] Firefox native ${query}=true; fail-closed, no redeem`);
+  } finally { await profile.close(); }
+}
+
+test(caseTitle("widget.coarse-pointer"), async () => {
+  await mediaCase({"ui.primaryPointerCapabilities":1,"ui.allPointerCapabilities":1}, "(pointer: coarse)", /触|touch|精细|鼠标|密集/i);
+});
+test(caseTitle("widget.reduced-motion"), async () => {
+  await mediaCase({"ui.prefersReducedMotion":1}, "(prefers-reduced-motion: reduce)", /动态|动画|motion/i);
+});
+
+test(caseTitle("widget.sri-failure"), async () => {
+  const fixture = await sriFixture();
+  try {
+    const valid = await bidi.newTab(); openTabs.push(valid);
+    await bidi.goto(valid, fixture.url + "/valid");
+    assert.equal(await bidi.evaluate(valid, `typeof window.EpoCHA.render`), "function", "same bytes with correct SRI must load");
+    await bidi.waitUntil(valid, `EpoCHA.ids().length===1 && EpoCHA.state(EpoCHA.ids()[0])==='error'`);
+    assert.ok(fixture.apiRequests > 0, "valid SRI must actually execute and request a challenge");
+    const before = fixture.apiRequests;
+    const invalid = await bidi.newTab(); openTabs.push(invalid);
+    await bidi.goto(invalid, fixture.url + "/invalid");
+    await bidi.waitUntil(invalid, `document.querySelector('#status').textContent==='integrity-failed'`);
+    assert.equal(await bidi.evaluate(invalid, `typeof window.EpoCHA`), "undefined");
+    assert.equal(await bidi.evaluate(invalid, `document.querySelector('button').disabled`), true);
+    assert.equal(await bidi.evaluate(invalid, `document.querySelector('[name=epocha-response]').value`), "");
+    assert.equal(fixture.apiRequests, before, "invalid SRI must not execute or request a challenge");
+  } finally { await fixture.close(); }
+});
+
+test(caseTitle("widget.shell-early-submit"), async () => {
+  const c = await openPage(EXAMPLE_URL); await waitFirstState(c, "ready");
+  assert.equal(await bidi.evaluate(c, `${SR}.querySelectorAll('.shellbox').length`), 4);
+  assert.equal(await bidi.evaluate(c, `[...${SR}.querySelectorAll('.shellbox')].every(e=>e.disabled)`), true);
+  await bidi.clickDeep(c, "#widget", '.shellbox');
+  await clickWidgetButton(c, "submit");
+  assert.equal(await answerValue(c), ""); await noRedeem(c);
+  await bidi.waitUntil(c, `${SR}.querySelector('.shellbox').disabled===false`);
+  await bidi.clickDeep(c, "#widget", '.shellbox');
+  assert.equal(await answerValue(c), "", "one completed round is not a complete answer");
+  await clickWidgetButton(c, "submit"); await noRedeem(c);
+  await bidi.waitUntil(c, `${SR}.querySelector('.shellbox').disabled===false`);
+  await bidi.clickDeep(c, "#widget", '.shellbox');
+  assert.equal(await answerValue(c), "", "two completed rounds are not a complete answer");
+  await bidi.waitUntil(c, `${SR}.querySelector('.shellbox').disabled===false`);
+  await bidi.clickDeep(c, "#widget", '.shellbox');
+  assert.match(await answerValue(c), /^v1:[0-3]\.[0-3]\.[0-3]$/);
+  assert.equal(await bidi.evaluate(c, `${SR}.querySelectorAll('.shellbox[aria-pressed=true]').length`), 1);
+  await noRedeem(c);
+});
+
+test(caseTitle("widget.silhouette-placeholder"), async () => {
+  const c = await openPage(EXAMPLE_URL); await waitFirstState(c, "ready");
+  const slots = () => bidi.evaluateJSON(c, `[...${SR}.querySelectorAll('[data-slot]')].map(e=>({
+    visible:getComputedStyle(e.firstChild).display!=='none', bg:getComputedStyle(e.firstChild).backgroundImage,
+    width:e.getBoundingClientRect().width, height:e.getBoundingClientRect().height}))`);
+  const initial = await slots();
+  assert.equal(initial.length, 5);
+  assert.ok(initial.every(s => !s.visible && s.width > 0 && s.height > 0), "empty slots must expose the underlying silhouette, not an unrelated sprite");
+  assert.equal(await bidi.evaluate(c, `${SR}.querySelectorAll('[data-piece]').length`), 5);
+  await bidi.clickDeep(c, "#widget", '[data-piece]');
+  assert.equal(await bidi.evaluate(c, `${SR}.querySelectorAll('[data-piece][aria-pressed=true]').length`), 1);
+  await bidi.clickDeep(c, "#widget", '[data-slot="0"]');
+  const placed = await slots();
+  assert.equal(placed[0].visible, true); assert.match(placed[0].bg, /^url\(/);
+  assert.ok(placed.slice(1).every(s => !s.visible));
+  assert.equal(await answerValue(c), ""); await noRedeem(c);
 });

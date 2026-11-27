@@ -181,7 +181,7 @@ async function readyChild(child, check, label, signal) {
   }, { timeoutMs: 20000, intervalMs: 50, signal, label });
 }
 
-async function createSite(admin, adminKey, { name, origin, powBits = 12, responseTTL = 900 }) {
+async function createSite(admin, adminKey, { name, origin, powBits = 12, responseTTL = 900, generator = "text-image-v1" }) {
   const siteKey = randomKey("pk_case");
   const response = await fetch(`${admin}/api/admin/sites`, {
     signal: AbortSignal.timeout(5000),
@@ -189,7 +189,7 @@ async function createSite(admin, adminKey, { name, origin, powBits = 12, respons
     headers: { Authorization: `Bearer ${adminKey}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       name, site_key: siteKey, pow_bits: powBits, verify_mode: "pow_question",
-      generator_id: "text-image-v1", difficulty: 1, response_ttl_sec: responseTTL,
+      generator_id: generator, difficulty: 1, response_ttl_sec: responseTTL,
       origins: [origin], allow_missing_origin: false,
     }),
   });
@@ -221,7 +221,7 @@ async function startApp(scope, { binary, api, site, csp, widgetOrigin, parent, e
   return `${base}/`;
 }
 
-export async function createWidgetCaseFixture({ testName, parentDir, serverBin, devseedBin, exampleappBin, signal } = {}) {
+export async function createWidgetCaseFixture({ testName, parentDir, serverBin, devseedBin, exampleappBin, signal, generator = "text-image-v1" } = {}) {
   for (const [name, value] of Object.entries({ testName, parentDir, serverBin, devseedBin, exampleappBin })) {
     if (typeof value !== "string" || value.length === 0) throw new Error(`missing widget case fixture option: ${name}`);
   }
@@ -257,7 +257,7 @@ export async function createWidgetCaseFixture({ testName, parentDir, serverBin, 
     }, "epocha health endpoint", signal);
 
     const mainPort = await freeLoopbackPort();
-    const mainSite = await createSite(admin, adminKey, { name: "widget case main", origin: `http://127.0.0.1:${mainPort}` });
+    const mainSite = await createSite(admin, adminKey, { name: "widget case main", origin: `http://127.0.0.1:${mainPort}`, generator });
     const mainURL = await startApp(scope, {
       binary: exampleappBin, api, site: mainSite, csp: "blob", widgetOrigin: "api", parent: workspace, env: serverEnv, signal, port: mainPort,
     });
@@ -270,7 +270,7 @@ export async function createWidgetCaseFixture({ testName, parentDir, serverBin, 
       const tierDir = join(workspace, `tier-${difficulty}`);
       const seeder = command(scope, devseedBin, [
         "--db", join(workspace, "epocha.db"), "--out-dir", tierDir,
-        "--generator", "text-image-v1", "--difficulty", String(difficulty), "--count", "12",
+        "--generator", generator, "--difficulty", String(difficulty), "--count", "12",
       ], serverEnv);
       const completed = await waitExit(seeder, 20000);
       if (!completed || seeder.exitCode !== 0) throw new Error(`devseed failed (${seeder.exitCode ?? "timeout"})`);

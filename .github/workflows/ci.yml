@@ -83,10 +83,10 @@ jobs:
           node-version: '24'
       - name: Repository engineering rules and checkout attributes
         shell: bash
-        run: node --test --test-reporter=tap docs/scripts/release-check.test.mjs
+        run: node docs/scripts/node-tests.mjs --test-reporter=tap docs/scripts/release-check.test.mjs
       - name: Unmodified widget vector and lifecycle tests
         shell: bash
-        run: node --test --test-reporter=tap docs/scripts/browser/pow_vectors.test.mjs docs/scripts/browser/widget_lifecycle.test.mjs docs/scripts/browser/adminui_lifecycle.test.mjs
+        run: node docs/scripts/node-tests.mjs --test-reporter=tap docs/scripts/browser/pow_vectors.test.mjs docs/scripts/browser/widget_lifecycle.test.mjs docs/scripts/browser/adminui_lifecycle.test.mjs
 
   # This label is a required, still-unprovisioned environment, not evidence that a runner exists.
   # Manual dispatch only; never execute untrusted PR code on a persistent self-hosted machine.

@@ -53,7 +53,7 @@ test('Makefile uses fail-closed formatting, byte-exact size and lifecycle regres
   assert.match(text, /node docs\/scripts\/release-check\.mjs --binary-size/);
   assert.doesNotMatch(text, /gofmt -l \. \| grep/);
   assert.doesNotMatch(text, /mb=\$\$\(\( size \/ 1024 \/ 1024 \)\)/);
-  assert.match(text, /node --test[^\n]*docs\/scripts\/browser\/widget_lifecycle\.test\.mjs/);
+  assert.match(text, /node docs\/scripts\/node-tests\.mjs[^\n]*docs\/scripts\/browser\/widget_lifecycle\.test\.mjs/);
 });
 
 test('CI pins the authorized Go release, Node 24 and does not swallow incomplete gates', () => {

@@ -48,4 +48,3 @@ if (process.argv[1] && process.argv[1].endsWith('stage4b-isolation.mjs')) {
   if (result.stderr) process.stderr.write(result.stderr);
   process.exitCode = result.status === 'PASS' ? 0 : 1;
 }
-

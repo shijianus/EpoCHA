@@ -19,6 +19,16 @@
 # 退出码：0 = 全部工程项 PASS；1 = 有 FAIL（含浏览器必需验收没能真实执行的情况）。
 set -euo pipefail
 
+script_exit() {
+  local rc="${1:-$?}"
+  trap - EXIT INT TERM
+  printf '[stage4a] SCRIPT_RC=%s\n' "$rc"
+  exit "$rc"
+}
+trap script_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 export GOTOOLCHAIN=local
@@ -87,7 +97,7 @@ cleanup() {
     [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true
   done
   rm -rf "$WORK"
-  exit $rc
+  script_exit "$rc"
 }
 trap cleanup EXIT
 
@@ -350,7 +360,7 @@ else
     HARD_SITE_KEY="$HARD_KEY" SLOW_SITE_KEY="$SLOW_KEY" \
     EXAMPLE_WORKERFILE_URL="http://127.0.0.1:8393/" EXAMPLE_HARD_URL="http://127.0.0.1:8394/" \
     EXAMPLE_TTL_URL="http://127.0.0.1:8396/" TTL_SITE_KEY="pk_stage4a_ttl" \
-      node --test --test-reporter=tap docs/scripts/browser/widget_browser.test.mjs 2>&1 | tee "$WORK/browser.log"
+      node docs/scripts/node-tests.mjs --test-reporter=tap docs/scripts/browser/widget_browser.test.mjs 2>&1 | tee "$WORK/browser.log"
     browser_rc=${PIPESTATUS[0]}
     set -e
     [[ $browser_rc -eq 0 ]] || { tail -n 40 "$WORK/browser.log"; fail "浏览器交互验收未通过（node --test 退出码 $browser_rc）"; }
@@ -378,7 +388,7 @@ print(c.execute("select count(*) from pool where status=\"ready\"").fetchone()[0
 fi
 
 log "第十二步：跨实现一致性（JS SHA-256/PoW 对同一份固定向量）"
-node --test --test-reporter=tap docs/scripts/browser/pow_vectors.test.mjs >"$WORK/vectors.log" 2>&1 || {
+node docs/scripts/node-tests.mjs --test-reporter=tap docs/scripts/browser/pow_vectors.test.mjs >"$WORK/vectors.log" 2>&1 || {
   tail -n 40 "$WORK/vectors.log"; fail "JS 与 Go 的 PoW 结果不一致（见上）"; }
 GORUN_RC=0
 go test -count=1 -run TestSharedVectors ./internal/pow/ >/dev/null 2>&1 || GORUN_RC=$?

@@ -6,6 +6,10 @@ import { join, resolve, basename, relative, isAbsolute } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { gzipSync } from 'node:zlib';
+import { createCommandRecorder } from './command-evidence.mjs';
+import { assertTestFiles } from './node-tests.mjs';
+let activeRecorder = null;
+let activeCheck = null;
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 export const GO_VERSION = 'go1.27.3';
@@ -251,7 +255,7 @@ export function assertDisposableDocker(inventory) {
 
 function importedBrowserCases(manifestPath) {
   const script = `import { BROWSER_CASES } from ${JSON.stringify(pathToFileURL(resolve(manifestPath)).href)}; process.stdout.write(JSON.stringify(BROWSER_CASES));`;
-  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { cwd: ROOT, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  const result = command(process.execPath, ['--input-type=module', '-e', script], { cwd: ROOT, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
   if (result.error || result.status !== 0) throw new Error(`browser manifest import failed: ${result.stderr || result.error?.message || result.status}`);
   let cases;
   try { cases = JSON.parse(result.stdout); } catch { throw new Error('browser manifest import returned invalid JSON'); }
@@ -316,7 +320,9 @@ function filesBelow(relative) {
 }
 
 function command(cmd, args, options = {}) {
-  return spawnSync(cmd, args, { cwd: ROOT, env: cleanEnvironment(process.env), encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 30 * 60 * 1000, ...options });
+  if (args.includes('--test')) assertTestFiles(args, options.cwd ?? ROOT);
+  const settings = { cwd: ROOT, env: cleanEnvironment(process.env), encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 30 * 60 * 1000, ...options };
+  return activeRecorder ? activeRecorder.run(cmd, args, settings, activeCheck) : spawnSync(cmd, args, settings);
 }
 function must(cmd, args, options) {
   const result = command(cmd, args, options);
@@ -461,6 +467,7 @@ function runProfile(profile, output) {
   const out = output ? resolve(output) : mkdtempSync(join(parent, `${profile}-`));
   if (output) mkdirSync(out, { mode: 0o700 }); // Never reuse, overwrite, or delete another run's artifacts.
   const checks = [];
+  activeRecorder = createCommandRecorder(out);
   const full = profile === 'full';
   let source;
   const record = (item) => {
@@ -470,21 +477,26 @@ function runProfile(profile, output) {
   };
   const missing = (id, reason, required = true, status = 'BLOCKED') => record({ id, required, status, executed: false, raw_exit_code: null, reason });
   const local = (id, fn, required = true, prerequisite = false) => {
+    activeCheck = id;
+    const started_at = new Date().toISOString();
+    const firstCommand = activeRecorder.commands.length;
+    const timing = () => ({ started_at, finished_at: new Date().toISOString(), command_ids: activeRecorder.commands.slice(firstCommand).map((c) => c.id) });
     try {
       const evidence = fn();
-      return record({ id, required, status: 'PASS', executed: true, raw_exit_code: 0, evidence });
+      return record({ id, required, status: 'PASS', executed: true, raw_exit_code: 0, evidence, ...timing() });
     } catch (error) {
-      return record({ id, required, status: prerequisite ? 'BLOCKED' : 'FAIL', executed: true, raw_exit_code: null, reason: error.message });
-    }
+      return record({ id, required, status: prerequisite ? 'BLOCKED' : 'FAIL', executed: true, raw_exit_code: null, reason: error.message, ...timing() });
+    } finally { activeCheck = null; }
   };
   const run = (id, cmd, args, classify, required = true, extraEnv = {}) => {
-    const begin = Date.now();
+    activeCheck = id;
     const result = command(cmd, args, { env: { ...cleanEnvironment(process.env), ...extraEnv } });
     const log = `${result.stdout || ''}${result.stderr || ''}`;
-    writeFileSync(join(out, `${id}.log`), log, { flag: 'wx', mode: 0o600 });
+    const receipt = activeRecorder.commands.at(-1);
+    activeCheck = null;
     const outcome = result.error || result.signal ? fail(result.error?.message || `signal ${result.signal}`) :
       classify ? classify(result.status, log) : (result.status === 0 ? { status: 'PASS' } : fail(`process exited ${result.status}`));
-    return record({ id, required, ...outcome, executed: true, raw_exit_code: result.status, command: [cmd, ...args], duration_ms: Date.now() - begin, log: `${id}.log`, log_sha256: hash(log) });
+    return record({ id, required, ...outcome, executed: true, raw_exit_code: result.status, command: [cmd, ...args], duration_ms: receipt.duration_ms, started_at: receipt.started_at, finished_at: receipt.finished_at, command_ids: [receipt.id], stdout: receipt.stdout, stderr: receipt.stderr, stdout_sha256: receipt.stdout_sha256, stderr_sha256: receipt.stderr_sha256 });
   };
   try {
     const sourceOK = local('source-identity', () => { source = sourceIdentity(); return { commit: source.commit, dirty: source.dirty, snapshot_sha256: source.snapshot_sha256 }; });
@@ -508,7 +520,7 @@ function runProfile(profile, output) {
       run('engineering-rules', process.execPath, ['--test', '--test-reporter=tap', 'docs/scripts/release-check.test.mjs', 'docs/scripts/release_integration_regression.test.mjs', 'docs/scripts/stage4b-isolation.test.mjs'], classifyTAP);
       run('widget-regressions', process.execPath, ['--test', '--test-reporter=tap', 'docs/scripts/browser/pow_vectors.test.mjs', 'docs/scripts/browser/widget_lifecycle.test.mjs'], classifyTAP);
       run('adminui-regressions', process.execPath, ['--test', '--test-reporter=tap', 'docs/scripts/browser/adminui_lifecycle.test.mjs', 'docs/scripts/browser/adminui_generator_default.test.mjs'], classifyTAP);
-      run('tooling-regressions', process.execPath, ['--test', '--test-reporter=tap', 'docs/scripts/build-receipt.test.mjs', 'docs/scripts/soak-evidence.test.mjs', 'docs/scripts/preflight_regression.test.mjs', 'docs/scripts/manual-evidence.test.mjs', 'docs/scripts/stage5a_rules.test.mjs', 'docs/scripts/stage4b-isolation.test.mjs', 'docs/scripts/admin-ui-ownership.test.mjs', 'docs/scripts/image-dimensions.test.mjs', 'docs/scripts/widget-isolation.test.mjs', 'docs/scripts/baseline-evidence.test.mjs', 'docs/scripts/baseline-run.test.mjs'], classifyTAP);
+      run('tooling-regressions', process.execPath, ['--test', '--test-reporter=tap', 'docs/scripts/ops_controls.test.mjs', 'docs/scripts/command-evidence.test.mjs', 'docs/scripts/build-receipt.test.mjs', 'docs/scripts/soak-evidence.test.mjs', 'docs/scripts/preflight_regression.test.mjs', 'docs/scripts/manual-evidence.test.mjs', 'docs/scripts/stage5a_rules.test.mjs', 'docs/scripts/stage4b-isolation.test.mjs', 'docs/scripts/admin-ui-ownership.test.mjs', 'docs/scripts/image-dimensions.test.mjs', 'docs/scripts/widget-isolation.test.mjs', 'docs/scripts/baseline-evidence.test.mjs', 'docs/scripts/baseline-run.test.mjs'], classifyTAP);
       if (keyIdentityOK) run('key-permission-and-rerun', process.execPath, ['--test', '--test-reporter=tap', 'docs/scripts/release-check.test.mjs'], classifyTAP);
       local('javascript-syntax', () => {
         const files = ['web', 'docs/scripts'].flatMap(filesBelow).filter((name) => /\.(mjs|js)$/.test(name));
@@ -622,12 +634,13 @@ function runProfile(profile, output) {
     deployed: false,
     supported_scope: SUPPORTED_SCOPE,
     host: { platform: process.platform, arch: process.arch, node: process.version },
-    source, checks,
+    source, checks, commands: activeRecorder.commands,
     limitations: ['Checksums are traceability, not signatures or provenance authentication.', 'Engineering profile PASS is not full release acceptance.', 'Configuration written locally does not mean remote CI has run.', 'Production approval defaults to false until candidate-bound product evidence and an explicit authority decision are implemented and reviewed.'],
   };
   writeFileSync(join(out, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
-  console.log(`[release-check] RESULT=${verdict.result} SCRIPT_RC=${verdict.exit_code} PROFILE=${profile}`);
+  console.log(`[release-check] RESULT=${verdict.result} PROFILE=${profile}`);
   console.log(`[release-check] summary=${join(out, 'summary.json')}`);
+  activeRecorder = null;
   return verdict.exit_code;
 }
 
@@ -665,4 +678,5 @@ function main(argv) {
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
   try { process.exitCode = main(process.argv.slice(2)); }
   catch (error) { console.error(`[release-check] FAIL: ${error.message}`); process.exitCode = 1; }
+  console.log(`[release-check] SCRIPT_RC=${process.exitCode ?? 0}`);
 }

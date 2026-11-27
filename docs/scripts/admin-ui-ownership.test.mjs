@@ -89,7 +89,7 @@ test("all admin gate HTTP helpers use bounded connection and total timeouts with
 test("the parent shell verifies its shared service before and after browser work", () => {
   assert.match(gate, /assert_admin_service\(\)/);
   const browserStart = gate.indexOf('log "第 8 步：真实浏览器交互验收');
-  const browserExec = gate.indexOf("node --test --test-reporter=tap docs/scripts/browser/adminui_browser.test.mjs", browserStart);
+  const browserExec = gate.indexOf("node docs/scripts/node-tests.mjs --test-reporter=tap docs/scripts/browser/adminui_browser.test.mjs", browserStart);
   const postCheck = gate.indexOf('assert_admin_service "浏览器验收后"', browserExec);
   const nextWrites = gate.indexOf('log "第 9 步：真实写入一轮', browserStart);
   assert.ok(browserStart >= 0 && browserExec > browserStart && postCheck > browserExec && nextWrites > postCheck,

@@ -25,8 +25,23 @@
 # 所以机器可读的结论看最后那行 RESULT 与 SCRIPT_RC，不要看 make 的码。
 set -euo pipefail
 
+script_exit() {
+  local rc="${1:-$?}"
+  trap - EXIT INT TERM
+  printf '[stage5b] SCRIPT_RC=%s\n' "$rc"
+  exit "$rc"
+}
+trap script_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 # 记录器、verdict 与分类自测都在下面先定义；分派发生在任何副作用（mktemp、trap、docker）之前。
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/docs/scripts/drill-resources.sh"
+if [[ "${1:-}" == --selftest-resource-ownership ]]; then
+  drill_ownership_selftest "${2:-}"
+  exit $?
+fi
 
 STEP=0
 # 三类归属各自的计数。**只有 R_* 进 verdict**——可选项与超范围项再多也不改变必需项的结论，
@@ -194,7 +209,7 @@ prerequisite_blocked() {
   blocked "$1" "在既定 Linux/arm64、Go 1.27.3、Node 24 与独占本地 Docker 环境重跑；不安装或改变本机"
   printf '[stage5b] 必需项(B 路径部署工程) PASS=0 FAIL=0 BLOCKED=1 NOT_RUN=0\n'
   printf '[stage5b] 可选项(A 路径/未验证平台) PASS=0 FAIL=0 BLOCKED=0 NOT_RUN=0\n'
-  printf '[stage5b] RESULT=blocked（环境不足，未执行部署演练）\n[stage5b] SCRIPT_RC=3\n'
+  printf '[stage5b] RESULT=blocked（环境不足，未执行部署演练）\n'
   exit 3
 }
 [[ "$(uname -s)" == Linux ]] || prerequisite_blocked "本机不是 Linux；交叉编译不能代替运行互斥与 Docker 实测"
@@ -208,14 +223,20 @@ docker info >/dev/null 2>&1 || prerequisite_blocked "Docker daemon 不可达"
 # Refuse to clean or overwrite any pre-existing resource with a name this drill could use.
 # This check runs before mktemp, compose, build, traps, or any cleanup action. A stale prior
 # run is still an external conflict: the operator must inspect it, never let this script guess ownership.
-IMAGE="${EPOCHA_IMAGE:-epocha:stage5b-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
-PROJECT="epocha5b"
-for resource in epocha5b-second epocha5b-measure; do
+IMAGE="${EPOCHA_IMAGE:-epocha:stage5b-$(date -u +%Y%m%dt%H%M%sz)-$$}"
+PROJECT="${EPOCHA_5B_PROJECT:-epocha5b-$(date -u +%Y%m%dt%H%M%sz)-$$-${RANDOM}}"
+[[ "$PROJECT" =~ ^[a-z0-9][a-z0-9-]{1,45}$ ]] || prerequisite_blocked "无效的隔离项目前缀"
+RECIPE_PROJECT="${PROJECT}-recipe"
+SECOND_NAME="${PROJECT}-second"
+MEASURE_NAME="${PROJECT}-measure"
+DRILL_OWNER="${PROJECT}-$$-${RANDOM}"
+export EPOCHA_DRILL_OWNER="$DRILL_OWNER"
+for resource in "$SECOND_NAME" "$MEASURE_NAME"; do
   if docker container inspect "$resource" >/dev/null 2>&1; then
     prerequisite_blocked "Docker 容器 $resource 已存在；拒绝清理或复用同名资源"
   fi
 done
-for network in "${PROJECT}_default" epocha5b-recipe; do
+for network in "${PROJECT}_default" "${RECIPE_PROJECT}_default"; do
   if docker network inspect "$network" >/dev/null 2>&1; then
     prerequisite_blocked "Docker 网络 $network 已存在；拒绝清理或复用同名资源"
   fi
@@ -223,12 +244,14 @@ done
 if docker image inspect "$IMAGE" >/dev/null 2>&1; then
   prerequisite_blocked "Docker 镜像标签 $IMAGE 已存在；拒绝覆盖可变同名标签"
 fi
-if [[ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT")" ]]; then
-  prerequisite_blocked "Compose 项目 $PROJECT 已有容器；拒绝对用户资源执行 down"
-fi
-if [[ -n "$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT")" ]]; then
-  prerequisite_blocked "Compose 项目 $PROJECT 已有卷；拒绝清理用户资源"
-fi
+for project in "$PROJECT" "$RECIPE_PROJECT"; do
+  for kind in container volume network; do
+    list_flags=(-q)
+    [[ "$kind" != container ]] || list_flags=(-aq)
+    existing="$(docker "$kind" ls "${list_flags[@]}" --filter "label=com.docker.compose.project=$project")" || prerequisite_blocked "无法确认 $project 资源清单"
+    [[ -z "$existing" ]] || prerequisite_blocked "项目 $project 已有 $kind；拒绝复用或清理"
+  done
+done
 
 cd "$ROOT"
 # These are captured once, before any actual build, and passed as make command-line values.
@@ -243,8 +266,7 @@ EVIDENCE_DIR=""
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/epocha-stage5b.XXXXXX")"
 chmod 700 "$WORK"
 
-IMAGE="${IMAGE:-epocha:stage5b-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
-PROJECT="${PROJECT:-epocha5b}"
+IMAGE="${IMAGE:-epocha:stage5b-$(date -u +%Y%m%dt%H%M%sz)-$$}"
 PUBLIC_PORT="${EPOCHA_5B_PORT:-18180}"
 SECOND_PORT="${EPOCHA_5B_SECOND_PORT:-18181}"
 MEASURE_PORT="${EPOCHA_5B_MEASURE_PORT:-18182}"
@@ -280,20 +302,28 @@ cleanup() {
     log "本轮无凭据/DB证据保留于 $EVIDENCE_DIR；原始构建保留于 $PREBUILT_DIR"
   fi
   # 只清理**本脚本自己**创建的容器/网络/目录；绝不 prune，也不碰别人留下的东西。
-  if [[ -n "${RECIPE_COMPOSE:-}" ]]; then
-    $RECIPE_COMPOSE down -v --remove-orphans >/dev/null 2>&1
-  fi
-  ( cd "$ROOT/deploy/docker" && docker compose --project-name "$PROJECT" --env-file "$WORK/compose.env" down -v --remove-orphans ) >/dev/null 2>&1
-  for name in epocha5b-second epocha5b-measure; do
-    docker rm -f "$name" >/dev/null 2>&1
-  done
+  cleanup_owned_resources
   rm -rf "$WORK"
-  exit $rc
+  script_exit "$rc"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
 
 compose() {
-  ( cd "$ROOT/deploy/docker" && docker compose --project-name "$PROJECT" --env-file "$WORK/compose.env" "$@" )
+  local rc=0
+  if [[ "$1" == down ]]; then cleanup_owned_resources "$PROJECT"; return; fi
+  drill_collect "$PROJECT" || return 1
+  docker compose -f "$ROOT/deploy/docker/compose.yml" -f "$ROOT/deploy/docker/compose.test.yml" \
+    --project-name "$PROJECT" --env-file "$WORK/compose.env" "$@" || rc=$?
+  drill_collect "$PROJECT" || return 1
+  return "$rc"
+}
+recipe_compose() {
+  local rc=0
+  if [[ "$1" == down ]]; then cleanup_owned_resources "$RECIPE_PROJECT"; return; fi
+  drill_collect "$RECIPE_PROJECT" || return 1
+  "${RECIPE_COMMAND[@]}" "$@" || rc=$?
+  drill_collect "$RECIPE_PROJECT" || return 1
+  return "$rc"
 }
 container_id() {
   local out
@@ -448,7 +478,7 @@ if [[ $DOCKER_OK -eq 1 ]]; then
     printf '[stage5b] 必需项(B 路径部署工程) PASS=%d FAIL=%d BLOCKED=%d NOT_RUN=%d\n' "$R_PASS" "$((R_FAIL))" "$R_BLOCKED" "$R_NOTRUN"
     printf '[stage5b] 可选项(A 路径/未验证平台) PASS=%d FAIL=%d BLOCKED=%d NOT_RUN=%d\n' "$O_PASS" "$O_FAIL" "$O_BLOCKED" "$O_NOTRUN"
     printf '[stage5b] 超范围项(产品效果，本门禁不判定) 登记=%d\n' "$S_NOTE"
-    printf '[stage5b] RESULT=fail（实际构建失败，未使用旧产物）\n[stage5b] SCRIPT_RC=1\n'
+    printf '[stage5b] RESULT=fail（实际构建失败，未使用旧产物）\n'
     exit 1
   else
     BUILD_OK=1
@@ -472,11 +502,11 @@ EPOCHA_PUBLIC_PORT=$PUBLIC_PORT
 EPOCHA_DATA_DIR=$D/data
 EPOCHA_KEY_DIR=$D/keys
 EPOCHA_BACKUP_DIR=$D/backups
-EPOCHA_UID=$RUN_UID
-EPOCHA_GID=$RUN_GID
+EPOCHA_TEST_UID=$RUN_UID
+EPOCHA_TEST_GID=$RUN_GID
 EPOCHA_ADMIN_KEY_FILE=/etc/epocha/keys/admin
 EPOCHA_NETWORK=${PROJECT}_default
-EPOCHA_SUBNET=172.30.0.0/24
+EPOCHA_SUBNET=${EPOCHA_5B_SUBNET:-172.30.0.0/24}
 EOF
   # compose 里的容器内路径常量（不是宿主路径）。
   # 上面的 ${...} 在 heredoc 里就地展开，宿主路径与容器路径各归各位：
@@ -518,15 +548,20 @@ EOF
 
     # (b) 第二个服务实例（另一个容器、同一数据目录、另一个端口）必须起不来。
     rc=0
-    docker run -d --name epocha5b-second \
+    docker run -d --cidfile "$WORK/second.cid" --label "io.epocha.drill=$DRILL_OWNER" --name "$SECOND_NAME" \
       --user "$RUN_UID:$RUN_GID" --read-only \
       --cap-drop ALL --security-opt no-new-privileges \
       --memory 128m --memory-swap 128m --cpus 1 --pids-limit 128 \
       -v "$D/data:/var/lib/epocha" -v "$D/keys:/etc/epocha/keys:ro" \
       -p "127.0.0.1:$SECOND_PORT:8080" \
-      -e EPOCHA_LISTEN=0.0.0.0:8080 -e EPOCHA_DB=/var/lib/epocha/epocha.db \
+      -e EPOCHA_PRODUCTION_PROFILE=false -e EPOCHA_LISTEN=0.0.0.0:8080 -e EPOCHA_DB=/var/lib/epocha/epocha.db \
       -e EPOCHA_MASTER_KEY_FILE=/etc/epocha/keys/master -e EPOCHA_PEPPER_FILE=/etc/epocha/keys/pepper \
       "$IMAGE" >/dev/null 2>&1 || rc=$?
+    SECOND_CID=""
+    if [[ -s "$WORK/second.cid" ]]; then
+      SECOND_CID="$(cat "$WORK/second.cid")"
+      drill_register container "$SECOND_CID" second || rc=1
+    fi
     # docker wait 没有超时参数，所以自己轮询状态：把"命令写错"和"第二个实例真的活着"
     # 区分开很重要——后者的处置是修锁，前者的处置是修脚本。
     SECOND_RC="timeout"
@@ -534,16 +569,16 @@ EOF
       SECOND_RC="create-failed"
     else
       for _ in $(seq 1 30); do
-        ST2="$(docker inspect -f '{{.State.Status}}' epocha5b-second 2>/dev/null || echo gone)"
+        ST2="$(docker inspect -f '{{.State.Status}}' "$SECOND_CID" 2>/dev/null || echo gone)"
         if [[ "$ST2" == "exited" || "$ST2" == "dead" || "$ST2" == "gone" ]]; then
-          SECOND_RC="$(docker inspect -f '{{.State.ExitCode}}' epocha5b-second 2>/dev/null || echo '?')"
+          SECOND_RC="$(docker inspect -f '{{.State.ExitCode}}' "$SECOND_CID" 2>/dev/null || echo '?')"
           break
         fi
         sleep 1
       done
     fi
-    SECOND_LOG="$(docker logs epocha5b-second 2>&1 | tail -c 400 || true)"
-    docker rm -f epocha5b-second >/dev/null 2>&1 || true
+    SECOND_LOG="$(docker logs "$SECOND_CID" 2>&1 | tail -c 400 || true)"
+    cleanup_owned_resources second
     if [[ "$SECOND_RC" == "timeout" || "$SECOND_RC" == "0" || "$SECOND_RC" == "create-failed" ]]; then
       fail "第二个服务容器没在 30s 内退出（状态/退出码=$SECOND_RC）——两个写者可能正在共享同一个数据目录"
     elif ! printf '%s' "$SECOND_LOG" | grep -q "已被另一个进程占用"; then
@@ -675,7 +710,7 @@ fi
 log "第 2.5 步：启动配方演练（隔离部署根 $WORK/recipe）"
 RECIPE_PORT="${EPOCHA_5B_RECIPE_PORT:-18183}"
 EPR="$WORK/recipe"
-RECIPE_COMPOSE=""
+RECIPE_COMMAND=()
 RC0=0
 port_listening "$RECIPE_PORT" || RC0=$?
 if [[ $RC0 -ne 1 ]]; then
@@ -712,7 +747,7 @@ else
     pass "变量名双向对账通过（compose 引用 $(printf '%s\n' "$CVAR" | wc -l) 个变量，样例给出 $(printf '%s\n' "$EVAR" | wc -l) 个键，两边一一对应）"
   fi
 
-  cp deploy/docker/compose.yml deploy/docker/.env.example "$EPR/"
+  cp deploy/docker/compose.yml deploy/docker/compose.test.yml deploy/docker/.env.example "$EPR/"
   # 与 §11 逐行同形状（`[[ -e ]] ||` 幂等 + set -C 兜底）。这里测的就是"重跑一遍这一段会不会毁密钥"。
   # 函数体写成 `(...)`：bash 里 set -C 不会随函数返回而撤销，只有子 shell 才把它关在这里。
   keys_section() (
@@ -753,17 +788,17 @@ else
       fi
     fi
     cp "$EPR/.env.example" "$EPR/.env"
-    sed -i "s|^EPOCHA_UID=.*|EPOCHA_UID=$RUN_UID|;s|^EPOCHA_GID=.*|EPOCHA_GID=$RUN_GID|" "$EPR/.env"
+    printf 'EPOCHA_TEST_UID=%s\nEPOCHA_TEST_GID=%s\n' "$RUN_UID" "$RUN_GID" >>"$EPR/.env"
     sed -i "s|^# EPOCHA_ADMIN_KEY_FILE=.*|EPOCHA_ADMIN_KEY_FILE=/etc/epocha/keys/admin|" "$EPR/.env"
     sed -i "s|^EPOCHA_PUBLIC_PORT=.*|EPOCHA_PUBLIC_PORT=$RECIPE_PORT|" "$EPR/.env"
-    sed -i "s|^EPOCHA_NETWORK=.*|EPOCHA_NETWORK=epocha5b-recipe|" "$EPR/.env"
-    sed -i "s|^EPOCHA_SUBNET=.*|EPOCHA_SUBNET=172.31.0.0/24|" "$EPR/.env"
+    sed -i "s|^EPOCHA_NETWORK=.*|EPOCHA_NETWORK=${RECIPE_PROJECT}_default|" "$EPR/.env"
+    sed -i "s|^EPOCHA_SUBNET=.*|EPOCHA_SUBNET=${EPOCHA_5B_RECIPE_SUBNET:-172.31.0.0/24}|" "$EPR/.env"
     sed -i "s|^EPOCHA_IMAGE=.*|EPOCHA_IMAGE=$IMAGE|" "$EPR/.env"
     chmod 600 "$EPR/.env"
-    RECIPE_COMPOSE="docker compose -p epocha5brecipe -f $EPR/compose.yml --project-directory $EPR --env-file $EPR/.env"
+    RECIPE_COMMAND=(docker compose -p "$RECIPE_PROJECT" -f "$EPR/compose.yml" -f "$EPR/compose.test.yml" --project-directory "$EPR" --env-file "$EPR/.env")
 
     RC0=0
-    $RECIPE_COMPOSE config >"$LOGS/recipe-config.yml" 2>&1 || RC0=$?
+    recipe_compose config >"$LOGS/recipe-config.yml" 2>&1 || RC0=$?
     if [[ $RC0 -ne 0 ]]; then
       tail -n 15 "$LOGS/recipe-config.yml"
       fail "§11 的调用形状（仓库根、不 cd、-f/--project-directory/--env-file）渲染失败（rc=$RC0）"
@@ -788,7 +823,7 @@ else
     fi
 
     RC0=0
-    $RECIPE_COMPOSE up -d --wait --wait-timeout 90 >"$LOGS/recipe-up.log" 2>&1 || RC0=$?
+    recipe_compose up -d --wait --wait-timeout 90 >"$LOGS/recipe-up.log" 2>&1 || RC0=$?
     RU="http://127.0.0.1:$RECIPE_PORT"
     if [[ $RC0 -ne 0 || "$(code "$RU/readyz")" != "200" ]]; then
       tail -n 20 "$LOGS/recipe-up.log"
@@ -798,7 +833,7 @@ else
 
       # ② 容器内受控管理命令：引导凭据（EPOCHA_ADMIN_KEY_FILE）生效的唯一直接观察点。
       RC0=0
-      $RECIPE_COMPOSE exec -T epocha /usr/local/bin/epocha-ops admin GET /api/admin/whoami \
+      recipe_compose exec -T epocha /usr/local/bin/epocha-ops admin GET /api/admin/whoami \
         </dev/null >"$LOGS/recipe-whoami.raw" 2>&1 || RC0=$?
       sed -n '2,$p' "$LOGS/recipe-whoami.raw" >"$LOGS/recipe-whoami.json"   # 第一行是 ops 的 status=NNN
       RWHO="$(jq -r '.key_id // ""' "$LOGS/recipe-whoami.json" 2>/dev/null || echo "")"
@@ -821,10 +856,10 @@ else
       admin_r() { # $1=METHOD $2=PATH $3=OUT(可选第 4 个参数=请求体)
         local rc2=0
         if [[ -n "${4:-}" ]]; then
-          printf '%s' "$4" | $RECIPE_COMPOSE exec -T epocha /usr/local/bin/epocha-ops admin "$1" "$2" \
+          printf '%s' "$4" | recipe_compose exec -T epocha /usr/local/bin/epocha-ops admin "$1" "$2" \
             >"$3.raw" 2>"$3.err" || rc2=$?
         else
-          $RECIPE_COMPOSE exec -T epocha /usr/local/bin/epocha-ops admin "$1" "$2" </dev/null \
+          recipe_compose exec -T epocha /usr/local/bin/epocha-ops admin "$1" "$2" </dev/null \
             >"$3.raw" 2>"$3.err" || rc2=$?
         fi
         [[ $rc2 -eq 0 ]] || return $rc2
@@ -878,7 +913,7 @@ else
 
           # ⑤ 重建容器：站点/凭据/消费状态都必须活下来（消费是权威账本，不是缓存）。
           RC0=0
-          $RECIPE_COMPOSE up -d --force-recreate --wait --wait-timeout 90 >"$LOGS/recipe-recreate.log" 2>&1 || RC0=$?
+          recipe_compose up -d --force-recreate --wait --wait-timeout 90 >"$LOGS/recipe-recreate.log" 2>&1 || RC0=$?
           if [[ $RC0 -ne 0 || "$(code "$RU/readyz")" != "200" ]]; then
             fail "重建容器后没起来或没就绪（rc=$RC0）：$(tail -c 220 "$LOGS/recipe-recreate.log")"
           else
@@ -899,7 +934,7 @@ else
 
           # ⑥ 停止后端口必须真释放（不是"容器还在但不响应"）。
           RC0=0
-          $RECIPE_COMPOSE stop >"$LOGS/recipe-stop.log" 2>&1 || RC0=$?
+          recipe_compose stop >"$LOGS/recipe-stop.log" 2>&1 || RC0=$?
           RC1=0
           port_listening "$RECIPE_PORT" || RC1=$?
           if [[ $RC0 -ne 0 ]]; then
@@ -912,15 +947,15 @@ else
 
           # ⑦ 定点清理：只删本步自己创建的那一套（项目名 + 网络 + 隔离目录）。
           RC0=0
-          $RECIPE_COMPOSE down -v --remove-orphans >"$LOGS/recipe-down.log" 2>&1 || RC0=$?
+          recipe_compose down >"$LOGS/recipe-down.log" 2>&1 || RC0=$?
           if [[ $RC0 -ne 0 ]]; then
             fail "清理配方项目失败（rc=$RC0）：$(tail -c 200 "$LOGS/recipe-down.log")"
-          elif docker network inspect epocha5b-recipe >/dev/null 2>&1; then
-            fail "配方网络 epocha5b-recipe 还在——down -v 没清干净"
-          elif [[ -n "$($RECIPE_COMPOSE ps -q 2>/dev/null)" ]]; then
+          elif docker network inspect "${RECIPE_PROJECT}_default" >/dev/null 2>&1; then
+            fail "配方网络 ${RECIPE_PROJECT}_default 还在——down -v 没清干净"
+          elif [[ -n "$(recipe_compose ps -q 2>/dev/null)" ]]; then
             fail "配方项目下仍有容器"
           elif [[ -n "${CID:-}" ]] && [[ "$(code "http://127.0.0.1:$PUBLIC_PORT/readyz" 3)" != "200" ]]; then
-            fail "配方项目的定点清理波及了第 2 步那套（$PUBLIC_PORT 不再就绪）——down 只该作用于 -p epocha5brecipe"
+            fail "配方项目的定点清理波及了第 2 步那套（$PUBLIC_PORT 不再就绪）——down 只该作用于 -p $RECIPE_PROJECT"
           else
             OTHER="（第 2 步那套本轮未起，无从波及）"
             [[ -n "${CID:-}" ]] && OTHER="（第 2 步那套仍在 $PUBLIC_PORT 就绪）"
@@ -985,19 +1020,23 @@ if [[ $BUILD_OK -eq 1 && -n "${CID:-}" ]] && (( AVAIL_NOW >= 100 * 1024 )); then
   # 测量实例：资源限额与生产一致，只把**全局限流**抬高（默认 60 IP-RPM 会先于容量起作用）。
   # 这份抬高**不写进** compose 文件——部署配置里不许混入测试高限流。
   rc=0
-  docker run -d --name epocha5b-measure \
+  docker run -d --cidfile "$WORK/measure.cid" --label "io.epocha.drill=$DRILL_OWNER" --name "$MEASURE_NAME" \
     --user "$RUN_UID:$RUN_GID" --read-only \
     --cap-drop ALL --security-opt no-new-privileges \
     --memory 128m --memory-swap 128m --cpus 1 --pids-limit 128 \
     -v "$D/data:/var/lib/epocha" -v "$D/keys:/etc/epocha/keys:ro" -v "$D/backups:/var/backups/epocha" \
     -p "127.0.0.1:$MEASURE_PORT:8080" \
-    -e EPOCHA_LISTEN=0.0.0.0:8080 -e EPOCHA_DB=/var/lib/epocha/epocha.db \
+    -e EPOCHA_PRODUCTION_PROFILE=false -e EPOCHA_LISTEN=0.0.0.0:8080 -e EPOCHA_DB=/var/lib/epocha/epocha.db \
     -e EPOCHA_MASTER_KEY_FILE=/etc/epocha/keys/master -e EPOCHA_PEPPER_FILE=/etc/epocha/keys/pepper \
     -e EPOCHA_ADMIN_KEY_FILE=/etc/epocha/keys/admin \
     -e EPOCHA_RATE_IP_RPM=6000 -e EPOCHA_RATE_SITE_RPM=6000 \
     -e GOMEMLIMIT=56MiB -e GOMAXPROCS=1 \
     "$IMAGE" >/dev/null 2>&1 || rc=$?
-  MEAS="epocha5b-measure"
+  MEAS=""
+  if [[ -s "$WORK/measure.cid" ]]; then
+    MEAS="$(cat "$WORK/measure.cid")"
+    drill_register container "$MEAS" measure || rc=1
+  fi
   MU="http://127.0.0.1:$MEASURE_PORT"
   if [[ $rc -ne 0 ]] || ! wait_status "$MU/readyz" 200 40; then
     fail "测量实例起不来或没就绪：$(docker logs "$MEAS" 2>&1 | tail -c 240)"
@@ -1141,7 +1180,7 @@ if [[ $BUILD_OK -eq 1 && -n "${CID:-}" ]] && (( AVAIL_NOW >= 100 * 1024 )); then
         fail "宿主上出现了预期之外的服务监听（$PUBLIC_PORT 仍在监听）：$(grep ":$PUBLIC_PORT " "$LOGS/ss-after.txt" | head -2 | tr '\n' ' ')"
       fi
     fi
-    docker rm -f "$MEAS" >/dev/null 2>&1 || true
+    cleanup_owned_resources measure
   fi
 else
   blocked "持续演练：磁盘余量 $((AVAIL_NOW / 1024))MB（下限 100MB）或第 2 步的服务容器不可用" \
@@ -1168,5 +1207,4 @@ case $RC in
     "$R_PASS" "$O_NOTRUN" ;;
 esac
 # 直接跑脚本时这就是**真实退出码**；经 make 时会被折叠成 2（配方会把这里的数字打印出来）。
-printf '[stage5b] SCRIPT_RC=%d\n' "$RC"
 exit "$RC"

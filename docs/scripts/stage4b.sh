@@ -12,6 +12,16 @@
 # 退出码契约：浏览器必需验收或 4B 工程项任一失败 ⇒ 非 0。
 set -euo pipefail
 
+script_exit() {
+  local rc="${1:-$?}"
+  trap - EXIT INT TERM
+  printf '[stage4b] SCRIPT_RC=%s\n' "$rc"
+  exit "$rc"
+}
+trap script_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
@@ -53,9 +63,9 @@ cleanup() {
   [[ -n "${OCR_PID:-}" ]] && kill -TERM "$OCR_PID" 2>/dev/null
   [[ -n "$rc" ]] || rc=0
   rm -rf "$WORK"
-  exit $rc
+  script_exit "$rc"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
 
 log "第 0 步：构建与依赖隔离"
 mkdir -p "$BIN"

@@ -9,6 +9,16 @@
 # 不重跑整套 ./... 的 -race，也不跑 OCR 与持续演练——那些不属于本里程碑。
 set -euo pipefail
 
+script_exit() {
+  local rc="${1:-$?}"
+  trap - EXIT INT TERM
+  printf '[adminui] SCRIPT_RC=%s\n' "$rc"
+  exit "$rc"
+}
+trap script_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
@@ -109,7 +119,7 @@ cleanup() {
   cleanup_child "$SERVER_PID"
   for path in "${TMPFS_SCRATCH[@]}"; do [[ -n "$path" ]] && rm -rf -- "$path"; done
   [[ -n "$WORK" && -d "$WORK" ]] && rm -rf "$WORK"
-  exit $rc
+  script_exit "$rc"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -278,7 +288,7 @@ else
     ADMIN_API="http://127.0.0.1:$ADMIN_PORT" \
     ADMIN_KEY_FILE="$WORK/keys/admin" \
     BAD_ADMIN_KEY="$BAD_KEY_VAL" \
-      node --test --test-reporter=tap docs/scripts/browser/adminui_browser.test.mjs 2>&1 | tee "$WORK/browser.log"
+      node docs/scripts/node-tests.mjs --test-reporter=tap docs/scripts/browser/adminui_browser.test.mjs 2>&1 | tee "$WORK/browser.log"
     browser_rc=${PIPESTATUS[0]}
     set -e
     [[ $browser_rc -eq 0 ]] || { tail -n 60 "$WORK/browser.log"; fail "浏览器交互验收未通过（node --test 退出码 $browser_rc）"; }
@@ -386,7 +396,9 @@ else
     -H "Authorization: Bearer $ADMIN_KEY_VAL" -H 'Content-Type: application/json' -d '{}' \
     "http://127.0.0.1:$ADMIN_PORT/api/admin/sites/$SITE_ID/enable")"
   [[ "$en" == "200" ]] || fail "启用应 200，实得 $en：$(cat "$WORK/http/en.json" 2>/dev/null)"
-  if [[ "$dis" == "200" && "$en" == "200" ]] && grep -q '"enabled":false' "$WORK/http/dis.json"; then
+  grep -q '"enabled":true' "$WORK/http/en.json" || fail "启用响应未反映 enabled=true"
+  if [[ "$dis" == "200" && "$en" == "200" ]] && grep -q '"enabled":false' "$WORK/http/dis.json" \
+    && grep -q '"enabled":true' "$WORK/http/en.json"; then
     pass "停用/启用走真实端点且状态可见"
   fi
 fi

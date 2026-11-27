@@ -10,7 +10,7 @@ import { spawnSync } from 'node:child_process';
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const TOOL = join(ROOT, 'docs/scripts/build-receipt.mjs');
 const GO = process.env.RECEIPT_GO || 'go';
-const env = { ...process.env, GOTOOLCHAIN: 'local', GOPROXY: 'off', GOSUMDB: 'off', GOWORK: 'off', GOENV: 'off', GOFLAGS: '', CGO_ENABLED: '0', GOOS: 'linux', GOARCH: 'arm64' };
+const env = { ...process.env, GOTOOLCHAIN: 'local', GOPROXY: 'off', GOSUMDB: 'off', GOWORK: 'off', GOENV: 'off', GOFLAGS: '-mod=readonly', CGO_ENABLED: '0', GOOS: 'linux', GOARCH: 'arm64' };
 const version = 'receipt-integration';
 const date = '2026-11-02T01:02:03Z';
 const invoke = (...args) => spawnSync(process.execPath, [TOOL, ...args], { cwd: ROOT, env, encoding: 'utf8', timeout: 180000, maxBuffer: 8 * 1024 * 1024 });

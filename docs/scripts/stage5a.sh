@@ -13,20 +13,33 @@
 # 最后那行 RESULT 与上面的逐项记录。
 set -euo pipefail
 
+script_exit() {
+  local rc="${1:-$?}"
+  trap - EXIT INT TERM
+  printf '[stage5a] SCRIPT_RC=%s\n' "$rc"
+  exit "$rc"
+}
+trap script_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/epocha-stage5a.XXXXXX")"
 chmod 700 "$WORK"
 
-IMAGE="${EPOCHA_IMAGE:-epocha:5a}"
 PROXY_IMAGE="${EPOCHA_PROXY_IMAGE:-nginx:1.27-alpine}"
 # 固定端口 + 开头检查空闲：端口被上一轮遗留进程占着时，测试会“因为错误的原因通过”。
 PUBLIC_PORT="${EPOCHA_5A_PORT:-18080}"
 RESTORE_PORT="${EPOCHA_5A_RESTORE_PORT:-18081}"
 PROXY_PORT="${EPOCHA_5A_PROXY_PORT:-18443}"
 LOAD_PORT="${EPOCHA_5A_LOAD_PORT:-18083}"
-PROJECT="epocha5a-$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}"
+PROJECT="${EPOCHA_5A_PROJECT:-epocha5a-$(date -u +%Y%m%dt%H%M%sz)-$$-${RANDOM}}"
+[[ "$PROJECT" =~ ^[a-z0-9][a-z0-9-]{1,45}$ ]] || exit 2
+IMAGE="${EPOCHA_IMAGE:-epocha:$PROJECT}"
+export EPOCHA_DRILL_OWNER="$PROJECT-$$-${RANDOM}"
+READONLY_PORT="${EPOCHA_5A_READONLY_PORT:-18082}"
 RESTORE_NAME="${PROJECT}-restore"
 PROXY_NAME="${PROJECT}-proxy"
 READONLY_NAME="${PROJECT}-readonly"
@@ -202,9 +215,9 @@ cleanup() {
   set +e
   cleanup_owned_resources
   rm -rf "$WORK"
-  exit $rc
+  script_exit "$rc"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
 
 compose() {
   local rc=0
@@ -212,7 +225,7 @@ compose() {
     down) cleanup_owned_resources; return 0 ;;
     up) COMPOSE_STARTED=1 ;;
   esac
-  ( cd "$ROOT/deploy/docker" && docker compose --project-name "$PROJECT" --env-file "$WORK/compose.env" "$@" ) || rc=$?
+  ( cd "$ROOT/deploy/docker" && docker compose -f compose.yml -f compose.test.yml --project-name "$PROJECT" --env-file "$WORK/compose.env" "$@" ) || rc=$?
   if [[ "${1:-}" == "up" && "$CLEANUP_ARMED" == "1" ]]; then register_compose_resources || return $?; fi
   return "$rc"
 }
@@ -291,7 +304,7 @@ done
 if ! docker info >/dev/null 2>&1; then
   abort "docker daemon 不可达（阶段 5A 的容器演练无法执行；工程项部分仍可用 EPOCHA_5A_SKIP_DOCKER=1 单独跑）"
 fi
-for p in "$PUBLIC_PORT" "$RESTORE_PORT" "$PROXY_PORT" "$LOAD_PORT" 8081 8080; do
+for p in "$PUBLIC_PORT" "$RESTORE_PORT" "$PROXY_PORT" "$LOAD_PORT" "$READONLY_PORT" 8081 8080; do
   rc=0
   port_listening "$p" || rc=$?
   if [[ $rc -eq 0 ]]; then
@@ -299,6 +312,18 @@ for p in "$PUBLIC_PORT" "$RESTORE_PORT" "$PROXY_PORT" "$LOAD_PORT" 8081 8080; do
   elif [[ $rc -ne 1 ]]; then
     abort "ss 无法判定端口 $p 的状态（rc=$rc）：不能把“测不出来”当成“端口空闲”"
   fi
+done
+# Explicit prefixes are allowed only when all derived names/projects are absent.
+for resource in "$RESTORE_NAME" "$PROXY_NAME" "$READONLY_NAME" "$LOAD_NAME"; do
+  if docker container inspect "$resource" >/dev/null 2>&1; then abort "已有资源 $resource；拒绝复用或清理"; fi
+done
+if docker image inspect "$IMAGE" >/dev/null 2>&1; then abort "已有资源 $IMAGE；拒绝覆盖镜像"; fi
+if docker network inspect "${PROJECT}_default" >/dev/null 2>&1; then abort "已有资源 ${PROJECT}_default；拒绝复用网络"; fi
+for kind in container volume network; do
+  list_flags=(-q)
+  [[ "$kind" != container ]] || list_flags=(-aq)
+  existing="$(docker "$kind" ls "${list_flags[@]}" --filter "label=com.docker.compose.project=$PROJECT")" || abort "无法核对已有资源"
+  [[ -z "$existing" ]] || abort "已有资源属于项目 $PROJECT；拒绝复用或清理"
 done
 CLEANUP_ARMED=1
 pass "docker/curl/jq/openssl 可用，三个演练端口空闲（$PUBLIC_PORT/$RESTORE_PORT/$PROXY_PORT）；project=$PROJECT"
@@ -475,8 +500,8 @@ EPOCHA_PUBLIC_PORT=$PUBLIC_PORT
 EPOCHA_DATA_DIR=$D/data
 EPOCHA_KEY_DIR=$D/keys
 EPOCHA_BACKUP_DIR=$D/backups
-EPOCHA_UID=$RUN_UID
-EPOCHA_GID=$RUN_GID
+EPOCHA_TEST_UID=$RUN_UID
+EPOCHA_TEST_GID=$RUN_GID
 EPOCHA_ADMIN_KEY_FILE=$C_KEYS/admin
 EPOCHA_TRUST_PROXY=false
 EPOCHA_NETWORK=${PROJECT}_default
@@ -1225,16 +1250,16 @@ if [[ $DOCKER_OK -eq 1 && -n "$CID" ]]; then
   READONLY_CID="$(docker run -d --name "$READONLY_NAME" \
     --user "$RUN_UID:$RUN_GID" --read-only \
     -v "$D/data-copy:$C_DATA:ro" -v "$D/keys:$C_KEYS:ro" \
-    -p "127.0.0.1:18082:8080" \
+    -p "127.0.0.1:$READONLY_PORT:8080" \
     -e EPOCHA_DB="$C_DATA/epocha.db" -e EPOCHA_MASTER_KEY_FILE="$C_KEYS/master" -e EPOCHA_PEPPER_FILE="$C_KEYS/pepper" \
     "$IMAGE" >/dev/null 2>&1)" || rc=$?
   if [[ $rc -eq 0 && -n "$READONLY_CID" ]]; then
     READONLY_CID="$(docker inspect -f '{{.Id}}' "$READONLY_CID")"
   fi
   sleep 4
-  RO_CODE="$(code "http://127.0.0.1:18082/readyz" 5)"
-  RO_CH="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 8 -X POST -H 'Content-Type: application/json' -d "{\"site_key\":\"$SITE_KEY\"}" "http://127.0.0.1:18082/api/challenge" 2>/dev/null || echo 000)"
-  RO_V="$(curl -sS --max-time 8 -X POST -d "secret=$SECRET2&response=whatever" "http://127.0.0.1:18082/siteverify" 2>/dev/null || echo "")"
+  RO_CODE="$(code "http://127.0.0.1:$READONLY_PORT/readyz" 5)"
+  RO_CH="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 8 -X POST -H 'Content-Type: application/json' -d "{\"site_key\":\"$SITE_KEY\"}" "http://127.0.0.1:$READONLY_PORT/api/challenge" 2>/dev/null || echo 000)"
+  RO_V="$(curl -sS --max-time 8 -X POST -d "secret=$SECRET2&response=whatever" "http://127.0.0.1:$READONLY_PORT/siteverify" 2>/dev/null || echo "")"
   docker rm -f "$READONLY_CID" >/dev/null 2>&1 || true
   chmod -R u+w "$D/data-copy"; rm -rf "$D/data-copy"
   if printf '%s' "$RO_V" | grep -q '"success":true'; then

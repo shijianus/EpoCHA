@@ -123,10 +123,10 @@ docker-image-local:
 	printf 'BUILD_RECEIPT_DIR=%s\n' "$$pb"
 
 build-receipt-checks:
-	@node --test --test-reporter=tap docs/scripts/build-receipt.test.mjs docs/scripts/soak-evidence.test.mjs
+	@node docs/scripts/node-tests.mjs --test-reporter=tap docs/scripts/build-receipt.test.mjs docs/scripts/soak-evidence.test.mjs
 
 build-receipt-integration:
-	@RECEIPT_GO="$(GO)" node --test --test-reporter=tap docs/scripts/build-receipt.integration.test.mjs
+	@RECEIPT_GO="$(GO)" node docs/scripts/node-tests.mjs --test-reporter=tap docs/scripts/build-receipt.integration.test.mjs
 
 .PHONY: run
 run: build
@@ -168,7 +168,7 @@ widget-size:
 
 .PHONY: engineering-rules engineering-check release-check
 engineering-rules: build-receipt-checks
-	@node --test --test-reporter=tap docs/scripts/release-check.test.mjs
+	@node docs/scripts/node-tests.mjs --test-reporter=tap docs/scripts/release-check.test.mjs
 
 engineering-check:
 	@node docs/scripts/release-check.mjs --profile engineering
@@ -243,13 +243,13 @@ stage5a-check:
 widget-checks:
 	@node --check web/widget/v1.js
 	@node --check web/widget/v1.worker.js
-	@node --test docs/scripts/browser/pow_vectors.test.mjs docs/scripts/browser/widget_lifecycle.test.mjs
+	@node docs/scripts/node-tests.mjs docs/scripts/browser/pow_vectors.test.mjs docs/scripts/browser/widget_lifecycle.test.mjs
 
 .PHONY: browser-check
 # 只跑浏览器交互（需要外部已按 docs/scripts/stage4a.sh 的方式起好服务与 exampleapp）。
 # 缺环境变量时 node 侧会直接报错退出，不会静默跳过。
 browser-check:
-	@node --test docs/scripts/browser/widget_browser.test.mjs
+	@node docs/scripts/node-tests.mjs docs/scripts/browser/widget_browser.test.mjs
 
 .PHONY: admin-ui-check
 # 管理控制台 M1 的门禁：Go 层挂载边界/安全头 + curl 端到端判据 + 十项真实浏览器交互。

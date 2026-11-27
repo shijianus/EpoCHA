@@ -423,7 +423,7 @@ func evalExpr(task string) (int64, error) {
 		return 0, fmt.Errorf("未知运算符 %q", op)
 	}
 	num := func(s string) (int64, error) { return strconv.ParseInt(s, 10, 64) }
-	if len(tokens) == 5 && strings.HasPrefix(tokens[0], "(") && strings.HasSuffix(tokens[2], ")") {
+	if (len(tokens) == 5 || len(tokens) == 7) && strings.HasPrefix(tokens[0], "(") && strings.HasSuffix(tokens[2], ")") {
 		a, err := num(strings.TrimPrefix(tokens[0], "("))
 		if err != nil {
 			return 0, err
@@ -435,6 +435,24 @@ func evalExpr(task string) (int64, error) {
 		inner, err := apply(a, tokens[1], b)
 		if err != nil {
 			return 0, err
+		}
+		if len(tokens) == 7 {
+			if !strings.HasPrefix(tokens[4], "(") || !strings.HasSuffix(tokens[6], ")") {
+				return 0, fmt.Errorf("第二组括号不完整：%q", task)
+			}
+			c, err := num(strings.TrimPrefix(tokens[4], "("))
+			if err != nil {
+				return 0, err
+			}
+			d, err := num(strings.TrimSuffix(tokens[6], ")"))
+			if err != nil {
+				return 0, err
+			}
+			right, err := apply(c, tokens[5], d)
+			if err != nil {
+				return 0, err
+			}
+			return apply(inner, tokens[3], right)
 		}
 		c, err := num(tokens[4])
 		if err != nil {

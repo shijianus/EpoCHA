@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	stddraw "image/draw"
 	"io"
 	mrand "math/rand"
 	"strings"
@@ -299,7 +298,7 @@ func renderParallaxSheet(spec parallaxSpec) ([]byte, error) {
 		drawParallaxCode(frame, spec.Code, f)
 		dst := image.Rect((f%t.cols)*parallaxFrameW, (f/t.cols)*parallaxFrameH,
 			(f%t.cols+1)*parallaxFrameW, (f/t.cols+1)*parallaxFrameH)
-		stddraw.Draw(sheet, dst, frame, image.Point{}, stddraw.Src)
+		copyGrayFrame(sheet, dst.Min, frame)
 	}
 	return encodeGrayPNG(sheet)
 }
@@ -338,5 +337,27 @@ func fillGrayRect(dst *image.Gray, x, y, w, h int, v uint8) {
 	if r.Empty() {
 		return
 	}
-	stddraw.Draw(dst, r, image.NewUniform(color.Gray{Y: v}), image.Point{}, stddraw.Src)
+	// All pixels have the same Gray value; row copies avoid the generic
+	// color-conversion loop while preserving clipping and subimage stride.
+	offset := dst.PixOffset(r.Min.X, r.Min.Y)
+	row := dst.Pix[offset : offset+r.Dx()]
+	row[0] = v
+	for filled := 1; filled < len(row); {
+		filled += copy(row[filled:], row[:filled])
+	}
+	for y := r.Min.Y + 1; y < r.Max.Y; y++ {
+		offset += dst.Stride
+		copy(dst.Pix[offset:offset+len(row)], row)
+	}
+}
+
+// Frames and sheets are separate allocations. Bulk row copies avoid per-pixel
+// Gray -> RGBA64 -> Gray conversions in the generic image/draw path.
+func copyGrayFrame(dst *image.Gray, at image.Point, src *image.Gray) {
+	r := image.Rectangle{Min: at, Max: at.Add(src.Bounds().Size())}.Intersect(dst.Bounds())
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		d := dst.PixOffset(r.Min.X, y)
+		s := src.PixOffset(src.Rect.Min.X+r.Min.X-at.X, src.Rect.Min.Y+y-at.Y)
+		copy(dst.Pix[d:d+r.Dx()], src.Pix[s:s+r.Dx()])
+	}
 }

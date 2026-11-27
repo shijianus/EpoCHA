@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	stddraw "image/draw"
 	"io"
 	mrand "math/rand"
 	"strconv"
@@ -280,8 +279,7 @@ func renderEnergyWindow(spec energySpec) ([]byte, error) {
 			}
 		}
 		col, row := f%energyCols, f/energyCols
-		stddraw.Draw(sheet, image.Rect(col*energyFrameW, row*energyFrameH,
-			(col+1)*energyFrameW, (row+1)*energyFrameH), frame, image.Point{}, stddraw.Src)
+		copyGrayFrame(sheet, image.Pt(col*energyFrameW, row*energyFrameH), frame)
 	}
 	return encodeGrayPNG(sheet)
 }

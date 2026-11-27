@@ -446,11 +446,25 @@ func (g TileRotation) Generate(ctx context.Context, p Params, entropy io.Reader)
 	if err != nil {
 		return Question{}, err
 	}
+	// Vary the visible route geometry while keeping rotation ports at the edge
+	// midpoints. These points affect every drawn path, never the answer masks.
+	var junctions [tileRotationCells]image.Point
+	for i := range junctions {
+		x, err := drawInt(entropy, -12, 12)
+		if err != nil {
+			return Question{}, err
+		}
+		y, err := drawInt(entropy, -12, 12)
+		if err != nil {
+			return Question{}, err
+		}
+		junctions[i] = image.Pt(int(x), int(y))
+	}
 	nonce := make([]byte, verifierNonceSz)
 	if _, err := io.ReadFull(entropy, nonce); err != nil {
 		return Question{}, fmt.Errorf("%w: %v", ErrOutOfEntropy, err)
 	}
-	asset, err := renderTileRotation(spec.Initial[:])
+	asset, err := renderTileRotation(spec.Initial[:], junctions)
 	if err != nil {
 		return Question{}, err
 	}
@@ -559,13 +573,14 @@ func tileRotationCenter(r, c int) image.Point {
 	)
 }
 
-func renderTileRotation(masks []edgeMask) ([]byte, error) {
+func renderTileRotation(masks []edgeMask, junctions [tileRotationCells]image.Point) ([]byte, error) {
 	img := image.NewGray(image.Rect(0, 0, TileRotationWidth, TileRotationHeight))
 	fillGrayRect(img, 0, 0, TileRotationWidth, TileRotationHeight, 236)
 	for r := 0; r < tileRotationRows; r++ {
 		for c := 0; c < tileRotationCols; c++ {
 			idx := r*tileRotationCols + c
 			p := tileRotationCenter(r, c)
+			junction := p.Add(junctions[idx])
 			rect := image.Rect(p.X-tileRotationCell/2, p.Y-tileRotationCell/2,
 				p.X+tileRotationCell/2, p.Y+tileRotationCell/2)
 			fillGrayRect(img, rect.Min.X, rect.Min.Y, tileRotationCell, tileRotationCell, 228)
@@ -573,16 +588,16 @@ func renderTileRotation(masks []edgeMask) ([]byte, error) {
 			m := masks[idx] & 0x0f
 			half := tileRotationCell / 2
 			if m&edgeN != 0 {
-				drawThickSegment(img, p, image.Pt(p.X, p.Y-half), 4, 46)
+				drawThickSegment(img, junction, image.Pt(p.X, p.Y-half), 4, 46)
 			}
 			if m&edgeE != 0 {
-				drawThickSegment(img, p, image.Pt(p.X+half, p.Y), 4, 46)
+				drawThickSegment(img, junction, image.Pt(p.X+half, p.Y), 4, 46)
 			}
 			if m&edgeS != 0 {
-				drawThickSegment(img, p, image.Pt(p.X, p.Y+half), 4, 46)
+				drawThickSegment(img, junction, image.Pt(p.X, p.Y+half), 4, 46)
 			}
 			if m&edgeW != 0 {
-				drawThickSegment(img, p, image.Pt(p.X-half, p.Y), 4, 46)
+				drawThickSegment(img, junction, image.Pt(p.X-half, p.Y), 4, 46)
 			}
 			// 方向标记：靠 N 侧的小点，旋转后位置改变，对称路径块也能看出朝向。
 			fillCircle(img, p.X, p.Y-22, 3, 40)

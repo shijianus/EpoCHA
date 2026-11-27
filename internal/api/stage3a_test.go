@@ -23,7 +23,7 @@ import (
 // solveTaskText 是一个**独立**的表达式求值器（测试侧实现），把题面文本算成答案。
 // 不复用被测生成器的计算路径：如果生成器"声称的答案"与"题面真正的值"不一致，
 // 这里的兑换就会失败，从而把渲染/计算不一致钉死。
-// 语法契约与生成器一致：“ 或 "(a op b) op c"，运算符 + - × ÷，÷ 保证整除。
+// 同时覆盖旧题面和两组括号题面；每组括号内只有一次运算。
 func solveTaskText(t *testing.T, task string) int64 {
 	t.Helper()
 	inner := task
@@ -38,7 +38,11 @@ func solveTaskText(t *testing.T, task string) int64 {
 			return v
 		}
 		op := string([]rune(rest)[0])
-		num, err := strconv.ParseInt(strings.TrimSpace(rest[len(op):]), 10, 64)
+		tail := strings.TrimSpace(rest[len(op):])
+		if strings.HasPrefix(tail, "(") && strings.HasSuffix(tail, ")") {
+			return applyOp(t, v, op, evalFlatText(t, tail[1:len(tail)-1]))
+		}
+		num, err := strconv.ParseInt(tail, 10, 64)
 		if err != nil {
 			t.Fatalf("括号后的片段不合法：%q", task)
 		}

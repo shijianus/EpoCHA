@@ -79,21 +79,21 @@ func (ArithmeticBaseline) Media() string   { return "text" }
 // difficultySpec 把 1..5 档映射成有界参数范围。范围是工程选择，不构成任何安全性论断。
 type difficultySpec struct {
 	minOperand, maxOperand int
-	terms                  int // 1 → "a op b"；2 → "(a op b) op c"
+	outerMul               bool // d4/d5 allow multiplying the two bracketed results
 	allowMul, allowDiv     bool
 }
 
 var arithDifficulty = map[int]difficultySpec{
-	1: {minOperand: 2, maxOperand: 12, terms: 1},
-	2: {minOperand: 2, maxOperand: 20, terms: 1, allowMul: true},
-	3: {minOperand: 3, maxOperand: maxOperand, terms: 1, allowMul: true, allowDiv: true},
-	4: {minOperand: 2, maxOperand: 20, terms: 2, allowMul: true},
-	5: {minOperand: 3, maxOperand: 30, terms: 2, allowMul: true, allowDiv: true},
+	1: {minOperand: 2, maxOperand: maxOperand},
+	2: {minOperand: 2, maxOperand: maxOperand, allowMul: true},
+	3: {minOperand: 2, maxOperand: maxOperand, allowMul: true, allowDiv: true},
+	4: {minOperand: 2, maxOperand: maxOperand, allowMul: true, outerMul: true},
+	5: {minOperand: 2, maxOperand: maxOperand, allowMul: true, allowDiv: true, outerMul: true},
 }
 
 // Generate 抽一道题。entropy 必须是调用方给的 CSPRNG 流（生产路径是 crypto/rand.Reader）。
 //
-// 两项式一律渲染成 "(a op b) op c"：结合顺序由题面文本确定，不依赖读者的优先级常识——
+// 四个操作数渲染成 "(a op b) op (c op d)"：结合顺序由括号确定——
 // 优先级歧义会让"正确答案"变成两个。除法只在能整除时使用（除数取自当前值的真实因子），
 // 因此不存在除零与余数含糊。
 func (g ArithmeticBaseline) Generate(ctx context.Context, p Params, entropy io.Reader) (Question, error) {
@@ -213,64 +213,82 @@ func (ArithmeticBaseline) SanitizePublic(raw []byte) (map[string]any, error) {
 // 由 Generate 的**有界**重试循环处理——这里不放无界循环，也不靠"重画某个数"补救，
 // 因为补救会改变算子与答案的联合分布，而我需要如实报告那个分布。
 func buildExpr(entropy io.Reader, spec difficultySpec) (answer int64, task string, ok bool) {
-	acc, err := drawInt(entropy, int64(spec.minOperand), int64(spec.maxOperand))
+	left, leftTask, ok := buildArithPair(entropy, spec)
+	if !ok {
+		return 0, "", false
+	}
+	right, rightTask, ok := buildArithPair(entropy, spec)
+	if !ok {
+		return 0, "", false
+	}
+	op, err := drawOp(entropy, difficultySpec{allowMul: spec.outerMul})
 	if err != nil {
 		return 0, "", false
 	}
-	first := ""
-	rest := []string{}
-	for i := 0; i < spec.terms; i++ {
-		op, err := drawOp(entropy, spec)
-		if err != nil {
-			return 0, "", false
-		}
-		// 除法把右操作数限制在 2..9：小除数更容易整除，减少重试次数，
-		// 同时保证除数非零、商为整数（不存在余数含糊）。
-		lo, hi := int64(spec.minOperand), int64(spec.maxOperand)
-		if op == '/' {
-			lo, hi = 2, 9
-		}
-		next, err := drawInt(entropy, lo, hi)
-		if err != nil {
-			return 0, "", false
-		}
-		var val int64
-		switch op {
-		case '+':
-			val = acc + next
-		case '-':
-			val = acc - next
-		case 'x':
-			if next != 0 && (acc > maxAnswerValue/next || acc < -maxAnswerValue/next) {
-				return 0, "", false
-			}
-			val = acc * next
-		case '/':
-			if next == 0 || acc%next != 0 {
-				return 0, "", false
-			}
-			val = acc / next
-		default:
-			return 0, "", false
-		}
-		if val > maxAnswerValue || val < -maxAnswerValue {
-			return 0, "", false
-		}
-		if i == 0 {
-			first = fmt.Sprintf("%d %s %d", acc, opSymbol(op), next)
-		} else {
-			rest = append(rest, fmt.Sprintf(" %s %d", opSymbol(op), next))
-		}
-		acc = val
-	}
-	task = first
-	if spec.terms == 2 {
-		task = "(" + first + ")" + strings.Join(rest, "")
-	}
-	if len(task) == 0 || len(task) > maxTaskLen {
+	answer, ok = boundedArith(left, right, op)
+	if !ok {
 		return 0, "", false
 	}
-	return acc, task, true
+	task = "(" + leftTask + ") " + opSymbol(op) + " (" + rightTask + ")"
+	return answer, task, len(task) <= maxTaskLen
+}
+
+func buildArithPair(entropy io.Reader, spec difficultySpec) (int64, string, bool) {
+	a, err := drawInt(entropy, int64(spec.minOperand), int64(spec.maxOperand))
+	if err != nil {
+		return 0, "", false
+	}
+	op, err := drawOp(entropy, spec)
+	if err != nil {
+		return 0, "", false
+	}
+	lo, hi := int64(spec.minOperand), int64(spec.maxOperand)
+	if op == '/' {
+		lo, hi = minDivisorCand, maxDivisorCand
+	}
+	b, err := drawInt(entropy, lo, hi)
+	if err != nil {
+		return 0, "", false
+	}
+	value, ok := boundedArith(a, b, op)
+	if !ok {
+		return 0, "", false
+	}
+	return value, fmt.Sprintf("%d %s %d", a, opSymbol(op), b), true
+}
+
+func boundedArith(a, b int64, op byte) (int64, bool) {
+	if a < -maxAnswerValue || a > maxAnswerValue || b < -maxAnswerValue || b > maxAnswerValue {
+		return 0, false
+	}
+	var value int64
+	switch op {
+	case '+':
+		value = a + b
+	case '-':
+		value = a - b
+	case 'x':
+		// Bracketed results can be negative; guard both signs before multiplication.
+		aa, bb := a, b
+		if aa < 0 {
+			aa = -aa
+		}
+		if bb < 0 {
+			bb = -bb
+		}
+		if bb != 0 && aa > maxAnswerValue/bb {
+			return 0, false
+		}
+		value = a * b
+	case '/':
+		if b < minDivisorCand || b > maxDivisorCand || a%b != 0 {
+			return 0, false
+		}
+		value = a / b
+	default:
+		return 0, false
+	}
+	return value, value >= -maxAnswerValue && value <= maxAnswerValue
 }
 
 func drawOp(r io.Reader, spec difficultySpec) (byte, error) {

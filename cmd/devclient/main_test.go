@@ -99,6 +99,24 @@ func TestEvalExprAnswersTasks(t *testing.T) {
 	}
 }
 
+func TestEvalExprTwoPairs(t *testing.T) {
+	for task, want := range map[string]int64{
+		"(12 + 7) - (3 + 2)": 14,
+		"(2 - 9) × (4 - 8)":  28,
+		"(56 ÷ 8) + (9 × 8)": 79,
+	} {
+		got, err := evalExpr(task)
+		if err != nil || got != want {
+			t.Errorf("evalExpr(%q) = %d, %v; want %d", task, got, err, want)
+		}
+	}
+	for _, bad := range []string{"(1 + 2) + (3 + 4", "(1 + 2) + (3 + 4) junk", "(1 + 2) + ((3 + 4))", "(1 + 2) + (3 ÷ 0)", "(1 + 2) + (3 + 4 + 5)"} {
+		if _, err := evalExpr(bad); err == nil {
+			t.Errorf("accepted malformed expression %q", bad)
+		}
+	}
+}
+
 // challengeResp.answer 决定 devclient 走 pow_only 还是 pow_question 形状：
 // 带题面就必须带答案，不带题面就不能凭空造一个 answer 字段（阶段 1/2 的契约不能变形）。
 func TestAnswerFieldFollowsMode(t *testing.T) {

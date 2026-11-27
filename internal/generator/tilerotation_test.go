@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
 	"image/png"
 	"strings"
 	"testing"
@@ -162,6 +163,65 @@ func TestTileRotationAssetBudgetAndFormat(t *testing.T) {
 	}
 	if cfg.Width != TileRotationWidth || cfg.Height != TileRotationHeight {
 		t.Fatalf("asset 尺寸 = %dx%d", cfg.Width, cfg.Height)
+	}
+}
+
+// Decode the rendered pixels independently: geometric variety must not change
+// the edge masks or disconnect any arm from its junction.
+func TestTileRotationVisibleGeometryMatchesMasks(t *testing.T) {
+	offsets := [tileRotationCells]image.Point{
+		{X: -12, Y: -12}, {X: 0, Y: -12}, {X: 12, Y: -12},
+		{X: -12, Y: 0}, {}, {X: 12, Y: 0},
+		{X: -12, Y: 12}, {X: 0, Y: 12}, {X: 12, Y: 12},
+	}
+	for mask := edgeMask(1); mask < 16; mask++ {
+		masks := make([]edgeMask, tileRotationCells)
+		for i := range masks {
+			masks[i] = mask
+		}
+		asset, err := renderTileRotation(masks, offsets)
+		if err != nil {
+			t.Fatal(err)
+		}
+		img, err := png.Decode(bytes.NewReader(asset))
+		if err != nil {
+			t.Fatal(err)
+		}
+		dark := func(p image.Point) bool { r, _, _, _ := img.At(p.X, p.Y).RGBA(); return r < 100*257 }
+		for i, offset := range offsets {
+			center := tileRotationCenter(i/3, i%3)
+			rect := image.Rect(center.X-48, center.Y-48, center.X+48, center.Y+48)
+			start := center.Add(offset)
+			if !dark(start) {
+				t.Fatalf("mask=%x cell=%d missing junction", mask, i)
+			}
+			seen := map[image.Point]bool{start: true}
+			queue := []image.Point{start}
+			for len(queue) > 0 {
+				p := queue[0]
+				queue = queue[1:]
+				for _, step := range []image.Point{{X: 1}, {X: -1}, {Y: 1}, {Y: -1}} {
+					n := p.Add(step)
+					if n.In(rect) && !seen[n] && dark(n) {
+						seen[n] = true
+						queue = append(queue, n)
+					}
+				}
+			}
+			ports := []image.Point{{X: center.X, Y: rect.Min.Y}, {X: rect.Max.X - 1, Y: center.Y}, {X: center.X, Y: rect.Max.Y - 1}, {X: rect.Min.X, Y: center.Y}}
+			for side, port := range ports {
+				want := mask&(1<<side) != 0
+				if dark(port) != want || seen[port] != want {
+					t.Fatalf("mask=%x cell=%d port=%d ink/connected disagree", mask, i, side)
+				}
+			}
+			for p := range seen {
+				if (p.X == rect.Min.X || p.X == rect.Max.X-1) && abs64(int64(p.Y-center.Y)) > 3 ||
+					(p.Y == rect.Min.Y || p.Y == rect.Max.Y-1) && abs64(int64(p.X-center.X)) > 3 {
+					t.Fatalf("mask=%x cell=%d stray boundary crossing %v", mask, i, p)
+				}
+			}
+		}
 	}
 }
 

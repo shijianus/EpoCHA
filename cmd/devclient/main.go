@@ -558,7 +558,7 @@ func randStart() (int64, error) {
 }
 
 // evalExpr 求 arithmetic-baseline 题面的值。它是 devclient 自己的实现，
-// 语法契约与生成器一致："a op b" 或 "(a op b) op c"，运算符 + - × ÷，÷ 保证整除。
+// 同时支持旧题面和两组括号题面，运算符 + - × ÷，÷ 保证整除。
 // 验收脚本用它来"真实答题"：既没有读数据库里的答案，也没有硬编码固定解。
 func evalExpr(task string) (int64, error) {
 	inner := task
@@ -579,7 +579,13 @@ func evalExpr(task string) (int64, error) {
 		if !found {
 			return 0, errors.New("括号后缺少运算符")
 		}
-		n, err := strconv.ParseInt(strings.TrimSpace(tail), 10, 64)
+		tail = strings.TrimSpace(tail)
+		var n int64
+		if strings.HasPrefix(tail, "(") && strings.HasSuffix(tail, ")") {
+			n, err = evalFlat(tail[1 : len(tail)-1])
+		} else {
+			n, err = strconv.ParseInt(tail, 10, 64)
+		}
 		if err != nil {
 			return 0, err
 		}

@@ -778,6 +778,10 @@ func evalArithText(t *testing.T, task string) string {
 		inner := strings.Fields(s[1:end])
 		v := apply(num(inner[0]), inner[1], num(inner[2]))
 		rest := strings.Fields(s[end+1:])
+		if len(rest) == 4 && strings.HasPrefix(rest[1], "(") && strings.HasSuffix(rest[3], ")") {
+			right := apply(num(strings.TrimPrefix(rest[1], "(")), rest[2], num(strings.TrimSuffix(rest[3], ")")))
+			return itoa(apply(v, rest[0], right))
+		}
 		return itoa(apply(v, rest[0], num(rest[1])))
 	}
 	f := strings.Fields(s)

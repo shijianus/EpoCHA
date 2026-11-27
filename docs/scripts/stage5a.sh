@@ -248,6 +248,14 @@ admin_json() {
   sed -n '2,$p' "$raw" >"$out"
 }
 
+avail_kb() {
+  local report available
+  report="$(df -Pk "$WORK")" || return 1
+  available="$(awk 'NR==2 {print $4}' <<<"$report")"
+  [[ "$available" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$available"
+}
+
 port_listening() { # $1=端口 → 0=在监听 1=空闲 2=测不出来（**绝不**把“测不出来”当成“空闲”）
   local out rc=0 body
   out="$(ss -ltn "sport = :$1" 2>/dev/null)" || rc=$?

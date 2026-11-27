@@ -160,3 +160,16 @@ test('stage5a image cleanup preserves existing and replaced references', () => {
     assert.equal(audit.status, expected && expected !== actual ? 1 : 0);
   }
 });
+
+test('stage5a disk probe checks the workspace and rejects missing or invalid evidence', () => {
+  const body = read('docs/scripts/stage5a.sh').match(/avail_kb\(\) \{[^]*?\n\}/)?.[0];
+  assert.ok(body, 'stage5a must define its disk probe before invoking it');
+  for (const [value, rc] of [['204800', 0], ['0', 0], ['', 1], ['unknown', 1]]) {
+    const result = spawnSync('bash', ['-c', `${body}\ndf() { [[ "$*" == '-Pk /fixture' ]] || return 71; printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/data 999 1 %s 1%% /fixture\\n' "$VALUE"; }; WORK=/fixture; avail_kb`], {
+      env: {...process.env, VALUE:value}, encoding:'utf8',timeout:5000,
+    });
+    assert.equal(result.status, rc, result.stderr);
+    if (rc === 0) assert.equal(result.stdout.trim(), value);
+  }
+  assert.notEqual(spawnSync('bash', ['-c', `${body}\ndf() { return 72; }; WORK=/fixture; avail_kb`], {encoding:'utf8',timeout:5000}).status, 0);
+});
